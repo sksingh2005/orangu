@@ -137,6 +137,7 @@ pub fn render_screen(
     current_model: &str,
     endpoint: &str,
     workspace: &std::path::Path,
+    prompt_branch: Option<&str>,
     status: HeaderStatus,
     transcript: &[String],
     pending_line: Option<&str>,
@@ -146,7 +147,8 @@ pub fn render_screen(
     let header = render_header(version, current_model, endpoint, workspace, status);
     let header_line_count = header.lines().count();
     let width = terminal_width().max(1);
-    let input_lines = wrapped_input_lines(input, width);
+    let prompt_prefix = prompt_prefix(prompt_branch);
+    let input_lines = wrapped_input_lines(input, width, &prompt_prefix);
     let prompt_frame_height = input_lines.len() + 3;
     let height = terminal_height().max(header_line_count + prompt_frame_height + 1);
     let output_start_row = header_line_count + 2;
@@ -174,6 +176,7 @@ pub fn render_screen(
     screen.push_str(&render_prompt_frame(
         header_line_count,
         current_model,
+        &prompt_prefix,
         input,
         cursor,
         width,
@@ -246,12 +249,13 @@ fn status_indicator_line(text: &str, ok: bool) -> HeaderLine {
 fn render_prompt_frame(
     header_height: usize,
     current_model: &str,
+    prompt_prefix: &str,
     input: &str,
     cursor: usize,
     width: usize,
     height: usize,
 ) -> String {
-    let input_lines = wrapped_input_lines(input, width);
+    let input_lines = wrapped_input_lines(input, width, prompt_prefix);
     let input_height = input_lines.len();
     let height = height.max(header_height + input_height + 3);
     let top_row = (height.saturating_sub(input_height + 2)).max(header_height + 1);
@@ -261,21 +265,23 @@ fn render_prompt_frame(
     let line = "━".repeat(width);
     let model_width = current_model.chars().count();
     let padding = width.saturating_sub(model_width);
+    let prompt_width = prompt_prefix.chars().count();
     let mut frame = format!("\x1b[{top_row};1H{line}");
 
     for (index, input_line) in input_lines.iter().enumerate() {
         let row = input_start_row + index;
-        let content = truncate_to_width(input_line, width.saturating_sub(2));
+        let content = truncate_to_width(input_line, width.saturating_sub(prompt_width));
         let content_width = content.chars().count();
-        frame.push_str(&format!("\x1b[{row};1H> {}", content));
-        if width > content_width + 2 {
-            frame.push_str(&" ".repeat(width - content_width - 2));
+        frame.push_str(&format!("\x1b[{row};1H{prompt_prefix}{content}"));
+        if width > content_width + prompt_width {
+            frame.push_str(&" ".repeat(width - content_width - prompt_width));
         }
     }
 
-    let (cursor_row_offset, cursor_col_offset) = cursor_position(input, cursor, width);
+    let (cursor_row_offset, cursor_col_offset) =
+        cursor_position(input, cursor, width, prompt_prefix);
     let cursor_row = input_start_row + cursor_row_offset;
-    let cursor_col = 3 + cursor_col_offset;
+    let cursor_col = 1 + prompt_width + cursor_col_offset;
 
     frame.push_str(&format!(
         "\x1b[{bottom_row};1H{line}\x1b[{model_row};1H{}{current_model}\x1b[{cursor_row};{cursor_col}H",
@@ -284,8 +290,8 @@ fn render_prompt_frame(
     frame
 }
 
-fn wrapped_input_lines(input: &str, width: usize) -> Vec<String> {
-    let input_width = width.saturating_sub(2).max(1);
+fn wrapped_input_lines(input: &str, width: usize, prompt_prefix: &str) -> Vec<String> {
+    let input_width = width.saturating_sub(prompt_prefix.chars().count()).max(1);
     if input.is_empty() {
         return vec![String::new()];
     }
@@ -310,10 +316,22 @@ fn wrapped_input_lines(input: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn cursor_position(input: &str, cursor: usize, width: usize) -> (usize, usize) {
-    let input_width = width.saturating_sub(2).max(1);
+fn cursor_position(
+    input: &str,
+    cursor: usize,
+    width: usize,
+    prompt_prefix: &str,
+) -> (usize, usize) {
+    let input_width = width.saturating_sub(prompt_prefix.chars().count()).max(1);
     let prefix_chars = input[..cursor.min(input.len())].chars().count();
     (prefix_chars / input_width, prefix_chars % input_width)
+}
+
+fn prompt_prefix(branch_name: Option<&str>) -> String {
+    match branch_name {
+        Some(branch_name) if !branch_name.trim().is_empty() => format!("{branch_name}> "),
+        _ => "> ".to_string(),
+    }
 }
 
 fn truncate_to_width(input: &str, width: usize) -> String {
@@ -429,7 +447,9 @@ impl Completer for OranguHelper {
 
 #[cfg(test)]
 mod tests {
-    use super::{ANSI_RESET, THINKING_TEXT, render_thinking_frame};
+    use super::{
+        ANSI_RESET, THINKING_TEXT, prompt_prefix, render_thinking_frame, wrapped_input_lines,
+    };
     use std::time::Duration;
 
     #[test]
@@ -447,5 +467,19 @@ mod tests {
         for ch in THINKING_TEXT.chars() {
             assert!(frame_zero.contains(ch));
         }
+    }
+
+    #[test]
+    fn prompt_prefix_uses_branch_name() {
+        assert_eq!(prompt_prefix(Some("main")), "main> ");
+        assert_eq!(prompt_prefix(None), "> ");
+    }
+
+    #[test]
+    fn wrapped_input_lines_respect_prompt_width() {
+        assert_eq!(
+            wrapped_input_lines("abc", 8, "main> "),
+            vec!["ab".to_string(), "c".to_string()]
+        );
     }
 }

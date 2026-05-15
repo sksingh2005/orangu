@@ -94,6 +94,7 @@ async fn run() -> Result<()> {
     let tools = ToolExecutor::new(&workspace);
 
     let model_names = sorted_model_names(&config.llms);
+    let prompt_branch = workspace_branch_name(&workspace);
     let startup_model = config.default_model.clone();
     let startup_endpoint = config
         .llms
@@ -137,6 +138,7 @@ async fn run() -> Result<()> {
             &active_model,
             current_endpoint.as_deref().unwrap_or("(disconnected)"),
             tools.workspace(),
+            prompt_branch.as_deref(),
             header_status,
             &transcript,
             None,
@@ -154,6 +156,7 @@ async fn run() -> Result<()> {
             &mut transcript,
             &active_model,
             current_endpoint.as_deref().unwrap_or("(disconnected)"),
+            prompt_branch.as_deref(),
             header_status,
         )? {
             InputResult::Submitted(line) => line,
@@ -179,6 +182,7 @@ async fn run() -> Result<()> {
             &active_model,
             current_endpoint.as_deref().unwrap_or("(disconnected)"),
             tools.workspace(),
+            prompt_branch.as_deref(),
             header_status,
             &transcript,
             None,
@@ -235,6 +239,7 @@ async fn run() -> Result<()> {
             &active_model,
             endpoint,
             tools.workspace(),
+            prompt_branch.as_deref(),
             header_status,
             &transcript,
         )
@@ -483,6 +488,7 @@ fn read_input(
     transcript: &mut Vec<String>,
     current_model: &str,
     endpoint: &str,
+    prompt_branch: Option<&str>,
     header_status: HeaderStatus,
 ) -> Result<InputResult> {
     loop {
@@ -597,6 +603,7 @@ fn read_input(
                 current_model,
                 endpoint,
                 workspace,
+                prompt_branch,
                 header_status,
                 transcript,
                 None,
@@ -1224,6 +1231,33 @@ fn shell_words(input: &str) -> Result<Vec<String>> {
     Ok(words)
 }
 
+fn workspace_branch_name(workspace: &Path) -> Option<String> {
+    let git_dir = discover_git_dir(workspace)?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let reference = head.trim().strip_prefix("ref: ")?;
+    reference.strip_prefix("refs/heads/").map(ToOwned::to_owned)
+}
+
+fn discover_git_dir(workspace: &Path) -> Option<PathBuf> {
+    for ancestor in workspace.ancestors() {
+        let git_entry = ancestor.join(".git");
+        if git_entry.is_dir() {
+            return Some(git_entry);
+        }
+        if git_entry.is_file() {
+            let gitdir = fs::read_to_string(&git_entry).ok()?;
+            let relative = gitdir.trim().strip_prefix("gitdir: ")?.trim();
+            let path = Path::new(relative);
+            return Some(if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                ancestor.join(path)
+            });
+        }
+    }
+    None
+}
+
 fn system_prompt(profile: &LlmConfiguration) -> &str {
     if profile.system_prompt.is_empty() {
         "You are Orangu, a coding environment assistant connected to a local workspace. Use the available local tools to inspect files, edit files on disk, fetch external URLs for knowledge, and run shell commands when needed. Be precise, explain what you changed, and surface tool failures explicitly."
@@ -1242,6 +1276,7 @@ fn print_screen(
     current_model: &str,
     endpoint: &str,
     workspace: &std::path::Path,
+    prompt_branch: Option<&str>,
     header_status: HeaderStatus,
     transcript: &[String],
     pending_line: Option<&str>,
@@ -1256,6 +1291,7 @@ fn print_screen(
             current_model,
             endpoint,
             workspace,
+            prompt_branch,
             header_status,
             transcript,
             pending_line,
@@ -1273,6 +1309,7 @@ async fn wait_for_response(
     current_model: &str,
     endpoint: &str,
     workspace: &std::path::Path,
+    prompt_branch: Option<&str>,
     header_status: HeaderStatus,
     transcript: &[String],
 ) -> Result<String> {
@@ -1286,6 +1323,7 @@ async fn wait_for_response(
         current_model,
         endpoint,
         workspace,
+        prompt_branch,
         header_status,
         transcript,
         Some(initial_frame.as_str()),
@@ -1305,6 +1343,7 @@ async fn wait_for_response(
                     current_model,
                     endpoint,
                     workspace,
+                    prompt_branch,
                     header_status,
                     transcript,
                     Some(pending_line.as_str()),
@@ -1461,8 +1500,8 @@ fn format_tools(tools: &ToolExecutor) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        LocalCommand, completion_candidates, parse_local_command, resolve_workspace_root,
-        shell_words,
+        LocalCommand, completion_candidates, discover_git_dir, parse_local_command,
+        resolve_workspace_root, shell_words, workspace_branch_name,
     };
     use std::{fs, path::PathBuf};
     use tempfile::tempdir;
@@ -1547,6 +1586,22 @@ mod tests {
     fn leaves_regular_prompts_unhandled() {
         assert!(parse_local_command("help me understand this code").is_none());
         assert!(parse_local_command("show me the files in the workspace").is_none());
+    }
+
+    #[test]
+    fn discovers_git_branch_name_from_workspace() {
+        let workspace = tempdir().expect("workspace");
+        fs::create_dir(workspace.path().join(".git")).expect("git dir");
+        fs::write(workspace.path().join(".git/HEAD"), "ref: refs/heads/main\n").expect("head");
+
+        assert_eq!(
+            workspace_branch_name(workspace.path()).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            discover_git_dir(workspace.path()).as_deref(),
+            Some(workspace.path().join(".git").as_path())
+        );
     }
 
     #[test]
