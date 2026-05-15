@@ -156,6 +156,10 @@ fn normalize_openai_endpoint(endpoint: &str) -> String {
     endpoint.strip_suffix("/v1").unwrap_or(endpoint).to_string()
 }
 
+pub fn normalized_openai_endpoint(endpoint: &str) -> String {
+    normalize_openai_endpoint(endpoint)
+}
+
 fn parse_tool_arguments(arguments: &str) -> Result<HashMap<String, serde_json::Value>> {
     let trimmed = arguments.trim();
     if trimmed.is_empty() {

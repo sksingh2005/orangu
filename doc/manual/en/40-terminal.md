@@ -45,6 +45,15 @@ Use:
 - `<ARROW_UP>` to move backward in history
 - `<ARROW_DOWN>` to move forward in history
 
+## Connection commands
+
+`orangu` supports runtime server target control:
+
+- `/connect` reconnects to the configured endpoint of the active model profile
+- `/connect <url>` sets a specific current server target
+- `/disconnect` disconnects from the current server target
+- `/reload` restores the startup model and configured server target and clears the current conversation
+
 ## Editing keys
 
 The prompt supports standard shell-style editing:

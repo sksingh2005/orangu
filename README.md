@@ -23,6 +23,13 @@ Or use `--config` to point to a configuration file.
 orangu
 ```
 
+Useful runtime commands:
+
+- `/connect` reconnects to the configured endpoint for the active model profile
+- `/connect <url>` switches the current server target to a specific endpoint
+- `/disconnect` disconnects from the current server target
+- `/reload` restores the startup model and configured server target
+
 ## Community
 
 Contributions to [**orangu**](https://github.com/mnemosyne-systems/orangu) are managed on Git Hub

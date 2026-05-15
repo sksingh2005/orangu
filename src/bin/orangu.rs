@@ -21,10 +21,12 @@ use crossterm::{
 };
 use orangu::{
     config::{LlmConfiguration, default_client_config_path, load_client_configuration},
+    llm::normalized_openai_endpoint,
     session::ChatSession,
     tools::ToolExecutor,
-    tui::{help_text, render_screen},
+    tui::{HeaderStatus, help_text, render_screen},
 };
+use serde::Deserialize;
 use std::{
     collections::HashMap,
     fs,
@@ -43,6 +45,9 @@ const HISTORY_DIRECTORY: &str = "orangu";
 const HISTORY_FILE: &str = "orangu.history";
 const COMMANDS: &[&str] = &[
     "/help",
+    "/connect",
+    "/disconnect",
+    "/reload",
     "/list-models",
     "/tools",
     "/model",
@@ -87,13 +92,21 @@ async fn run() -> Result<()> {
     let tools = ToolExecutor::new(&workspace);
 
     let model_names = sorted_model_names(&config.llms);
-    let mut active_model = config.default_model.clone();
+    let startup_model = config.default_model.clone();
+    let startup_endpoint = config
+        .llms
+        .get(&startup_model)
+        .ok_or_else(|| anyhow!("missing configured profile {}", startup_model))?
+        .endpoint
+        .clone();
+    let mut active_model = startup_model.clone();
     let mut session = ChatSession::new(system_prompt(
         config
             .llms
             .get(&active_model)
             .ok_or_else(|| anyhow!("missing configured profile {}", active_model))?,
     ));
+    let mut current_endpoint = Some(startup_endpoint.clone());
     let _raw_mode_guard = RawModeGuard::new()?;
 
     let mut transcript = Vec::new();
@@ -101,16 +114,28 @@ async fn run() -> Result<()> {
     let mut input_state = InputState::default();
     let history_path = history_file_path()?;
     let mut history = load_history(&history_path)?;
+    let status_http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()?;
 
     loop {
         let active_profile = config
             .llms
             .get(&active_model)
             .ok_or_else(|| anyhow!("missing configured profile {}", active_model))?;
+        let header_status = probe_header_status(
+            &status_http_client,
+            tools.workspace(),
+            &active_model,
+            active_profile,
+            current_endpoint.as_deref(),
+        )
+        .await;
         print_screen(
             &active_model,
-            &active_profile.endpoint,
+            current_endpoint.as_deref().unwrap_or("(disconnected)"),
             tools.workspace(),
+            header_status,
             &transcript,
             None,
             input_state.as_str(),
@@ -126,7 +151,8 @@ async fn run() -> Result<()> {
             &mut interrupt_state,
             &mut transcript,
             &active_model,
-            &active_profile.endpoint,
+            current_endpoint.as_deref().unwrap_or("(disconnected)"),
+            header_status,
         )? {
             InputResult::Submitted(line) => line,
             InputResult::Quit => {
@@ -146,8 +172,9 @@ async fn run() -> Result<()> {
         push_transcript(&mut transcript, &format!("> {trimmed}"));
         print_screen(
             &active_model,
-            &active_profile.endpoint,
+            current_endpoint.as_deref().unwrap_or("(disconnected)"),
             tools.workspace(),
+            header_status,
             &transcript,
             None,
             input_state.as_str(),
@@ -158,6 +185,9 @@ async fn run() -> Result<()> {
         match handle_command(
             trimmed,
             &mut active_model,
+            &mut current_endpoint,
+            &startup_model,
+            &startup_endpoint,
             &config.llms,
             &mut session,
             &tools,
@@ -183,20 +213,27 @@ async fn run() -> Result<()> {
             .llms
             .get(&active_model)
             .ok_or_else(|| anyhow!("unknown model profile '{active_model}'"))?;
+        let Some(endpoint) = current_endpoint.as_deref() else {
+            push_transcript(&mut transcript, "Error: Not connected to an LLM server");
+            continue;
+        };
+        let mut prompt_profile = profile.clone();
+        prompt_profile.endpoint = endpoint.to_string();
         match wait_for_response(
             &mut session,
             trimmed,
-            profile,
+            &prompt_profile,
             &tools,
             &active_model,
-            &active_profile.endpoint,
+            endpoint,
             tools.workspace(),
+            header_status,
             &transcript,
         )
         .await
         {
             Ok(answer) => push_transcript(&mut transcript, &answer),
-            Err(err) => push_transcript(&mut transcript, &format!("error: {err:#}")),
+            Err(err) => push_transcript(&mut transcript, &format!("Error: {err:#}")),
         }
     }
 
@@ -423,6 +460,7 @@ fn read_input(
     transcript: &mut Vec<String>,
     current_model: &str,
     endpoint: &str,
+    header_status: HeaderStatus,
 ) -> Result<InputResult> {
     loop {
         let mut redraw = false;
@@ -536,6 +574,7 @@ fn read_input(
                 current_model,
                 endpoint,
                 workspace,
+                header_status,
                 transcript,
                 None,
                 input_state.as_str(),
@@ -745,6 +784,9 @@ enum CommandOutcome {
 fn handle_command(
     input: &str,
     active_model: &mut String,
+    current_endpoint: &mut Option<String>,
+    startup_model: &str,
+    startup_endpoint: &str,
     llms: &HashMap<String, LlmConfiguration>,
     session: &mut ChatSession,
     tools: &ToolExecutor,
@@ -769,7 +811,8 @@ fn handle_command(
     }
     if input == "/model" {
         return Ok(CommandOutcome::Output(format!(
-            "active model: {active_model}\nprofiles: {}",
+            "active model: {active_model}\nserver: {}\nprofiles: {}",
+            current_endpoint.as_deref().unwrap_or("(disconnected)"),
             sorted_model_names(llms).join(", ")
         )));
     }
@@ -785,6 +828,41 @@ fn handle_command(
         session.set_system_prompt(system_prompt(&llms[name]));
         return Ok(CommandOutcome::Output(format!(
             "switched to model profile '{name}'"
+        )));
+    }
+    if input == "/connect" {
+        let endpoint = llms
+            .get(active_model)
+            .ok_or_else(|| anyhow!("unknown model profile '{active_model}'"))?
+            .endpoint
+            .clone();
+        *current_endpoint = Some(endpoint.clone());
+        return Ok(CommandOutcome::Output(format!("Connected to '{endpoint}'")));
+    }
+    if let Some(endpoint) = input.strip_prefix("/connect ") {
+        let endpoint = endpoint.trim();
+        if endpoint.is_empty() {
+            return Ok(CommandOutcome::Output("usage: /connect [url]".to_string()));
+        }
+        *current_endpoint = Some(endpoint.to_string());
+        return Ok(CommandOutcome::Output(format!("Connected to '{endpoint}'")));
+    }
+    if input == "/disconnect" {
+        *current_endpoint = None;
+        return Ok(CommandOutcome::Output(
+            "Disconnected from the current server target".to_string(),
+        ));
+    }
+    if input == "/reload" {
+        *active_model = startup_model.to_string();
+        *current_endpoint = Some(startup_endpoint.to_string());
+        let prompt = system_prompt(
+            llms.get(startup_model)
+                .ok_or_else(|| anyhow!("unknown model profile '{startup_model}'"))?,
+        );
+        session.clear(prompt);
+        return Ok(CommandOutcome::Output(format!(
+            "Reloaded startup configuration: model '{startup_model}', server '{startup_endpoint}'"
         )));
     }
     if input == "/quit" {
@@ -813,6 +891,7 @@ fn print_screen(
     current_model: &str,
     endpoint: &str,
     workspace: &std::path::Path,
+    header_status: HeaderStatus,
     transcript: &[String],
     pending_line: Option<&str>,
     input: &str,
@@ -826,6 +905,7 @@ fn print_screen(
             current_model,
             endpoint,
             workspace,
+            header_status,
             transcript,
             pending_line,
             input,
@@ -842,6 +922,7 @@ async fn wait_for_response(
     current_model: &str,
     endpoint: &str,
     workspace: &std::path::Path,
+    header_status: HeaderStatus,
     transcript: &[String],
 ) -> Result<String> {
     let mut prompt_future = Box::pin(session.prompt(user_input, profile, tools));
@@ -852,6 +933,7 @@ async fn wait_for_response(
         current_model,
         endpoint,
         workspace,
+        header_status,
         transcript,
         Some("Thinking"),
         "",
@@ -872,6 +954,7 @@ async fn wait_for_response(
                     current_model,
                     endpoint,
                     workspace,
+                    header_status,
                     transcript,
                     pending_line,
                     "",
@@ -881,6 +964,61 @@ async fn wait_for_response(
                 thinking_visible = !thinking_visible;
             }
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelsResponse {
+    #[serde(default)]
+    data: Vec<ModelEntry>,
+    #[serde(default)]
+    models: Vec<ModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelEntry {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    name: String,
+}
+
+async fn probe_header_status(
+    http_client: &reqwest::Client,
+    workspace: &Path,
+    active_model: &str,
+    profile: &LlmConfiguration,
+    endpoint: Option<&str>,
+) -> HeaderStatus {
+    let workspace_ok = workspace.exists();
+    let mut server_ok = false;
+    let mut model_ok = false;
+
+    if let Some(endpoint) = endpoint {
+        let models_url = format!("{}/v1/models", normalized_openai_endpoint(endpoint));
+        if let Ok(response) = http_client.get(&models_url).send().await
+            && response.status().is_success()
+        {
+            server_ok = true;
+            if let Ok(models) = response.json::<ModelsResponse>().await {
+                model_ok = models.data.iter().chain(models.models.iter()).any(|entry| {
+                    entry.id == profile.model
+                        || entry.model == profile.model
+                        || entry.name == profile.model
+                        || entry.id == active_model
+                        || entry.model == active_model
+                        || entry.name == active_model
+                });
+            }
+        }
+    }
+
+    HeaderStatus {
+        workspace_ok,
+        server_ok,
+        model_ok,
     }
 }
 

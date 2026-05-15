@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
-pub use openai::OpenAiClient;
+pub use openai::{OpenAiClient, normalized_openai_endpoint};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {

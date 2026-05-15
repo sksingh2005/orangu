@@ -38,22 +38,35 @@ const CLIENT_LOGO_ART: &[&str] = &[
     " ██████  ██   ██ ██   ██ ██   ████  ██████   ██████  ",
 ];
 const ORANGU_BROWN: &str = "\x1b[38;2;139;90;43m";
+const STATUS_GREEN: &str = "\x1b[38;2;80;200;120m";
+const STATUS_RED: &str = "\x1b[38;2;220;80;80m";
 const ANSI_RESET: &str = "\x1b[0m";
+
+#[derive(Debug, Clone, Copy)]
+pub struct HeaderStatus {
+    pub workspace_ok: bool,
+    pub server_ok: bool,
+    pub model_ok: bool,
+}
 
 pub fn render_header(
     version: &str,
     current_model: &str,
     endpoint: &str,
     workspace: &std::path::Path,
+    status: HeaderStatus,
 ) -> String {
     let status_lines = [
-        format!("Version: {version}"),
-        String::new(),
-        format!("Workspace: {}", workspace.display()),
-        format!("Server: {endpoint}"),
-        format!("Model: {current_model}"),
-        String::new(),
-        "Help: /help".to_string(),
+        status_text_line(&format!("Version: {version}")),
+        status_text_line(""),
+        status_indicator_line(
+            &format!("Workspace: {}", workspace.display()),
+            status.workspace_ok,
+        ),
+        status_indicator_line(&format!("Server: {endpoint}"), status.server_ok),
+        status_indicator_line(&format!("Model: {current_model}"), status.model_ok),
+        status_text_line(""),
+        status_text_line("Help: /help"),
     ];
     let logo_width = CLIENT_LOGO_ART
         .iter()
@@ -62,7 +75,7 @@ pub fn render_header(
         .unwrap_or(0);
     let status_width = status_lines
         .iter()
-        .map(|line| line.chars().count())
+        .map(|line| line.visible_width)
         .max()
         .unwrap_or(0);
     let gap_width = 2;
@@ -77,19 +90,16 @@ pub fn render_header(
     for index in 0..line_count {
         let logo_line = CLIENT_LOGO_ART.get(index).copied().unwrap_or_default();
         let colored_logo_line = format!("{ORANGU_BROWN}{logo_line}{ANSI_RESET}");
-        let status_line = status_lines
-            .get(index)
-            .map(String::as_str)
-            .unwrap_or_default();
+        let status_line = status_lines.get(index).cloned().unwrap_or_default();
         let visible_content_width = logo_line.chars().count()
             + logo_width.saturating_sub(logo_line.chars().count())
             + gap_width
-            + status_line.chars().count();
+            + status_line.visible_width;
         let content = format!(
             "{}{}{}",
             colored_logo_line,
             " ".repeat(logo_width.saturating_sub(logo_line.chars().count()) + gap_width),
-            status_line
+            status_line.rendered
         );
         let padding = width.saturating_sub(visible_content_width);
         lines.push(format!("┃ {content}{} ┃", " ".repeat(padding)));
@@ -101,6 +111,10 @@ pub fn render_header(
 
 pub fn help_text() -> &'static str {
     r#"/help           Show available commands
+/connect        Connect to the configured server target
+/connect <url>  Connect to a specific server target
+/disconnect     Disconnect from the current server target
+/reload         Restore the startup model and server target
 /list-models    List configured models
 /tools          List local tools exposed to the model
 /model          Show the active model and configured profiles
@@ -116,12 +130,13 @@ pub fn render_screen(
     current_model: &str,
     endpoint: &str,
     workspace: &std::path::Path,
+    status: HeaderStatus,
     transcript: &[String],
     pending_line: Option<&str>,
     input: &str,
     cursor: usize,
 ) -> String {
-    let header = render_header(version, current_model, endpoint, workspace);
+    let header = render_header(version, current_model, endpoint, workspace, status);
     let header_line_count = header.lines().count();
     let width = terminal_width().max(1);
     let input_lines = wrapped_input_lines(input, width);
@@ -158,6 +173,34 @@ pub fn render_screen(
         height,
     ));
     screen
+}
+
+fn indicator(ok: bool) -> String {
+    if ok {
+        format!("{STATUS_GREEN}●{ANSI_RESET}")
+    } else {
+        format!("{STATUS_RED}●{ANSI_RESET}")
+    }
+}
+
+#[derive(Clone, Default)]
+struct HeaderLine {
+    rendered: String,
+    visible_width: usize,
+}
+
+fn status_text_line(text: &str) -> HeaderLine {
+    HeaderLine {
+        rendered: text.to_string(),
+        visible_width: text.chars().count(),
+    }
+}
+
+fn status_indicator_line(text: &str, ok: bool) -> HeaderLine {
+    HeaderLine {
+        rendered: format!("{text} {}", indicator(ok)),
+        visible_width: text.chars().count() + 2,
+    }
 }
 
 fn render_prompt_frame(
@@ -275,6 +318,9 @@ impl OranguHelper {
             file_completer: FilenameCompleter::new(),
             commands: vec![
                 "/help".to_string(),
+                "/connect".to_string(),
+                "/disconnect".to_string(),
+                "/reload".to_string(),
                 "/list-models".to_string(),
                 "/tools".to_string(),
                 "/model".to_string(),
