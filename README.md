@@ -2,6 +2,8 @@
 
 **orangu** is a coding environment for **OpenAI-compatible** servers.
 
+**orangu** is named after the [Orangutan](https://en.wikipedia.org/wiki/Orangutan) - the smartest ape.
+
 ## Features
 
 - Coding environment (LLM based)
