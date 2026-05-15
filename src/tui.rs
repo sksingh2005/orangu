@@ -37,6 +37,8 @@ const CLIENT_LOGO_ART: &[&str] = &[
     "██    ██ ██   ██ ██   ██ ██  ██ ██ ██    ██ ██    ██ ",
     " ██████  ██   ██ ██   ██ ██   ████  ██████   ██████  ",
 ];
+const ORANGU_BROWN: &str = "\x1b[38;2;139;90;43m";
+const ANSI_RESET: &str = "\x1b[0m";
 
 pub fn render_header(
     version: &str,
@@ -74,17 +76,22 @@ pub fn render_header(
 
     for index in 0..line_count {
         let logo_line = CLIENT_LOGO_ART.get(index).copied().unwrap_or_default();
+        let colored_logo_line = format!("{ORANGU_BROWN}{logo_line}{ANSI_RESET}");
         let status_line = status_lines
             .get(index)
             .map(String::as_str)
             .unwrap_or_default();
+        let visible_content_width = logo_line.chars().count()
+            + logo_width.saturating_sub(logo_line.chars().count())
+            + gap_width
+            + status_line.chars().count();
         let content = format!(
             "{}{}{}",
-            logo_line,
+            colored_logo_line,
             " ".repeat(logo_width.saturating_sub(logo_line.chars().count()) + gap_width),
             status_line
         );
-        let padding = width.saturating_sub(content.chars().count());
+        let padding = width.saturating_sub(visible_content_width);
         lines.push(format!("┃ {content}{} ┃", " ".repeat(padding)));
     }
 
