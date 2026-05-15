@@ -41,7 +41,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const TERMINAL_TITLE: &str = "orangu";
 const CTRL_C_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 const CTRL_C_EXIT_MESSAGE: &str = "Press Ctrl+c again to quit";
-const HISTORY_DIRECTORY: &str = "orangu";
+const HISTORY_DIRECTORY: &str = ".orangu";
 const HISTORY_FILE: &str = "orangu.history";
 const COMMANDS: &[&str] = &[
     "/help",
@@ -81,7 +81,7 @@ async fn run() -> Result<()> {
         Some(path) => path,
         None => {
             return Err(anyhow!(
-                "missing config file; pass --config or add ./orangu.conf or ~/orangu/orangu.conf"
+                "Missing config file; pass --config or add ./orangu.conf or ~/.orangu/orangu.conf"
             ));
         }
     };
@@ -184,6 +184,9 @@ async fn run() -> Result<()> {
             input_state.cursor(),
         );
         std::io::stdout().flush()?;
+        if trimmed.starts_with('#') {
+            continue;
+        }
 
         match handle_command(
             trimmed,

@@ -1,10 +1,12 @@
 # orangu
 
-**orangu** is a coding environment for OpenAI servers.
+**orangu** is a coding environment for **OpenAI-compatible** servers.
 
 ## Features
 
 - Coding environment (LLM based)
+- Command history
+- Completion of commands
 
 ## Configuration
 
@@ -23,16 +25,11 @@ Or use `--config` to point to a configuration file.
 orangu
 ```
 
-Useful runtime commands:
-
-- `/connect` reconnects to the configured endpoint for the active model profile
-- `/connect <url>` switches the current server target to a specific endpoint
-- `/disconnect` disconnects from the current server target
-- `/reload` restores the startup model and configured server target
+By default, local tools operate on the **current working directory**. Use `--workspace` to point at another root.
 
 ## Community
 
-Contributions to [**orangu**](https://github.com/mnemosyne-systems/orangu) are managed on Git Hub
+Contributions to [**orangu**](https://github.com/mnemosyne-systems/orangu) are managed on Git Hub.
 
 * [Ask a question](https://github.com/mnemosyne-systems/orangu/discussions)
 * [Raise an issue](https://github.com/mnemosyne-systems/orangu/issues)

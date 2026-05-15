@@ -9,9 +9,9 @@
 The top banner displays:
 
 - current version
-- workspace
-- active llama.cpp endpoint
-- active model
+- workspace status
+- server status
+- model status
 - `/help` reminder
 
 ## Prompt area
@@ -37,7 +37,7 @@ placeholder in the position where the reply will appear.
 Command history is stored in:
 
 ```text
-~/orangu/orangu.history
+~/.orangu/orangu.history
 ```
 
 Use:
@@ -53,6 +53,11 @@ Use:
 - `/connect <url>` sets a specific current server target
 - `/disconnect` disconnects from the current server target
 - `/reload` restores the startup model and configured server target and clears the current conversation
+
+## Comments and ignored input
+
+- If the first non-whitespace character is `#`, the line is treated as a local comment, shown in the transcript, and not sent to the LLM
+- If the first non-whitespace character is `\`, the line is ignored
 
 ## Editing keys
 

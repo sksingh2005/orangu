@@ -29,5 +29,5 @@ The manual sources live under `doc/manual/en`.
 ## Notes
 
 - The client is workspace-scoped by default and uses the current directory unless `--workspace` is supplied.
-- Command history is stored in `~/orangu/orangu.history`.
+- Command history is stored in `~/.orangu/orangu.history`.
 - Local llama.cpp deployments may take significant time to answer tool-calling prompts, so the default timeout is 30 minutes.

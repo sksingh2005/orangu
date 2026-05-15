@@ -5,7 +5,7 @@
 Default lookup order:
 
 1. `./orangu.conf`
-2. `~/orangu/orangu.conf`
+2. `~/.orangu/orangu.conf`
 
 ## Main section
 

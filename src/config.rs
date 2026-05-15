@@ -92,7 +92,7 @@ pub fn default_client_config_path() -> Option<PathBuf> {
         return Some(cwd_path);
     }
 
-    let config_path = home::home_dir()?.join("orangu/orangu.conf");
+    let config_path = home::home_dir()?.join(".orangu/orangu.conf");
     config_path.exists().then_some(config_path)
 }
 

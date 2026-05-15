@@ -36,12 +36,17 @@ orangu --config ./orangu.conf
 ## 4. Try a few commands
 
 - `/help`
+- `/connect`
+- `/disconnect`
 - `/list-models`
 - `/tools`
 - `/model`
+- `/reload`
 
 Then try a natural-language request such as:
 
 ```text
 Show me the files in the current workspace
 ```
+
+Lines whose first non-whitespace character is `#` stay local and are not sent to the model. Lines whose first non-whitespace character is `\` are ignored.
