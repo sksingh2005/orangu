@@ -94,7 +94,6 @@ async fn run() -> Result<()> {
     let tools = ToolExecutor::new(&workspace);
 
     let model_names = sorted_model_names(&config.llms);
-    let prompt_branch = workspace_branch_name(&workspace);
     let startup_model = config.default_model.clone();
     let startup_endpoint = config
         .llms
@@ -122,6 +121,7 @@ async fn run() -> Result<()> {
         .build()?;
 
     loop {
+        let prompt_branch = workspace_branch_name(tools.workspace());
         let active_profile = config
             .llms
             .get(&active_model)
