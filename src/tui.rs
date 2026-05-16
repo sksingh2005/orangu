@@ -115,15 +115,15 @@ pub fn render_header(
 
 pub fn help_text() -> &'static str {
     r#"/help             Show available commands
-/connect [url]    Connect to the configured server target, or a specific server target
-/disconnect       Disconnect from the current server target
-/reload           Restore the startup model and server target
-/list-models      List configured models
-/tools            List local tools exposed to the model
-/model [name]     Switch to the configured model, or a specific model profile
+/connect [url]    Connect to the configured server, or a specific server
+/disconnect       Disconnect from the current server
+/reload           Restore the configured model and server
+/list-models      List models
+/tools            List tools
+/model [name]     Switch to the configured model, or a specific model
 /diff             Show a color unified diff against the current branch
 /open_file <path> Open a workspace file in $EDITOR
-/clear            Clear the current conversation, keeping the system prompt
+/clear            Clear the current conversation
 /quit             Exit the client
 
 Natural-language forms such as `open README.md`, `list models`, and `show help` are also handled locally.
