@@ -44,6 +44,7 @@ const STATUS_RED: &str = "\x1b[38;2;220;80;80m";
 const THINKING_TIMER: &str = "\x1b[2m";
 const ANSI_RESET: &str = "\x1b[0m";
 const THINKING_TEXT: &str = "Thinking";
+const WORKING_TEXT: &str = "Working";
 const THINKING_SHADE_LEVELS: &[u8] = &[230, 210, 190, 170, 150, 130, 110, 90];
 
 #[derive(Debug, Clone, Copy)]
@@ -140,7 +141,7 @@ pub struct ScreenRenderArgs<'a> {
     pub status: HeaderStatus,
     pub transcript: &'a [String],
     pub scroll_offset: usize,
-    pub left_status: Option<&'a str>,
+    pub left_status: Option<StatusFragment>,
     pub pending_count: usize,
     pub pending_line: Option<&'a str>,
     pub input: &'a str,
@@ -150,7 +151,7 @@ pub struct ScreenRenderArgs<'a> {
 struct PromptFrameArgs<'a> {
     header_height: usize,
     current_model: &'a str,
-    left_status: Option<&'a str>,
+    left_status: Option<StatusFragment>,
     pending_count: usize,
     prompt_prefix: &'a str,
     input: &'a str,
@@ -231,22 +232,42 @@ pub fn output_view_rows(
 }
 
 pub fn render_thinking_frame(frame: usize, elapsed: Duration) -> String {
-    let mut rendered = String::new();
-    let offset = frame % THINKING_SHADE_LEVELS.len();
-
-    for (index, ch) in THINKING_TEXT.chars().enumerate() {
-        let shade_index =
-            (index + THINKING_SHADE_LEVELS.len() - offset) % THINKING_SHADE_LEVELS.len();
-        let shade = THINKING_SHADE_LEVELS[shade_index];
-        rendered.push_str(&format!("\x1b[38;2;{shade};{shade};{shade}m{ch}"));
-    }
-    rendered.push_str(ANSI_RESET);
+    let mut rendered = render_rolling_text(THINKING_TEXT, frame);
     rendered.push(' ');
     rendered.push_str(THINKING_TIMER);
     rendered.push_str(&format_elapsed_timer(elapsed));
     rendered.push_str(ANSI_RESET);
 
     rendered
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusFragment {
+    pub rendered: String,
+    pub visible_width: usize,
+}
+
+impl StatusFragment {
+    pub fn plain(rendered: String) -> Self {
+        let visible_width = rendered.chars().count();
+        Self {
+            rendered,
+            visible_width,
+        }
+    }
+}
+
+pub fn render_working_status(frame: usize, rate: f64) -> StatusFragment {
+    let suffix = format!(" @ {rate:.1} t/s");
+    StatusFragment {
+        rendered: format!(
+            "{}{}{}",
+            render_rolling_text(WORKING_TEXT, frame),
+            ANSI_RESET,
+            suffix
+        ),
+        visible_width: WORKING_TEXT.chars().count() + suffix.chars().count(),
+    }
 }
 
 fn format_elapsed_timer(elapsed: Duration) -> String {
@@ -332,7 +353,7 @@ fn render_prompt_frame(args: PromptFrameArgs<'_>) -> String {
 
     let status_line = render_status_line(
         args.width,
-        args.left_status,
+        args.left_status.as_ref(),
         args.current_model,
         args.pending_count,
     );
@@ -388,18 +409,11 @@ fn prompt_prefix(branch_name: Option<&str>) -> String {
 
 fn render_status_line(
     width: usize,
-    left_status: Option<&str>,
+    left_status: Option<&StatusFragment>,
     current_model: &str,
     pending_count: usize,
 ) -> String {
     let mut cells = vec![' '; width];
-    if let Some(left_status) = left_status.filter(|text| !text.is_empty()) {
-        for (index, ch) in left_status.chars().enumerate() {
-            if index < width {
-                cells[index] = ch;
-            }
-        }
-    }
     if pending_count > 0 {
         let pending = format!("Pending: {pending_count}");
         let pending_width = pending.chars().count();
@@ -419,7 +433,27 @@ fn render_status_line(
         }
     }
 
-    cells.into_iter().collect()
+    if let Some(left_status) = left_status.filter(|status| status.visible_width > 0) {
+        let left_width = left_status.visible_width.min(width);
+        let suffix: String = cells.into_iter().skip(left_width).collect();
+        format!("{}{}", left_status.rendered, suffix)
+    } else {
+        cells.into_iter().collect()
+    }
+}
+
+fn render_rolling_text(text: &str, frame: usize) -> String {
+    let mut rendered = String::new();
+    let offset = frame % THINKING_SHADE_LEVELS.len();
+
+    for (index, ch) in text.chars().enumerate() {
+        let shade_index =
+            (index + THINKING_SHADE_LEVELS.len() - offset) % THINKING_SHADE_LEVELS.len();
+        let shade = THINKING_SHADE_LEVELS[shade_index];
+        rendered.push_str(&format!("\x1b[38;2;{shade};{shade};{shade}m{ch}"));
+    }
+
+    rendered
 }
 
 fn truncate_to_width(input: &str, width: usize) -> String {
@@ -536,8 +570,9 @@ impl Completer for OranguHelper {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSI_RESET, THINKING_TEXT, available_output_rows, prompt_prefix, render_status_line,
-        render_thinking_frame, wrapped_input_lines,
+        ANSI_RESET, StatusFragment, THINKING_TEXT, WORKING_TEXT, available_output_rows,
+        prompt_prefix, render_status_line, render_thinking_frame, render_working_status,
+        wrapped_input_lines,
     };
     use std::time::Duration;
 
@@ -559,6 +594,19 @@ mod tests {
     }
 
     #[test]
+    fn working_status_rolls_and_formats_rate() {
+        let frame_zero = render_working_status(0, 42.5);
+        let frame_one = render_working_status(1, 42.5);
+
+        assert!(frame_zero.rendered.contains("42.5 t/s"));
+        assert_eq!(
+            frame_zero.visible_width,
+            WORKING_TEXT.chars().count() + " @ 42.5 t/s".chars().count()
+        );
+        assert_ne!(frame_zero.rendered, frame_one.rendered);
+    }
+
+    #[test]
     fn prompt_prefix_uses_branch_name() {
         assert_eq!(prompt_prefix(Some("main")), "main> ");
         assert_eq!(prompt_prefix(None), "> ");
@@ -574,7 +622,12 @@ mod tests {
 
     #[test]
     fn status_line_centers_pending_count() {
-        let line = render_status_line(30, Some("2.5t/s"), "gpt-4.1", 3);
+        let line = render_status_line(
+            30,
+            Some(&StatusFragment::plain("2.5t/s".to_string())),
+            "gpt-4.1",
+            3,
+        );
         assert!(line.starts_with("2.5t/s"));
         assert!(line.contains("Pending: 3"));
         assert!(line.ends_with("gpt-4.1"));

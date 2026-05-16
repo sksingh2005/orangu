@@ -30,8 +30,8 @@ use orangu::{
     session::ChatSession,
     tools::{ToolExecutor, resolve_workspace_path},
     tui::{
-        HeaderStatus, ScreenRenderArgs, help_text, output_view_rows, render_screen,
-        render_thinking_frame,
+        HeaderStatus, ScreenRenderArgs, StatusFragment, help_text, output_view_rows, render_screen,
+        render_thinking_frame, render_working_status,
     },
 };
 use serde::Deserialize;
@@ -242,6 +242,7 @@ async fn run() -> Result<()> {
                 std::io::stdout().flush()?;
                 break;
             }
+            CommandOutcome::Quiet => continue,
             CommandOutcome::Cleared => {
                 output_state.clear();
                 continue;
@@ -607,11 +608,11 @@ struct RenderContext<'a> {
     header_status: HeaderStatus,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ScreenState<'a> {
     transcript: &'a [String],
     scroll_offset: usize,
-    left_status: Option<&'a str>,
+    left_status: Option<StatusFragment>,
     pending_count: usize,
     pending_line: Option<&'a str>,
     input: &'a str,
@@ -1164,6 +1165,7 @@ fn next_boundary(input: &str, cursor: usize) -> Option<usize> {
 
 enum CommandOutcome {
     Unhandled,
+    Quiet,
     Output(String),
     Cleared,
     Quit,
@@ -1235,17 +1237,17 @@ fn handle_command(
                 .ok_or_else(|| anyhow!("unknown model profile '{active_model}'"))?
                 .endpoint
                 .clone();
-            *current_endpoint = Some(endpoint.clone());
-            Ok(CommandOutcome::Output(format!("Connected to '{endpoint}'")))
+            *current_endpoint = Some(endpoint);
+            Ok(CommandOutcome::Quiet)
         }
         LocalCommand::ConnectTo(endpoint) => {
             *current_endpoint = Some(endpoint.to_string());
-            Ok(CommandOutcome::Output(format!("Connected to '{endpoint}'")))
+            Ok(CommandOutcome::Quiet)
         }
-        LocalCommand::Disconnect => Ok(CommandOutcome::Output({
+        LocalCommand::Disconnect => Ok({
             *current_endpoint = None;
-            "Disconnected from the current server target".to_string()
-        })),
+            CommandOutcome::Quiet
+        }),
         LocalCommand::Reload => {
             *active_model = startup_model.to_string();
             *current_endpoint = Some(startup_endpoint.to_string());
@@ -1254,9 +1256,7 @@ fn handle_command(
                     .ok_or_else(|| anyhow!("unknown model profile '{startup_model}'"))?,
             );
             session.clear(prompt);
-            Ok(CommandOutcome::Output(format!(
-                "Reloaded startup configuration: model '{startup_model}', server '{startup_endpoint}'"
-            )))
+            Ok(CommandOutcome::Quiet)
         }
         LocalCommand::ListModels => Ok(CommandOutcome::Output(format_models(llms))),
         LocalCommand::Tools => Ok(CommandOutcome::Output(format_tools(tools))),
@@ -1273,11 +1273,9 @@ fn handle_command(
             let profile = &llms[name];
             let endpoint = normalized_openai_endpoint(&profile.endpoint);
             *active_model = name.to_string();
-            *current_endpoint = Some(endpoint.clone());
+            *current_endpoint = Some(endpoint);
             session.set_system_prompt(system_prompt(profile));
-            Ok(CommandOutcome::Output(format!(
-                "Switched to model profile '{name}' (server: {endpoint})"
-            )))
+            Ok(CommandOutcome::Quiet)
         }
         LocalCommand::Diff => Ok(CommandOutcome::Output(git_workspace_diff(workspace)?)),
         LocalCommand::OpenFile(path) => match open_in_editor(workspace, path) {
@@ -1809,6 +1807,7 @@ async fn wait_for_response(
                         &last_rendered_output,
                         &last_rendered_metrics,
                         elapsed,
+                        thinking_frame,
                         tokenizer.as_ref(),
                     );
                     let pending_line = if last_rendered_output.is_empty() {
@@ -1821,7 +1820,7 @@ async fn wait_for_response(
                         ScreenState {
                             transcript: output_state.lines(),
                             scroll_offset: output_state.scroll_offset(),
-                            left_status: left_status.as_deref(),
+                            left_status,
                             pending_count: pending_commands.len(),
                             pending_line: Some(pending_line.as_str()),
                             input: input_state.as_str(),
@@ -1840,11 +1839,15 @@ fn render_left_status(
     rendered_output: &str,
     metrics: &StreamMetrics,
     elapsed: Duration,
+    frame: usize,
     tokenizer: Option<&tiktoken_rs::CoreBPE>,
-) -> Option<String> {
+) -> Option<StatusFragment> {
     if profile.provider.eq_ignore_ascii_case("llama.cpp") {
-        if let Some(rate) = metrics.predicted_per_second.filter(|rate| *rate > 0.0) {
-            return Some(format!("{rate:.1}t/s"));
+        if let Some(rate) = metrics
+            .predicted_per_second
+            .filter(|rate| *rate > 0.0 && !rendered_output.is_empty())
+        {
+            return Some(render_working_status(frame, rate));
         }
         if rendered_output.is_empty() {
             if let Some(rate) = metrics
@@ -1852,10 +1855,10 @@ fn render_left_status(
                 .as_ref()
                 .and_then(prompt_progress_tokens_per_second)
             {
-                return Some(format!("{rate:.1}t/s"));
+                return Some(StatusFragment::plain(format!("{rate:.1}t/s")));
             }
             if let Some(rate) = metrics.prompt_per_second.filter(|rate| *rate > 0.0) {
-                return Some(format!("{rate:.1}t/s"));
+                return Some(StatusFragment::plain(format!("{rate:.1}t/s")));
             }
         }
     }
@@ -1868,7 +1871,7 @@ fn render_left_status(
         let token_count = tokenizer.encode_with_special_tokens(rendered_output).len();
         let elapsed_secs = elapsed.as_secs_f64();
         (token_count > 0 && elapsed_secs > 0.0)
-            .then(|| format!("{:.1}t/s", token_count as f64 / elapsed_secs))
+            .then(|| StatusFragment::plain(format!("{:.1}t/s", token_count as f64 / elapsed_secs)))
     })
 }
 
@@ -2051,6 +2054,7 @@ mod tests {
         llm::{StreamMetrics, StreamPromptProgress, normalized_openai_endpoint},
         session::ChatSession,
         tools::ToolExecutor,
+        tui::StatusFragment,
     };
     use std::collections::HashMap;
     use std::{
@@ -2253,7 +2257,7 @@ mod tests {
         )
         .expect("handle command");
 
-        assert!(matches!(outcome, CommandOutcome::Output(_)));
+        assert!(matches!(outcome, CommandOutcome::Quiet));
         assert_eq!(active_model, OPENAI);
         assert_eq!(
             current_endpoint,
@@ -2504,26 +2508,30 @@ mod tests {
                     predicted_per_second: None,
                 },
                 Duration::from_secs(2),
+                0,
                 None,
             )
-            .as_deref(),
-            Some("20.0t/s")
+            .as_ref(),
+            Some(&StatusFragment::plain("20.0t/s".to_string()))
         );
 
-        assert_eq!(
-            render_left_status(
-                &profile,
-                "hello",
-                &StreamMetrics {
-                    prompt_progress: None,
-                    prompt_per_second: Some(15.0),
-                    predicted_per_second: Some(42.5),
-                },
-                Duration::from_secs(2),
-                None,
-            )
-            .as_deref(),
-            Some("42.5t/s")
-        );
+        let working = render_left_status(
+            &profile,
+            "hello",
+            &StreamMetrics {
+                prompt_progress: None,
+                prompt_per_second: Some(15.0),
+                predicted_per_second: Some(42.5),
+            },
+            Duration::from_secs(2),
+            1,
+            None,
+        )
+        .expect("working status");
+        for ch in "Working".chars() {
+            assert!(working.rendered.contains(ch));
+        }
+        assert!(working.rendered.contains("42.5 t/s"));
+        assert_eq!(working.visible_width, "Working @ 42.5 t/s".chars().count());
     }
 }
