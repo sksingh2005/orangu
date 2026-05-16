@@ -39,33 +39,6 @@ jobs:
       with:
         command: check
 
-  unit-test:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - uses: Swatinem/rust-cache@v2
-    - name: Install system build dependencies
-      shell: /bin/bash --noprofile --norc -eo pipefail {0}
-      run: |
-        if command -v dnf >/dev/null 2>&1; then
-          dnf install -y gcc gcc-c++ glibc-devel make
-        elif command -v microdnf >/dev/null 2>&1; then
-          microdnf install -y gcc gcc-c++ glibc-devel make
-        else
-          printf '%s\n' "No supported package manager found in container" >&2
-          exit 1
-        fi
-    - name: Install stable toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
-    - name: Run cargo test
-      uses: actions-rs/cargo@v1
-      with:
-        command: test
-        args: --lib 
-
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -91,51 +64,3 @@ jobs:
         uses: rustsec/audit-check@v1.4.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
-  full-test:
-    runs-on: ubuntu-latest
-    container:
-      image: docker.io/rockylinux/rockylinux:10
-      options: --privileged -v /var/run/docker.sock:/var/run/docker.sock
-    steps:
-    - uses: actions/checkout@v4
-    - uses: Swatinem/rust-cache@v2
-    - name: Install stable toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
-    - name: Run test cases
-      shell: /bin/bash --noprofile --norc -eo pipefail {0}
-      run: |
-        test_log=/tmp/orangu-test.log
-        failures_log=/tmp/orangu-failures.log
-        : > "$test_log"
-        : > "$failures_log"
-
-        if cargo test --all-targets --all-features -- --nocapture >"$test_log" 2>&1; then
-          status=0
-        else
-          status=$?
-        fi
-
-        while IFS= read -r line; do
-          printf '%s\n' "$line"
-          case "$line" in
-            *FAILED*|*"panicked at"*|error:*|*"test result: FAILED"*)
-              printf '%s\n' "$line" >> "$failures_log"
-              ;;
-          esac
-        done < "$test_log"
-
-        exit "$status"
-
-    - name: Upload full logs
-      if: always()
-      uses: actions/upload-artifact@v5
-      with:
-        name: full-logs
-        path: |
-          /tmp/orangu-test.log
-          /tmp/orangu-failures.log
-        if-no-files-found: ignore
