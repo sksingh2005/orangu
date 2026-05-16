@@ -1280,10 +1280,10 @@ fn handle_command(
             )))
         }
         LocalCommand::Diff => Ok(CommandOutcome::Output(git_workspace_diff(workspace)?)),
-        LocalCommand::OpenFile(path) => {
-            open_in_editor(workspace, path)?;
-            Ok(CommandOutcome::Output(format!("Opened {}", path)))
-        }
+        LocalCommand::OpenFile(path) => match open_in_editor(workspace, path) {
+            Ok(()) => Ok(CommandOutcome::Output(format!("Opened {}", path))),
+            Err(err) => Ok(CommandOutcome::Output(format!("Error: {err:#}"))),
+        },
         LocalCommand::Clear => {
             let prompt = system_prompt(
                 llms.get(active_model)
@@ -2106,6 +2106,41 @@ mod tests {
             output_state.lines().last().map(String::as_str),
             Some("line 10004")
         );
+    }
+
+    #[test]
+    fn open_file_failure_returns_output_instead_of_error() {
+        let llms = HashMap::from([(
+            "llama".to_string(),
+            test_profile("llama.cpp", "http://localhost:8100/v1", "gemma"),
+        )]);
+        let workspace = tempdir().expect("workspace");
+        let tools = ToolExecutor::new(workspace.path());
+        let mut active_model = "llama".to_string();
+        let mut current_endpoint = Some(normalized_openai_endpoint("http://localhost:8100/v1"));
+        let mut session = ChatSession::new("system");
+
+        let outcome = handle_command(
+            "/open_file /etc/hosts",
+            CommandState {
+                active_model: &mut active_model,
+                current_endpoint: &mut current_endpoint,
+                session: &mut session,
+            },
+            CommandContext {
+                startup_model: "llama",
+                startup_endpoint: "http://localhost:8100/v1",
+                llms: &llms,
+                tools: &tools,
+                workspace: workspace.path(),
+            },
+        )
+        .expect("handle command");
+
+        assert!(matches!(
+            outcome,
+            CommandOutcome::Output(message) if message.starts_with("Error: ")
+        ));
     }
 
     #[test]
