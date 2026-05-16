@@ -1,53 +1,148 @@
 # orangu
 
-**orangu** is a coding environment for **OpenAI-compatible** servers.
+**orangu** is a local coding environment for **OpenAI-compatible** servers such as **llama.cpp**.
 
-**orangu** is named after the [Orangutan](https://en.wikipedia.org/wiki/Orangutan) - the smartest ape.
+**orangu** is named after the [orangutan](https://en.wikipedia.org/wiki/Orangutan) and is designed as a workspace-aware terminal client for tool-driven coding tasks.
+
+![orangu terminal interface](doc/images/orangu-terminal.png)
+
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+  - [Install dependencies on Fedora](#install-dependencies-on-fedora)
+  - [Release build](#release-build)
+  - [Debug build](#debug-build)
+- [Configuration and first run](#configuration-and-first-run)
+- [Documentation](#documentation)
+- [Tested platforms](#tested-platforms)
+- [Contributing](#contributing)
+- [Community](#community)
+- [License](#license)
 
 ## Features
 
-- Coding environment (LLM based)
-- Command history
-- Completion of commands
+- OpenAI-compatible chat completions
+- Workspace-aware local tools for files, shell commands, and URL fetching
+- Shell-style prompt editing, history, and completion
+- Local commands such as `/help`, `/list-models`, `/tools`, `/diff`, and `/open_file`
+- Natural-language command aliases such as `open README.md`, `list models`, and `show help`
+- Streaming responses with terminal status updates
 
-## Configuration
+## Installation
 
-`orangu` reads an INI-style configuration
+### Install dependencies on Fedora
 
-Default lookup order:
+Install the tools needed to build and run **orangu** from source:
+
+```sh
+dnf install -y git rust cargo gcc
+```
+
+### Release build
+
+The following commands build an optimized release binary:
+
+```sh
+git clone https://github.com/mnemosyne-systems/orangu.git
+cd orangu
+cargo build --release
+```
+
+The binary will be available at:
+
+```text
+target/release/orangu
+```
+
+To install it system-wide:
+
+```sh
+sudo install -Dm755 target/release/orangu /usr/local/bin/orangu
+```
+
+### Debug build
+
+The following commands build a debug binary:
+
+```sh
+git clone https://github.com/mnemosyne-systems/orangu.git
+cd orangu
+cargo build
+```
+
+The binary will be available at:
+
+```text
+target/debug/orangu
+```
+
+## Configuration and first run
+
+Start from the sample configuration:
+
+```sh
+cp doc/etc/orangu.conf ./orangu.conf
+```
+
+Default configuration lookup order:
 
 1. `./orangu.conf`
 2. `~/.orangu/orangu.conf`
 
-Or use `--config` to point to a configuration file.
-
-## Running
+Run the client:
 
 ```sh
-orangu
+orangu --config ./orangu.conf
 ```
 
-By default, local tools operate on the **current working directory**. Use `--workspace` to point at another root.
+Or run it directly from the build tree:
 
-Use `/open_file README.md` to launch a workspace file in the editor configured by `$EDITOR`. Natural-language equivalents such as `open README.md`, `list models`, and `show help` are also handled locally.
+```sh
+./target/release/orangu --config ./orangu.conf
+```
+
+By default, local tools operate on the current working directory. Use `--workspace /path/to/project` to point **orangu** at another tree.
+
+Useful first commands:
+
+```text
+/help
+/list-models
+/tools
+/open_file README.md
+```
+
+## Documentation
+
+- [Latest manual](https://github.com/mnemosyne-systems/orangu/tree/main/doc/manual/en)
+- [Getting Started](https://github.com/mnemosyne-systems/orangu/blob/main/doc/GETTING_STARTED.md)
+- [Quick start](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/03-quickstart.md)
+- [Configuration](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/20-configuration.md)
+- [Terminal interface](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/40-terminal.md)
+- [Tools](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/30-tools.md)
+
+## Tested platforms
+
+- [Fedora](https://getfedora.org/) 44
+
+## Contributing
+
+Contributions to **orangu** are managed on [GitHub](https://github.com/mnemosyne-systems/orangu/):
+
+- [Ask a question](https://github.com/mnemosyne-systems/orangu/discussions)
+- [Raise an issue](https://github.com/mnemosyne-systems/orangu/issues)
+- [Feature request](https://github.com/mnemosyne-systems/orangu/issues)
+- [Code submission](https://github.com/mnemosyne-systems/orangu/pulls)
+
+Contributions are most welcome.
+
+Please consult the [Code of Conduct](https://github.com/mnemosyne-systems/orangu/blob/main/CODE_OF_CONDUCT.md) before contributing.
 
 ## Community
 
-Contributions to [**orangu**](https://github.com/mnemosyne-systems/orangu) are managed on Git Hub.
-
-* [Ask a question](https://github.com/mnemosyne-systems/orangu/discussions)
-* [Raise an issue](https://github.com/mnemosyne-systems/orangu/issues)
-* [Feature request](https://github.com/mnemosyne-systems/orangu/issues)
-* [Code submission](https://github.com/mnemosyne-systems/orangu/pulls)
-
-Contributions are most welcome!
-
-Please, consult our [Code of Conduct](https://github.com/mnemosyne-systems/orangu/blob/main/CODE_OF_CONDUCT.md) policies for interacting in our
-community.
-
-Consider giving the project a [star](https://github.com/mnemosyne-systems/orangu/stargazers) on
-Git Hub if you find it useful. And, feel free to follow
-the project on [X](https://github.com/mnemosyne-systems/orangu/stargazers) as well.
+- GitHub: [mnemosyne-systems/orangu](https://github.com/mnemosyne-systems/orangu)
+- Discussions: [GitHub Discussions](https://github.com/mnemosyne-systems/orangu/discussions)
 
 ## License
 

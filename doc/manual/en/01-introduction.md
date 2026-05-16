@@ -6,6 +6,8 @@
 
 [**orangu**][orangu] is named after the orangutan and is designed as a workspace-aware terminal client for tool-driven coding tasks.
 
+![orangu terminal interface](images/orangu-terminal.png)
+
 ## Features
 
 * OpenAI-compatible chat completions

@@ -114,20 +114,20 @@ pub fn render_header(
 }
 
 pub fn help_text() -> &'static str {
-    r#"/help           Show available commands
-/connect        Connect to the configured server target
-/connect <url>  Connect to a specific server target
-/disconnect     Disconnect from the current server target
-/reload         Restore the startup model and server target
-/list-models    List configured models
-/tools          List local tools exposed to the model
-/model          Show the active model and configured profiles
-/model <name>   Switch to a configured model profile
-/diff           Show a color unified diff against the current branch
+    r#"/help             Show available commands
+/connect          Connect to the configured server target
+/connect <url>    Connect to a specific server target
+/disconnect       Disconnect from the current server target
+/reload           Restore the startup model and server target
+/list-models      List configured models
+/tools            List local tools exposed to the model
+/model            Show the active model and configured profiles
+/model <name>     Switch to a configured model profile
+/diff             Show a color unified diff against the current branch
 /open_file <path> Open a workspace file in $EDITOR
-/clear          Clear the current conversation, keeping the system prompt
-/quit           Exit the client
- 
+/clear            Clear the current conversation, keeping the system prompt
+/quit             Exit the client
+
 Natural-language forms such as `open README.md`, `list models`, and `show help` are also handled locally.
 
 The prompt uses standard Unix shell keys, including Ctrl+A, Ctrl+E, Ctrl+K, Ctrl+U, Ctrl+W, and Tab completion."#
