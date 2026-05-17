@@ -42,7 +42,7 @@ model = ggml-org/gemma-4-E4B-it-GGUF
 
 - The endpoint may be configured either with or without `/v1`
 - The client normalizes the endpoint internally before calling `/v1/chat/completions`
-- Slow responses will display a blinking `Thinking` placeholder in the output area while the model is working
+- Slow responses will display a blinking `Thinking` / `Working` placeholder in the status bar while the model is working
 
 ## Sample file
 

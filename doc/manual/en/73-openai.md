@@ -26,7 +26,7 @@ su
 make install
 ```
 
-for example for an AMD based platform.
+for example for an AMD/Vulkan based platform.
 
 **Running**
 

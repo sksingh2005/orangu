@@ -8,10 +8,10 @@
 
 The top banner displays:
 
-- current version
-- workspace status
-- server status
-- model status
+- Current version
+- Workspace status
+- Server status
+- Model status
 - `/help` reminder
 
 ## Prompt area
@@ -19,7 +19,6 @@ The top banner displays:
 The prompt area stays at the bottom of the terminal window.
 
 - Long input wraps upward
-- The model name is right-aligned below the prompt frame
 - Submitted input moves directly into the output area
 - The banner and prompt stay fixed while the output window scrolls independently
 
@@ -73,7 +72,7 @@ All slash commands are handled locally. They are not sent to the model.
 
 Local commands continue to work even when the model is unavailable.
 
-Free-form prompts are blocked when the model status in the header is red.
+Free-form prompts are blocked when the server or model status in the header is red.
 
 ## Command notes
 
