@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+    "RUSTSEC-2024-0320", # yaml-rust is pulled in by syntect
+    "RUSTSEC-2025-0141", # bincode is pulled in by syntect
+]
+informational_warnings = ["unmaintained"]
