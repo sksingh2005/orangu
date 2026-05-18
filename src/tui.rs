@@ -130,7 +130,7 @@ pub fn help_text() -> &'static str {
 
 Natural-language forms such as `open README.md`, `list models`, `list files`, and `show help` are also handled locally.
 
-The prompt uses standard Unix shell keys, including Ctrl+A, Ctrl+E, Ctrl+K, Ctrl+U, Ctrl+W, and Tab completion."#
+The prompt uses standard Unix shell keys, including Ctrl+Left, Ctrl+Right, Ctrl+A, Ctrl+E, Ctrl+K, Ctrl+U, Ctrl+W, Alt+Backspace, Alt+D, and Tab completion."#
 }
 
 pub struct ScreenRenderArgs<'a> {

@@ -115,12 +115,16 @@ Natural-language forms are recognized only for the built-in local command phrase
 - `Ctrl+E` or `End` moves the cursor to the end of the input line
 - `Left` moves the cursor one character left
 - `Right` moves the cursor one character right
+- `Ctrl+Left` moves one word left using bash-style word boundaries
+- `Ctrl+Right` moves one word right using bash-style word boundaries
 - `Backspace` deletes the character to the left of the cursor
 - `Delete` deletes the character under the cursor
 - `Ctrl+D` behaves like `Delete`; when the input is empty it exits the client immediately
 - `Ctrl+K` deletes from the cursor to the end of the line
 - `Ctrl+U` deletes from the start of the line to the cursor
-- `Ctrl+W` deletes the word immediately before the cursor
+- `Ctrl+W` deletes from the cursor to the previous whitespace
+- `Alt+Backspace` deletes backward using bash-style word boundaries
+- `Alt+D` deletes forward using bash-style word boundaries
 - Pasted text is inserted at the current cursor position
 
 ### History and completion

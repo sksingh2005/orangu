@@ -1141,6 +1141,131 @@ impl InputState {
         self.cursor = start;
         self.completion = None;
     }
+
+    fn delete_backward_readline_word(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+
+        let mut start = self.cursor;
+        while let Some(previous) = previous_boundary(&self.buffer, start) {
+            if self.buffer[previous..start]
+                .chars()
+                .all(|ch| !is_readline_word_char(ch))
+            {
+                start = previous;
+            } else {
+                break;
+            }
+        }
+
+        while let Some(previous) = previous_boundary(&self.buffer, start) {
+            if self.buffer[previous..start]
+                .chars()
+                .all(is_readline_word_char)
+            {
+                start = previous;
+            } else {
+                break;
+            }
+        }
+
+        self.buffer.drain(start..self.cursor);
+        self.cursor = start;
+        self.completion = None;
+    }
+
+    fn delete_forward_readline_word(&mut self) {
+        if self.cursor >= self.buffer.len() {
+            return;
+        }
+
+        let mut end = self.cursor;
+        while let Some(next) = next_boundary(&self.buffer, end) {
+            if self.buffer[end..next]
+                .chars()
+                .all(|ch| !is_readline_word_char(ch))
+            {
+                end = next;
+            } else {
+                break;
+            }
+        }
+
+        while let Some(next) = next_boundary(&self.buffer, end) {
+            if self.buffer[end..next].chars().all(is_readline_word_char) {
+                end = next;
+            } else {
+                break;
+            }
+        }
+
+        if end > self.cursor {
+            self.buffer.drain(self.cursor..end);
+            self.completion = None;
+        }
+    }
+
+    fn move_backward_readline_word(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+
+        let mut start = self.cursor;
+        while let Some(previous) = previous_boundary(&self.buffer, start) {
+            if self.buffer[previous..start]
+                .chars()
+                .all(|ch| !is_readline_word_char(ch))
+            {
+                start = previous;
+            } else {
+                break;
+            }
+        }
+
+        while let Some(previous) = previous_boundary(&self.buffer, start) {
+            if self.buffer[previous..start]
+                .chars()
+                .all(is_readline_word_char)
+            {
+                start = previous;
+            } else {
+                break;
+            }
+        }
+
+        self.cursor = start;
+        self.completion = None;
+    }
+
+    fn move_forward_readline_word(&mut self) {
+        if self.cursor >= self.buffer.len() {
+            return;
+        }
+
+        let mut end = self.cursor;
+        while let Some(next) = next_boundary(&self.buffer, end) {
+            if self.buffer[end..next]
+                .chars()
+                .all(|ch| !is_readline_word_char(ch))
+            {
+                end = next;
+            } else {
+                break;
+            }
+        }
+
+        while let Some(next) = next_boundary(&self.buffer, end) {
+            if self.buffer[end..next].chars().all(is_readline_word_char) {
+                end = next;
+            } else {
+                break;
+            }
+        }
+
+        self.cursor = end;
+        self.completion = None;
+    }
 }
 
 struct CompletionState {
@@ -1295,6 +1420,39 @@ fn handle_input_event(
             ..
         }) if kind == KeyEventKind::Press || kind == KeyEventKind::Repeat => {
             match (code, modifiers) {
+                (KeyCode::Left, modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL)
+                        && !modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    interrupt_state.reset();
+                    input_state.move_backward_readline_word();
+                    redraw = true;
+                }
+                (KeyCode::Right, modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL)
+                        && !modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    interrupt_state.reset();
+                    input_state.move_forward_readline_word();
+                    redraw = true;
+                }
+                (KeyCode::Backspace, modifiers)
+                    if modifiers.contains(KeyModifiers::ALT)
+                        && !modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    interrupt_state.reset();
+                    input_state.delete_backward_readline_word();
+                    redraw = true;
+                }
+                (KeyCode::Char(ch), modifiers)
+                    if modifiers.contains(KeyModifiers::ALT)
+                        && !modifiers.contains(KeyModifiers::CONTROL)
+                        && ch.eq_ignore_ascii_case(&'d') =>
+                {
+                    interrupt_state.reset();
+                    input_state.delete_forward_readline_word();
+                    redraw = true;
+                }
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                     match interrupt_state.handle_interrupt(Instant::now()) {
                         InterruptAction::Continue => {
@@ -1839,6 +1997,10 @@ fn next_boundary(input: &str, cursor: usize) -> Option<usize> {
         .nth(1)
         .map(|(index, _)| cursor + index)
         .or_else(|| (cursor < input.len()).then_some(input.len()))
+}
+
+fn is_readline_word_char(ch: char) -> bool {
+    ch.is_alphanumeric()
 }
 
 enum CommandOutcome {
@@ -3065,9 +3227,10 @@ fn format_tools(tools: &ToolExecutor) -> String {
 mod tests {
     use super::{
         ANSI_RESET, CommandContext, CommandOutcome, CommandState, EscapeCancelState,
-        GitLineMetadata, LocalCommand, OutputState, ShowFileOptions, completion_candidates,
-        discover_git_dir, discover_git_root, final_pending_line, format_show_file_line,
-        git_workspace_diff, handle_command, is_wait_cancel_escape, list_workspace_files_tree,
+        GitLineMetadata, InputContext, InputState, InterruptState, LocalCommand, OutputState,
+        RenderContext, ShowFileOptions, completion_candidates, discover_git_dir, discover_git_root,
+        final_pending_line, format_show_file_line, git_workspace_diff, handle_command,
+        handle_input_event, is_wait_cancel_escape, list_workspace_files_tree,
         llm_prompt_block_reason, parse_local_command, parse_show_file_arguments,
         render_left_status, render_markdown_for_console, resolve_workspace_root, shell_words,
         show_file_output, system_prompt, with_explicit_pager_width, workspace_branch_name,
@@ -3174,6 +3337,25 @@ mod tests {
             request_timeout_seconds: 1800,
             max_tool_rounds: 10,
             system_prompt: String::new(),
+        }
+    }
+
+    fn test_input_context<'a>(workspace: &'a std::path::Path) -> InputContext<'a> {
+        InputContext {
+            history: &[],
+            workspace,
+            model_names: &[],
+            render: RenderContext {
+                current_model: "default",
+                endpoint: "http://localhost:11434/v1",
+                workspace,
+                prompt_branch: None,
+                header_status: HeaderStatus {
+                    workspace_ok: true,
+                    server_ok: true,
+                    model_ok: true,
+                },
+            },
         }
     }
 
@@ -3285,6 +3467,121 @@ mod tests {
             outcome,
             CommandOutcome::Output(message) if message.starts_with("Error: ")
         ));
+    }
+
+    #[test]
+    fn alt_backspace_deletes_previous_bash_word() {
+        let workspace = tempdir().expect("workspace");
+        let mut input_state = InputState::default();
+        input_state.set_buffer("src/tui.rs".to_string());
+        let mut interrupt_state = InterruptState::default();
+        let mut output_state = OutputState::default();
+
+        let result = handle_input_event(
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Backspace,
+                KeyModifiers::ALT,
+                KeyEventKind::Press,
+            )),
+            &mut input_state,
+            &mut interrupt_state,
+            &mut output_state,
+            test_input_context(workspace.path()),
+        );
+
+        assert!(result.redraw);
+        assert!(result.outcome.is_none());
+        assert_eq!(input_state.as_str(), "src/tui.");
+        assert_eq!(input_state.cursor(), "src/tui.".len());
+    }
+
+    #[test]
+    fn alt_d_deletes_next_bash_word() {
+        let workspace = tempdir().expect("workspace");
+        let mut input_state = InputState::default();
+        input_state.set_buffer("src/tui.rs".to_string());
+        input_state.move_home();
+        let mut interrupt_state = InterruptState::default();
+        let mut output_state = OutputState::default();
+
+        let result = handle_input_event(
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('d'),
+                KeyModifiers::ALT,
+                KeyEventKind::Press,
+            )),
+            &mut input_state,
+            &mut interrupt_state,
+            &mut output_state,
+            test_input_context(workspace.path()),
+        );
+
+        assert!(result.redraw);
+        assert!(result.outcome.is_none());
+        assert_eq!(input_state.as_str(), "/tui.rs");
+        assert_eq!(input_state.cursor(), 0);
+    }
+
+    #[test]
+    fn ctrl_left_moves_to_previous_bash_word() {
+        let workspace = tempdir().expect("workspace");
+        let mut input_state = InputState::default();
+        input_state.set_buffer("src/tui.rs".to_string());
+        let mut interrupt_state = InterruptState::default();
+        let mut output_state = OutputState::default();
+
+        let result = handle_input_event(
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Left,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )),
+            &mut input_state,
+            &mut interrupt_state,
+            &mut output_state,
+            test_input_context(workspace.path()),
+        );
+
+        assert!(result.redraw);
+        assert!(result.outcome.is_none());
+        assert_eq!(input_state.cursor(), "src/tui.".len());
+    }
+
+    #[test]
+    fn ctrl_right_moves_to_next_bash_word() {
+        let workspace = tempdir().expect("workspace");
+        let mut input_state = InputState::default();
+        input_state.set_buffer("src/tui.rs".to_string());
+        input_state.move_home();
+        let mut interrupt_state = InterruptState::default();
+        let mut output_state = OutputState::default();
+
+        let result = handle_input_event(
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Right,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )),
+            &mut input_state,
+            &mut interrupt_state,
+            &mut output_state,
+            test_input_context(workspace.path()),
+        );
+
+        assert!(result.redraw);
+        assert!(result.outcome.is_none());
+        assert_eq!(input_state.cursor(), 3);
+    }
+
+    #[test]
+    fn ctrl_w_keeps_whitespace_based_word_deletion() {
+        let mut input_state = InputState::default();
+        input_state.set_buffer("src/tui.rs".to_string());
+
+        input_state.delete_prev_word();
+
+        assert_eq!(input_state.as_str(), "");
+        assert_eq!(input_state.cursor(), 0);
     }
 
     #[test]
