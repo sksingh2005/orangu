@@ -14,6 +14,8 @@ The top banner displays:
 - Model status
 - `/help` reminder
 
+While no request is active, server and model status are rechecked once per minute.
+
 ## Prompt area
 
 The prompt area stays at the bottom of the terminal window.

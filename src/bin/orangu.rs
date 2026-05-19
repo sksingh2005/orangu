@@ -66,6 +66,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const TERMINAL_TITLE: &str = "orangu";
 const CTRL_C_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ESC_CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
+const IDLE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const CTRL_C_EXIT_MESSAGE: &str = "Press Ctrl+c again to quit";
 const ANSI_BOLD_ON: &str = "\x1b[1m";
 const ANSI_BOLD_OFF: &str = "\x1b[22m";
@@ -227,6 +228,7 @@ async fn run() -> Result<()> {
                     };
                     trimmed
                 }
+                InputResult::Refresh => continue,
                 InputResult::Quit => {
                     print!("{CLEAR_TERMINAL_SEQUENCE}");
                     std::io::stdout().flush()?;
@@ -1302,6 +1304,7 @@ struct CompletionState {
 
 enum InputResult {
     Submitted(String),
+    Refresh,
     Quit,
 }
 
@@ -1391,7 +1394,14 @@ fn read_input(
     pending_count: usize,
     input_context: InputContext<'_>,
 ) -> Result<InputResult> {
+    let refresh_deadline = Instant::now() + IDLE_STATUS_REFRESH_INTERVAL;
+
     loop {
+        let timeout = idle_status_refresh_timeout(refresh_deadline, Instant::now());
+        if !event::poll(timeout)? {
+            return Ok(InputResult::Refresh);
+        }
+
         let result = handle_input_event(
             event::read()?,
             input_state,
@@ -1402,6 +1412,10 @@ fn read_input(
 
         if let Some(outcome) = result.outcome {
             return Ok(outcome);
+        }
+
+        if Instant::now() >= refresh_deadline {
+            return Ok(InputResult::Refresh);
         }
 
         if result.redraw {
@@ -1420,6 +1434,12 @@ fn read_input(
             std::io::stdout().flush()?;
         }
     }
+}
+
+fn idle_status_refresh_timeout(refresh_deadline: Instant, now: Instant) -> Duration {
+    refresh_deadline
+        .checked_duration_since(now)
+        .unwrap_or(Duration::ZERO)
 }
 
 fn handle_input_event(
@@ -3014,6 +3034,7 @@ async fn wait_for_response(
                                 )?;
                                 redraw = redraw || pending_commands.len() != had_pending || !line.trim().is_empty();
                             }
+                            InputResult::Refresh => {}
                             InputResult::Quit => return Ok(WaitResult::Quit),
                         }
                     }
@@ -3269,11 +3290,12 @@ mod tests {
         GitLineMetadata, InputContext, InputState, InterruptState, LocalCommand, OutputState,
         RenderContext, ShowFileOptions, completion_candidates, discover_git_dir, discover_git_root,
         final_pending_line, format_show_file_line, git_workspace_diff, handle_command,
-        handle_input_event, is_wait_cancel_escape, list_workspace_files_tree,
-        llm_prompt_block_reason, parse_local_command, parse_show_file_arguments,
-        preserve_cancelled_output, render_left_status, render_markdown_for_console,
-        request_cancelled_message, resolve_workspace_root, shell_words, show_file_output,
-        system_prompt, with_explicit_pager_width, workspace_branch_name,
+        handle_input_event, idle_status_refresh_timeout, is_wait_cancel_escape,
+        list_workspace_files_tree, llm_prompt_block_reason, parse_local_command,
+        parse_show_file_arguments, preserve_cancelled_output, render_left_status,
+        render_markdown_for_console, request_cancelled_message, resolve_workspace_root,
+        shell_words, show_file_output, system_prompt, with_explicit_pager_width,
+        workspace_branch_name,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use orangu::{
@@ -4506,6 +4528,23 @@ mod tests {
         assert_eq!(
             output_state.lines(),
             &["partial reply".to_string(), request_cancelled_message()]
+        );
+    }
+
+    #[test]
+    fn idle_refresh_timeout_hits_zero_at_deadline() {
+        let start = Instant::now();
+
+        assert_eq!(
+            idle_status_refresh_timeout(start + Duration::from_secs(60), start),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            idle_status_refresh_timeout(
+                start + Duration::from_secs(60),
+                start + Duration::from_secs(61)
+            ),
+            Duration::ZERO
         );
     }
 

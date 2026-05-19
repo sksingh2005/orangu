@@ -24,7 +24,7 @@
 
 - OpenAI-compatible chat completions, with special attention to llama.cpp workflows
 - Workspace-aware local tools for reading, editing, listing, fetching, and shell commands
-- Persistent terminal UI with workspace, server, and model status in the header
+- Persistent terminal UI with workspace, server, and model status in the header, refreshed every minute while idle
 - Shell-style prompt editing, history, scrolling, and context-sensitive Tab completion
 - Local commands such as `/help`, `/list_models`, `/list_files`, `/show_file`, `/tools`, `/diff`, and `/open_file`
 - Natural-language local aliases such as `open README.md`, `show README.md`, `list models`, `list files`, and `show help`
