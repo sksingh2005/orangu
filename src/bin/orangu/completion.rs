@@ -117,7 +117,17 @@ pub fn completion_candidates(
 
     if let Some((start, branch_prefix)) = merge_completion_prefix(prefix) {
         let branches = discover_git_root(workspace)
-            .map(|root| git_branch_names(&root))
+            .map(|root| {
+                let local = git_local_branch_names(&root);
+                let all = git_branch_names(&root);
+                let local_set: std::collections::HashSet<&str> =
+                    local.iter().map(String::as_str).collect();
+                let remote_only: Vec<String> = all
+                    .into_iter()
+                    .filter(|b| !local_set.contains(b.as_str()))
+                    .collect();
+                local.into_iter().chain(remote_only).collect::<Vec<_>>()
+            })
             .unwrap_or_default()
             .into_iter()
             .filter(|b| b.starts_with(branch_prefix))
