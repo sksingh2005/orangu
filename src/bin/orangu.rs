@@ -35,8 +35,8 @@ use orangu::{
     session::ChatSession,
     tools::{ToolExecutor, resolve_workspace_path},
     tui::{
-        HeaderStatus, ScreenRenderArgs, StatusFragment, TranscriptLine, help_text, output_view_rows,
-        render_screen, render_thinking_status, render_working_status,
+        HeaderStatus, ScreenRenderArgs, StatusFragment, TranscriptLine, help_text,
+        output_view_rows, render_screen, render_thinking_status, render_working_status,
     },
 };
 use serde::Deserialize;
@@ -367,7 +367,10 @@ impl OutputState {
     }
 
     fn push_text(&mut self, text: &str) {
-        self.push_lines(text.lines().map(|line| TranscriptLine::Plain(line.to_owned())));
+        self.push_lines(
+            text.lines()
+                .map(|line| TranscriptLine::Plain(line.to_owned())),
+        );
     }
 
     fn push_input(&mut self, text: &str) {
@@ -612,8 +615,7 @@ fn parse_show_file_arguments(raw_args: &str) -> Result<(String, ShowFileOptions)
         }
     }
 
-    let path =
-        path.ok_or_else(|| LocalError::Usage(show_file_usage_message().to_string()))?;
+    let path = path.ok_or_else(|| LocalError::Usage(show_file_usage_message().to_string()))?;
     Ok((path, options))
 }
 
@@ -1970,7 +1972,10 @@ fn is_readline_word_char(ch: char) -> bool {
 fn readline_word_start(buffer: &str, cursor: usize) -> usize {
     let mut pos = cursor;
     while let Some(prev) = previous_boundary(buffer, pos) {
-        if buffer[prev..pos].chars().all(|ch| !is_readline_word_char(ch)) {
+        if buffer[prev..pos]
+            .chars()
+            .all(|ch| !is_readline_word_char(ch))
+        {
             pos = prev;
         } else {
             break;
@@ -1989,7 +1994,10 @@ fn readline_word_start(buffer: &str, cursor: usize) -> usize {
 fn readline_word_end(buffer: &str, cursor: usize) -> usize {
     let mut pos = cursor;
     while let Some(next) = next_boundary(buffer, pos) {
-        if buffer[pos..next].chars().all(|ch| !is_readline_word_char(ch)) {
+        if buffer[pos..next]
+            .chars()
+            .all(|ch| !is_readline_word_char(ch))
+        {
             pos = next;
         } else {
             break;

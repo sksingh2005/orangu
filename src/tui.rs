@@ -681,10 +681,8 @@ mod tests {
 
     #[test]
     fn transcript_input_highlight_fills_the_row() {
-        let rendered = render_transcript_line(
-            &TranscriptLine::UserInput("> Hello World!".to_string()),
-            20,
-        );
+        let rendered =
+            render_transcript_line(&TranscriptLine::UserInput("> Hello World!".to_string()), 20);
 
         assert_eq!(
             rendered,
