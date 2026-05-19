@@ -58,7 +58,7 @@ use git::{
     add_file_output, checkout_output, cherry_pick_output, commit_output, delete_branch_output,
     git_workspace_diff, init_repo_output, list_workspace_files_tree, log_output, merge_output,
     move_file_output, open_in_editor, pull_request_output, push_output, rebase_output,
-    remove_file_output, status_output, workspace_branch_name,
+    remove_file_output, squash_output, status_output, workspace_branch_name,
 };
 use input::{
     EscapeCancelState, InputContext, InputResult, InputState, InterruptState, OutputState,
@@ -552,6 +552,10 @@ fn handle_command(
             Err(err) => Ok(local_command_error(err)),
         },
         LocalCommand::InitRepo => match init_repo_output(workspace) {
+            Ok(_) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Squash => match squash_output(workspace) {
             Ok(_) => Ok(CommandOutcome::Quiet),
             Err(err) => Ok(local_command_error(err)),
         },
@@ -2382,6 +2386,12 @@ mod tests {
     fn completes_switch_to_branches_and_tags_but_not_files() {
         let workspace = tempdir().expect("workspace");
         init_test_git_repo(workspace.path());
+        // Ensure initial branch is "main" regardless of git init.defaultBranch config.
+        std::process::Command::new("git")
+            .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("set initial branch to main");
         fs::write(workspace.path().join("main.rs"), "").expect("main.rs");
         assert!(
             std::process::Command::new("git")

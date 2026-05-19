@@ -59,6 +59,7 @@ orangu --config ./orangu.conf
 - `/push`
 - `/push --force`
 - `/init_repo`
+- `/squash`
 - `/delete feature/foo`
 - `/open_file README.md`
 
@@ -89,6 +90,7 @@ commit "[#42] My feature"
 push
 force push
 init repo
+squash
 delete feature/foo
 show help
 ```

@@ -152,12 +152,13 @@ pub fn help_text() -> &'static str {
 /commit <message>                     Commit all tracked changes with git commit -a -m
 /push [--force]                       Push the current branch to origin
 /init_repo                            Initialize a Git repository in the workspace
+/squash                               Squash all branch commits into one
 /delete <branch>                      Delete a local branch with git branch -D
 /open_file <path>                     Open a workspace file in $EDITOR
 /clear                                Clear the current conversation
 /quit                                 Exit the client
 
-Natural-language forms such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `status`, `rebase`, `merge feature/foo`, `checkout main`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `push`, `force push`, `init repo`, `delete feature/foo`, and `show help` are also handled locally.
+Natural-language forms such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `status`, `rebase`, `squash`, `merge feature/foo`, `checkout main`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `push`, `force push`, `init repo`, `delete feature/foo`, and `show help` are also handled locally.
 
 The prompt uses standard Unix shell keys, including Ctrl+Left, Ctrl+Right, Ctrl+A, Ctrl+E, Ctrl+K, Ctrl+U, Ctrl+W, Alt+Backspace, Alt+D, and Tab completion."#
 }
@@ -570,6 +571,7 @@ impl OranguHelper {
                 "/commit".to_string(),
                 "/push".to_string(),
                 "/init_repo".to_string(),
+                "/squash".to_string(),
                 "/delete".to_string(),
                 "/clear".to_string(),
                 "/quit".to_string(),

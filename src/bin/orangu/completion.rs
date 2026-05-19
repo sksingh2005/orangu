@@ -46,6 +46,7 @@ pub const COMMANDS: &[&str] = &[
     "/commit",
     "/push",
     "/init_repo",
+    "/squash",
     "/delete",
     "/open_file",
     "/clear",

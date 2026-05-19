@@ -135,6 +135,7 @@ pub enum LocalCommand<'a> {
     Commit(Option<Cow<'a, str>>),
     Push(bool),
     InitRepo,
+    Squash,
     DeleteBranch(Option<Cow<'a, str>>),
     OpenFile(&'a str),
     Clear,
@@ -190,6 +191,7 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
         "/commit" => Some(LocalCommand::Commit(None)),
         "/push" => Some(LocalCommand::Push(false)),
         "/init_repo" => Some(LocalCommand::InitRepo),
+        "/squash" => Some(LocalCommand::Squash),
         "/delete" => Some(LocalCommand::DeleteBranch(None)),
         "/clear" => Some(LocalCommand::Clear),
         "/quit" => Some(LocalCommand::Quit),
@@ -497,6 +499,12 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
     }
     if matches_ci(input, &["init", "init repo", "git init"]) {
         return Some(LocalCommand::InitRepo);
+    }
+    if matches_ci(
+        input,
+        &["squash", "squash branch", "squash commits", "git squash"],
+    ) {
+        return Some(LocalCommand::Squash);
     }
     if matches_ci(input, &["delete", "delete branch"]) {
         return Some(LocalCommand::DeleteBranch(None));
@@ -1463,6 +1471,34 @@ mod tests {
         assert!(matches!(
             parse_local_command("delete"),
             Some(LocalCommand::DeleteBranch(None))
+        ));
+    }
+
+    #[test]
+    fn parses_squash_commands() {
+        assert!(matches!(
+            parse_local_command("/squash"),
+            Some(LocalCommand::Squash)
+        ));
+        assert!(matches!(
+            parse_local_command("squash"),
+            Some(LocalCommand::Squash)
+        ));
+        assert!(matches!(
+            parse_local_command("Squash"),
+            Some(LocalCommand::Squash)
+        ));
+        assert!(matches!(
+            parse_local_command("squash branch"),
+            Some(LocalCommand::Squash)
+        ));
+        assert!(matches!(
+            parse_local_command("squash commits"),
+            Some(LocalCommand::Squash)
+        ));
+        assert!(matches!(
+            parse_local_command("git squash"),
+            Some(LocalCommand::Squash)
         ));
     }
 

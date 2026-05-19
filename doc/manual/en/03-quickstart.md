@@ -72,6 +72,7 @@ Then start with:
 /push
 /push --force
 /init_repo
+/squash
 /delete feature/foo
 ```
 

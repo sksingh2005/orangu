@@ -1162,6 +1162,159 @@ pub fn git_init(workspace: &Path) -> Result<String> {
     })
 }
 
+pub fn squash_output(workspace: &Path) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("squash is only available inside a Git repository"))?;
+    if let Some(output) = try_gh_squash(&repo_root)? {
+        return Ok(output);
+    }
+    git_squash(&repo_root)
+}
+
+pub fn try_gh_squash(_repo_root: &Path) -> Result<Option<String>> {
+    Ok(None)
+}
+
+pub fn git_squash(repo_root: &Path) -> Result<String> {
+    let current = git_current_branch(repo_root)?;
+    if is_protected_branch(&current) {
+        return Err(anyhow!("squash is not allowed on the '{}' branch", current));
+    }
+
+    let base_ref = git_find_base_ref(repo_root)?;
+
+    let merge_base_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["merge-base", "HEAD", &base_ref])
+        .output()
+        .context("failed to run git merge-base")?;
+    if !merge_base_output.status.success() {
+        return Err(anyhow!("could not find merge base with {base_ref}"));
+    }
+    let merge_base = String::from_utf8_lossy(&merge_base_output.stdout)
+        .trim()
+        .to_string();
+
+    let count_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["rev-list", "--count", &format!("{merge_base}..HEAD")])
+        .output()
+        .context("failed to run git rev-list")?;
+    let count: usize = String::from_utf8_lossy(&count_output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+
+    if count == 0 {
+        return Err(anyhow!("no commits to squash on current branch"));
+    }
+    if count == 1 {
+        return Err(anyhow!("nothing to squash: branch has only one commit"));
+    }
+
+    let oldest_hash_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args([
+            "log",
+            "--format=%H",
+            "--reverse",
+            &format!("{merge_base}..HEAD"),
+        ])
+        .output()
+        .context("failed to run git log")?;
+    let oldest_hash = String::from_utf8_lossy(&oldest_hash_output.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    let message_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["log", "-1", "--format=%B", &oldest_hash])
+        .output()
+        .context("failed to run git log")?;
+    let first_message = String::from_utf8_lossy(&message_output.stdout)
+        .trim()
+        .to_string();
+
+    let reset = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["reset", "--soft", &merge_base])
+        .output()
+        .context("failed to run git reset --soft")?;
+    if !reset.status.success() {
+        let stderr = String::from_utf8_lossy(&reset.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git reset --soft failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+
+    let commit = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["commit", "-m", &first_message])
+        .output()
+        .context("failed to run git commit")?;
+    if !commit.status.success() {
+        let stderr = String::from_utf8_lossy(&commit.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+        let detail = [stdout, stderr]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(anyhow!(
+            "git commit failed{}",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        ));
+    }
+
+    Ok(format!("Squashed {count} commits into '{current}'"))
+}
+
+fn git_find_base_ref(repo_root: &Path) -> Result<String> {
+    for branch in ["origin/main", "origin/master"] {
+        let check = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(["rev-parse", "--verify", branch])
+            .output()
+            .context("failed to run git rev-parse")?;
+        if check.status.success() {
+            return Ok(branch.to_string());
+        }
+    }
+    for branch in ["main", "master"] {
+        let check = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(["rev-parse", "--verify", branch])
+            .output()
+            .context("failed to run git rev-parse")?;
+        if check.status.success() {
+            return Ok(branch.to_string());
+        }
+    }
+    Err(anyhow!(
+        "could not find base branch (tried origin/main, origin/master, main, master)"
+    ))
+}
+
 pub fn delete_branch_output(workspace: &Path, branch: &str) -> Result<String> {
     let repo_root = discover_git_root(workspace)
         .ok_or_else(|| anyhow!("delete is only available inside a Git repository"))?;
@@ -1335,6 +1488,120 @@ mod tests {
                 "error should mention branch name: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn squash_blocked_on_protected_branches() {
+        let _env_lock = process_env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let workspace = tempdir().expect("workspace");
+        let home = tempdir().expect("home");
+        let _home_guard = EnvVarGuard::set_path("HOME", home.path());
+        init_git_for_test(workspace.path());
+        // Ensure we are on a protected branch
+        std::process::Command::new("git")
+            .args(["checkout", "-B", "main"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git checkout -B main");
+        std::fs::write(workspace.path().join("file.txt"), "first\n").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "Initial commit"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git commit");
+        let result = squash_output(workspace.path());
+        assert!(result.is_err(), "squash should fail on protected branch");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not allowed"),
+            "error should mention 'not allowed': {msg}"
+        );
+    }
+
+    #[test]
+    fn squash_combines_multiple_commits() {
+        let _env_lock = process_env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let workspace = tempdir().expect("workspace");
+        let home = tempdir().expect("home");
+        let _home_guard = EnvVarGuard::set_path("HOME", home.path());
+        init_git_for_test(workspace.path());
+
+        // Ensure the base branch is named "main"
+        std::process::Command::new("git")
+            .args(["checkout", "-B", "main"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git checkout -B main");
+
+        // Commit on main as the base
+        std::fs::write(workspace.path().join("base.txt"), "base\n").expect("write base");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "Base commit"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git commit base");
+
+        // Create a feature branch off main
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "feature/squash-test"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git checkout -b");
+
+        // Add two commits on the feature branch
+        std::fs::write(workspace.path().join("feature.txt"), "feat1\n").expect("write feat1");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git add feat1");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "First feature commit"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git commit feat1");
+
+        std::fs::write(workspace.path().join("feature.txt"), "feat2\n").expect("write feat2");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git add feat2");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "Second feature commit"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git commit feat2");
+
+        let result = squash_output(workspace.path());
+        assert!(result.is_ok(), "squash failed: {:?}", result);
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("Squashed 2 commits"),
+            "unexpected message: {msg}"
+        );
+
+        // After squash, only one commit on the branch
+        let count_output = std::process::Command::new("git")
+            .args(["rev-list", "--count", "main..HEAD"])
+            .current_dir(workspace.path())
+            .output()
+            .expect("git rev-list");
+        let count: usize = String::from_utf8_lossy(&count_output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(99);
+        assert_eq!(count, 1, "expected 1 commit after squash, got {count}");
     }
 
     #[test]

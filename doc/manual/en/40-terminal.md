@@ -84,6 +84,7 @@ All slash commands are handled locally. They are not sent to the model.
 | `/commit <message>` | Commit all tracked changes with git commit -a -m |
 | `/push [--force]` | Push the current branch to origin |
 | `/init_repo` | Initialize a Git repository in the workspace |
+| `/squash` | Squash all branch commits into one using the first commit message |
 | `/delete <branch>` | Delete a local branch |
 | `/open_file <path>` | Open a workspace file in $EDITOR |
 | `/clear` | Clear the current conversation |
@@ -112,6 +113,7 @@ Free-form prompts are blocked when the server or model status in the header is r
 - `/commit <message>` requires a Git repository and runs `git commit -a -m <message>`; `gh` has no equivalent so it always uses plain Git; the message may be bare (`/commit Fix the bug`) or quoted (`/commit "[#42] My feature"`)
 - `/push [--force]` requires a Git repository and runs `git push origin <branch>` using the current branch name; `gh` has no equivalent so it always uses plain Git; `--force` (or `-f` or `force`) runs `git push -f origin <branch>` but is blocked on `main` and `master` to prevent accidental history rewrites
 - `/init_repo` runs `git init` in the workspace directory; works both inside and outside an existing Git repository (reinitializing an existing repo is safe); `gh` has no equivalent so it always uses plain Git
+- `/squash` requires a Git repository; squashes all commits on the current branch (relative to `origin/main`, `origin/master`, `main`, or `master`, tried in that order) into a single commit using the oldest commit's message; `gh` has no equivalent so it always uses plain Git; squashing on `main` or `master` is blocked; requires at least two commits on the branch
 - `/delete <branch>` requires a Git repository and runs `git branch -D`; `gh` has no equivalent so it always uses plain Git; deleting `main` or `master` is blocked; Tab completion offers local branch names excluding `main` and `master`
 - `/list_files` is a local convenience command and is separate from the model-facing `list_directory` tool
 - `/reload` also clears the current conversation history in memory
