@@ -194,6 +194,18 @@ async fn run() -> Result<()> {
         .timeout(std::time::Duration::from_secs(3))
         .build()?;
 
+    if let Some((old_model, new_model)) = try_startup_model_switch(
+        &status_http_client,
+        &config,
+        &mut active_model,
+        &mut current_endpoint,
+        &mut session,
+    )
+    .await
+    {
+        output_state.push_text(&format!("Switched model from {old_model} to {new_model}"));
+    }
+
     loop {
         let prompt_branch = workspace_branch_name(tools.workspace());
         let active_profile = config
@@ -1271,6 +1283,53 @@ async fn probe_header_status(
         server_ok,
         model_ok,
     }
+}
+
+async fn try_startup_model_switch(
+    http_client: &reqwest::Client,
+    config: &orangu::config::ClientAppConfiguration,
+    active_model: &mut String,
+    current_endpoint: &mut Option<String>,
+    session: &mut ChatSession,
+) -> Option<(String, String)> {
+    let endpoint = current_endpoint.as_deref()?;
+    let models_url = format!("{}/v1/models", normalized_openai_endpoint(endpoint));
+    let response = http_client.get(&models_url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let models = response.json::<ModelsResponse>().await.ok()?;
+
+    let current_profile = config.llms.get(active_model.as_str())?;
+    let current_available = models.data.iter().chain(models.models.iter()).any(|e| {
+        e.id == current_profile.model
+            || e.model == current_profile.model
+            || e.name == current_profile.model
+            || e.id == active_model.as_str()
+            || e.model == active_model.as_str()
+            || e.name == active_model.as_str()
+    });
+    if current_available {
+        return None;
+    }
+
+    for name in sorted_model_names(&config.llms) {
+        if name == *active_model {
+            continue;
+        }
+        if let Some(profile) = config.llms.get(&name) {
+            let available = models.data.iter().chain(models.models.iter()).any(|e| {
+                e.id == profile.model || e.model == profile.model || e.name == profile.model
+            });
+            if available {
+                let old = std::mem::replace(active_model, name.clone());
+                *current_endpoint = Some(normalized_openai_endpoint(&profile.endpoint));
+                session.set_system_prompt(system_prompt(profile));
+                return Some((old, name));
+            }
+        }
+    }
+    None
 }
 
 fn session_dir_path(session_id: &str) -> Result<PathBuf> {
