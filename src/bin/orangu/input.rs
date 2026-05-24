@@ -155,6 +155,7 @@ pub struct WaitContext<'a> {
     pub output_state: &'a mut OutputState,
     pub input_state: &'a mut InputState,
     pub pending_commands: &'a mut VecDeque<String>,
+    pub thinking_quote: Option<&'static str>,
 }
 
 #[derive(Default)]

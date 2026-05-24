@@ -18,6 +18,7 @@ mod commands;
 mod completion;
 mod git;
 mod input;
+mod quotes;
 mod render;
 
 use anyhow::{Context, Result, anyhow};
@@ -113,6 +114,7 @@ async fn run() -> Result<()> {
         }
     };
     let config = load_client_configuration(&config_path)?;
+    let quote_module = quotes::QuoteModule::from_str(&config.quotes);
     let workspace = resolve_workspace_root(args.workspace)?;
     let tools = ToolExecutor::new(&workspace);
 
@@ -355,6 +357,7 @@ async fn run() -> Result<()> {
                         output_state: &mut output_state,
                         input_state: &mut input_state,
                         pending_commands: &mut pending_commands,
+                        thinking_quote: None,
                     },
                     handle,
                 )
@@ -385,6 +388,7 @@ async fn run() -> Result<()> {
                         output_state: &mut output_state,
                         input_state: &mut input_state,
                         pending_commands: &mut pending_commands,
+                        thinking_quote: None,
                     },
                     handle,
                 )
@@ -420,6 +424,11 @@ async fn run() -> Result<()> {
         prompt_profile.endpoint = endpoint.to_string();
         let llm_start = std::time::Instant::now();
         let tool_time_before = tools.total_tool_duration();
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let thinking_quote = quote_module.pick(seed);
         match wait_for_response(
             &mut session,
             &next_input,
@@ -440,6 +449,7 @@ async fn run() -> Result<()> {
                 output_state: &mut output_state,
                 input_state: &mut input_state,
                 pending_commands: &mut pending_commands,
+                thinking_quote,
             },
         )
         .await
@@ -916,6 +926,7 @@ async fn wait_for_response(
         output_state,
         input_state,
         pending_commands,
+        thinking_quote,
     } = wait_context;
     let streamed_state = Arc::new(Mutex::new(StreamRenderState::default()));
     let prompt_output = Arc::clone(&streamed_state);
@@ -954,6 +965,7 @@ async fn wait_for_response(
     let mut last_tool_was_running = false;
     let mut escape_cancel_state = EscapeCancelState::default();
     let initial_status = render_thinking_status(thinking_frame, thinking_started.elapsed());
+    let quote_line = thinking_quote.map(|q| format!("\x1b[2m{q}\x1b[0m"));
 
     print_screen(
         render,
@@ -962,7 +974,7 @@ async fn wait_for_response(
             scroll_offset: output_state.scroll_offset(),
             left_status: Some(initial_status),
             pending_count: pending_commands.len(),
-            pending_line: None,
+            pending_line: quote_line.as_deref(),
             input: input_state.as_str(),
             cursor: input_state.cursor(),
         },
@@ -1073,7 +1085,7 @@ async fn wait_for_response(
                         tokenizer.as_ref(),
                     );
                     let pending_line = if last_rendered_output.is_empty() {
-                        String::new()
+                        quote_line.clone().unwrap_or_default()
                     } else {
                         render_markdown_for_console(&last_rendered_output)
                     };
@@ -1109,6 +1121,7 @@ async fn wait_for_local_command(
         output_state,
         input_state,
         pending_commands,
+        thinking_quote: _,
     } = wait_context;
     let started = std::time::Instant::now();
     let mut interval = tokio::time::interval(WAIT_LOOP_POLL_INTERVAL);

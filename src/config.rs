@@ -25,6 +25,7 @@ use std::{
 pub struct ClientAppConfiguration {
     pub default_model: String,
     pub llms: HashMap<String, LlmConfiguration>,
+    pub quotes: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -48,6 +49,8 @@ struct ClientConfiguration {
     max_tool_rounds: usize,
     #[serde(default)]
     system_prompt: String,
+    #[serde(default)]
+    quotes: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +86,7 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
             root.client.max_tool_rounds,
             root.client.system_prompt,
         )?,
+        quotes: root.client.quotes,
     })
 }
 
