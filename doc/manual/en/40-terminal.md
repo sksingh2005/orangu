@@ -318,8 +318,10 @@ Path-completion details:
 
 ### Output scrolling
 
-- `Shift+PageUp` scrolls backward through the output window
-- `Shift+PageDown` scrolls forward through the output window
+- `Shift+PageUp` scrolls backward through the output window by a full page
+- `Shift+PageDown` scrolls forward through the output window by a full page
+- `Alt+Up` scrolls backward one line at a time
+- `Alt+Down` scrolls forward one line at a time
 - The output scrollback buffer keeps the most recent 10,000 lines
 - Scrolling is limited to the output window; it does not replace the header or prompt area
 

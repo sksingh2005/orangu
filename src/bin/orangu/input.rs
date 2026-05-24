@@ -178,6 +178,10 @@ impl OutputState {
         self.scroll_offset = 0;
     }
 
+    pub fn reset_scroll(&mut self) {
+        self.scroll_offset = 0;
+    }
+
     pub fn push_text(&mut self, text: &str) {
         self.push_lines(
             text.lines()
@@ -214,16 +218,20 @@ impl OutputState {
         self.push_text(&super::render::render_markdown_for_console(text));
     }
 
-    pub fn reset_scroll(&mut self) {
-        self.scroll_offset = 0;
-    }
-
     pub fn page_up(&mut self, rows: usize) {
         self.scroll_offset = self.scroll_offset.saturating_add(rows.max(1));
     }
 
     pub fn page_down(&mut self, rows: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(rows.max(1));
+    }
+
+    pub fn line_up(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_add(1);
+    }
+
+    pub fn line_down(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 }
 
@@ -463,6 +471,7 @@ pub fn handle_input_event(
     match event {
         Event::Paste(text) => {
             interrupt_state.reset();
+            output_state.reset_scroll();
             input_state.insert_str(&text);
             redraw = true;
         }
@@ -585,6 +594,16 @@ pub fn handle_input_event(
                     input_state.delete_prev_word();
                     redraw = true;
                 }
+                (KeyCode::Up, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+                    interrupt_state.reset();
+                    output_state.line_up();
+                    redraw = true;
+                }
+                (KeyCode::Down, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+                    interrupt_state.reset();
+                    output_state.line_down();
+                    redraw = true;
+                }
                 (KeyCode::Up, _) => {
                     interrupt_state.reset();
                     history_previous(input_state, input_context.history);
@@ -632,7 +651,12 @@ pub fn handle_input_event(
                 }
                 (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                     interrupt_state.reset();
+                    output_state.reset_scroll();
                     input_state.insert_char(ch);
+                    redraw = true;
+                }
+                (KeyCode::Esc, _) => {
+                    output_state.reset_scroll();
                     redraw = true;
                 }
                 _ => {}
