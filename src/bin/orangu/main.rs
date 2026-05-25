@@ -116,6 +116,14 @@ async fn run() -> Result<()> {
     let config = load_client_configuration(&config_path)?;
     let quote_module = quotes::QuoteModule::from_str(&config.quotes);
     let workspace = resolve_workspace_root(args.workspace)?;
+    let workspace_created = if !workspace.exists() {
+        std::fs::create_dir_all(&workspace).with_context(|| {
+            format!("failed to create workspace directory {}", workspace.display())
+        })?;
+        true
+    } else {
+        false
+    };
     let tools = ToolExecutor::new(&workspace);
 
     let model_names = sorted_model_names(&config.llms);
@@ -195,6 +203,10 @@ async fn run() -> Result<()> {
     let status_http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()?;
+
+    if workspace_created {
+        output_state.push_text(&format!("Created workspace {}", workspace.display()));
+    }
 
     if let Some((old_model, new_model)) = try_startup_model_switch(
         &status_http_client,
