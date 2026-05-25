@@ -117,12 +117,8 @@ async fn run() -> Result<()> {
     let quote_module = quotes::QuoteModule::from_str(&config.quotes);
     let workspace = resolve_workspace_root(args.workspace)?;
     let workspace_created = if !workspace.exists() {
-        std::fs::create_dir_all(&workspace).with_context(|| {
-            format!(
-                "failed to create workspace directory {}",
-                workspace.display()
-            )
-        })?;
+        std::fs::create_dir_all(&workspace)
+            .with_context(|| format!("Failed to create workspace {}", workspace.display()))?;
         true
     } else {
         false
