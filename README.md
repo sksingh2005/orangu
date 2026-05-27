@@ -18,6 +18,7 @@
 - [Configuration and first run](#configuration-and-first-run)
 - [Documentation](#documentation)
 - [Tested platforms](#tested-platforms)
+- [Sponsors](#sponsors)
 - [Contributing](#contributing)
 - [Community](#community)
 - [License](#license)
