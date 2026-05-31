@@ -14,11 +14,11 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use anyhow::{Context, Result, anyhow};
-use config::{Config, FileFormat};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use crate::tui::Banner;
@@ -47,40 +47,10 @@ pub struct LlmConfiguration {
     pub system_prompt: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct ClientConfiguration {
-    #[serde(default)]
-    model: String,
-    #[serde(default = "default_timeout")]
-    timeout: u64,
-    #[serde(default = "default_llm_max_tool_rounds")]
-    max_tool_rounds: usize,
-    #[serde(default)]
-    system_prompt: String,
-    #[serde(default)]
-    quotes: String,
-    #[serde(default = "default_virtual_width")]
-    width: usize,
-    #[serde(default)]
-    banner: String,
-    #[serde(default)]
-    feedback: String,
-    #[serde(default)]
-    auto_rebase: String,
-    #[serde(default)]
-    auto_squash: String,
-}
+pub const CLIENT_SECTION: &str = "orangu";
 
 pub fn default_virtual_width() -> usize {
     512
-}
-
-#[derive(Debug, Deserialize)]
-struct ClientConfRoot {
-    #[serde(rename = "orangu")]
-    client: ClientConfiguration,
-    #[serde(flatten)]
-    llms: HashMap<String, HashMap<String, String>>,
 }
 
 pub fn default_timeout() -> u64 {
@@ -96,29 +66,106 @@ pub fn parse_feedback_bool(s: &str) -> bool {
 }
 
 pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> {
-    let conf = Config::builder()
-        .add_source(config::File::from(path).format(FileFormat::Ini))
-        .build()
+    let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read configuration {}", path.display()))?;
-    let root = conf
-        .try_deserialize::<ClientConfRoot>()
+    let mut sections = parse_ini_sections(&contents)
         .with_context(|| format!("failed to parse configuration {}", path.display()))?;
 
+    // The [orangu] section holds client-wide settings; every other section is
+    // a named LLM profile.
+    let client = sections.remove(CLIENT_SECTION).unwrap_or_default();
+
+    let timeout = parse_client_field(&client, "timeout", default_timeout)?;
+    let max_tool_rounds =
+        parse_client_field(&client, "max_tool_rounds", default_llm_max_tool_rounds)?;
+    let width = parse_client_field(&client, "width", default_virtual_width)?;
+    let system_prompt = client.get("system_prompt").cloned().unwrap_or_default();
+
     normalize_client_configuration(ClientAppConfiguration {
-        default_model: root.client.model,
-        llms: parse_llm_profiles(
-            root.llms,
-            root.client.timeout,
-            root.client.max_tool_rounds,
-            root.client.system_prompt,
-        )?,
-        quotes: root.client.quotes,
-        width: root.client.width,
-        banner: root.client.banner.parse().unwrap_or_default(),
-        feedback: parse_feedback_bool(&root.client.feedback),
-        auto_rebase: parse_feedback_bool(&root.client.auto_rebase),
-        auto_squash: parse_feedback_bool(&root.client.auto_squash),
+        default_model: client.get("model").cloned().unwrap_or_default(),
+        llms: parse_llm_profiles(sections, timeout, max_tool_rounds, system_prompt)?,
+        quotes: client.get("quotes").cloned().unwrap_or_default(),
+        width,
+        banner: client
+            .get("banner")
+            .map(|value| value.parse().unwrap_or_default())
+            .unwrap_or_default(),
+        feedback: parse_feedback_bool(client.get("feedback").map(String::as_str).unwrap_or("")),
+        auto_rebase: parse_feedback_bool(
+            client.get("auto_rebase").map(String::as_str).unwrap_or(""),
+        ),
+        auto_squash: parse_feedback_bool(
+            client.get("auto_squash").map(String::as_str).unwrap_or(""),
+        ),
     })
+}
+
+/// Parse a typed value from the `[orangu]` section, falling back to `default`
+/// when the key is absent. Profile names and values may freely contain `.`
+/// and `:` — unlike a generic INI loader, this parser never treats those as
+/// nested-key separators.
+fn parse_client_field<T: FromStr>(
+    client: &HashMap<String, String>,
+    key: &str,
+    default: impl Fn() -> T,
+) -> Result<T>
+where
+    T::Err: std::fmt::Display,
+{
+    match client.get(key) {
+        Some(value) => value
+            .trim()
+            .parse::<T>()
+            .map_err(|err| anyhow!("invalid value for [{CLIENT_SECTION}].{key}: {err}")),
+        None => Ok(default()),
+    }
+}
+
+/// Minimal INI parser: `[section]` headers and `key = value` lines, with `#`
+/// and `;` full-line comments and blank lines ignored. Section names and
+/// values are taken literally, so model identifiers containing `.` or `:`
+/// (e.g. `Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M`) round-trip unchanged.
+fn parse_ini_sections(contents: &str) -> Result<HashMap<String, HashMap<String, String>>> {
+    let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut current: Option<String> = None;
+
+    for (index, raw) in contents.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix('[') {
+            let name = rest
+                .strip_suffix(']')
+                .ok_or_else(|| anyhow!("line {}: malformed section header '{}'", index + 1, raw))?;
+            let name = name.trim().to_string();
+            current = Some(name.clone());
+            sections.entry(name).or_default();
+            continue;
+        }
+
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            anyhow!(
+                "line {}: expected 'key = value' but found '{}'",
+                index + 1,
+                raw
+            )
+        })?;
+        let section = current.as_ref().ok_or_else(|| {
+            anyhow!(
+                "line {}: key '{}' appears before any [section]",
+                index + 1,
+                key.trim()
+            )
+        })?;
+        sections
+            .get_mut(section)
+            .expect("current section was inserted")
+            .insert(key.trim().to_string(), value.trim().to_string());
+    }
+
+    Ok(sections)
 }
 
 pub fn default_client_config_path() -> Option<PathBuf> {
@@ -250,6 +297,45 @@ mod tests {
         assert_eq!(conf.llms["gemma"].provider, "llama.cpp");
         assert_eq!(conf.llms["gemma"].request_timeout_seconds, 45);
         assert_eq!(conf.llms["gemma"].max_tool_rounds, 12);
+    }
+
+    #[test]
+    fn loads_profiles_with_dots_and_colons_in_section_names() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu]\nmodel = Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M\n\n[Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M]\nprovider = llama.cpp\nendpoint = http://localhost:8100/v1\nmodel = bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M\n\n[Qwen_Qwen3.6-35B-A3B-GGUF]\nprovider = llama.cpp\nendpoint = http://localhost:8100/v1\nmodel = bartowski/Qwen_Qwen3.6-35B-A3B-GGUF\n"
+        )
+        .unwrap();
+
+        let conf = load_client_configuration(file.path()).unwrap();
+        assert_eq!(conf.default_model, "Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M");
+        assert_eq!(conf.llms.len(), 2);
+        assert!(
+            conf.llms
+                .contains_key("Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M")
+        );
+        assert!(conf.llms.contains_key("Qwen_Qwen3.6-35B-A3B-GGUF"));
+        assert_eq!(
+            conf.llms["Qwen_Qwen3.6-35B-A3B-GGUF"].model,
+            "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF"
+        );
+    }
+
+    #[test]
+    fn reports_invalid_numeric_client_field() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu]\nmodel = a\ntimeout = soon\n\n[a]\nprovider = llama.cpp\nendpoint = http://x/v1\nmodel = m\n"
+        )
+        .unwrap();
+
+        let err = load_client_configuration(file.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid value for [orangu].timeout"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

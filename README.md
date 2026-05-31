@@ -29,8 +29,8 @@
 - Workspace-aware local tools for reading, editing, listing, fetching, and shell commands
 - Persistent terminal UI with workspace, server, and model status in the header, refreshed every minute while idle
 - Shell-style prompt editing, history, scrolling, and context-sensitive Tab completion
-- Local commands such as `/help`, `/models`, `/list_files`, `/show_file`, `/tools`, `/diff`, `/status`, `/log`, `/pull`, `/rebase`, `/merge`, `/checkout`, `/add_file`, `/remove_file`, `/move_file`, `/cherry_pick`, `/comment`, `/commit`, `/amend`, `/push`, `/init_repo`, `/squash`, `/delete`, and `/open_file`
-- Natural-language local aliases such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `status`, `rebase`, `merge feature/foo`, `checkout main`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `amend "[#42] My feature"`, `push`, `force push`, `init repo`, `squash`, `delete feature/foo`, and `show help`
+- Local commands such as `/help`, `/models`, `/list_files`, `/show_file`, `/tools`, `/diff`, `/status`, `/log`, `/pull`, `/rebase`, `/merge`, `/checkout`, `/add_file`, `/remove_file`, `/move_file`, `/cherry_pick`, `/comment`, `/commit`, `/amend`, `/push`, `/review`, `/init_repo`, `/squash`, `/delete`, and `/open_file`
+- Natural-language local aliases such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `status`, `rebase`, `merge feature/foo`, `checkout main`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `amend "[#42] My feature"`, `push`, `force push`, `review`, `init repo`, `squash`, `delete feature/foo`, and `show help`
 - Streaming responses with live footer status such as `Thinking (...)` and llama.cpp-native `Working @ X.Y t/s (...)`
 - Queued local commands while a response is in flight, plus double-`Esc` request cancellation
 - Markdown rendering in the console, including bold, italic, headings, lists, links, and code
@@ -136,6 +136,7 @@ Useful first commands:
 - [Quick start](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/03-quickstart.md)
 - [Configuration](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/20-configuration.md)
 - [Terminal interface](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/40-terminal.md)
+- [Review](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/41-review.md)
 - [Tools](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/30-tools.md)
 
 ## Tested platforms

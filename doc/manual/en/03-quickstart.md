@@ -82,6 +82,7 @@ Then start with:
 /push --force
 /rebase
 /remove_file README.md
+/review
 /squash
 /status
 /usage

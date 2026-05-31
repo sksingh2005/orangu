@@ -12,8 +12,8 @@ path = "src/bin/orangu/main.rs"
 
 [dependencies]
 anyhow = "1.0.100"
+arboard = { version = "3.6.1", default-features = false }
 clap = { version = "4.5.39", features = ["derive"] }
-config = "0.15.18"
 crossterm = "0.29.0"
 home = "0.5.11"
 html2text = "0.13.6"

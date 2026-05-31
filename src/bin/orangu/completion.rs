@@ -34,6 +34,7 @@ pub const COMMANDS: &[&str] = &[
     "/tools",
     "/model",
     "/diff",
+    "/review",
     "/status",
     "/log",
     "/pull",

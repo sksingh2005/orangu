@@ -182,6 +182,7 @@ All slash commands are handled locally. They are not sent to the model.
 | `/push [--force]` | Push the current branch to origin |
 | `/rebase` | Rebase the current branch against master/main |
 | `/remove_file <path>` | Remove a file or directory from Git tracking |
+| `/review` | Review branch changes against main/master in a split view |
 | `/squash` | Squash all branch commits into one using the first commit message |
 | `/status` | Show working tree status with color highlighting |
 | `/usage` | Show usage statistics for this session |
@@ -216,6 +217,7 @@ Free-form prompts are blocked when the server or model status in the header is r
 - `/push [--force]` requires a Git repository and runs `git push origin <branch>` using the current branch name; `gh` has no equivalent so it always uses plain Git; `--force` (or `-f` or `force`) runs `git push -f origin <branch>` but is blocked on `main` and `master` to prevent accidental history rewrites
 - `/init_repo` runs `git init` in the workspace directory; works both inside and outside an existing Git repository (reinitializing an existing repo is safe); `gh` has no equivalent so it always uses plain Git
 - `/squash` requires a Git repository; squashes all commits on the current branch (relative to `origin/main`, `origin/master`, `main`, or `master`, tried in that order) into a single commit using the oldest commit's message; `gh` has no equivalent so it always uses plain Git; squashing on `main` or `master` is blocked; requires at least two commits on the branch
+- `/review` requires a Git repository; it opens a full-screen, two-pane review of the branch's changes (local plus committed) against the default branch — see the [review chapter](#review) for the full layout and key bindings; `gh` has no equivalent so it always uses plain Git
 - `/delete <branch>` requires a Git repository and runs `git branch -D`; `gh` has no equivalent so it always uses plain Git; deleting `main` or `master` is blocked; Tab completion offers local branch names excluding `main` and `master`
 - `/sessions [workspace]` lists all sessions found under `~/.orangu/sessions/`; output is one line per session with aligned columns: UUID, start date, last-updated date, command count, branch, and workspace path; sessions are sorted by creation time, most-recent first; an optional workspace argument filters the list to sessions whose workspace path contains the given string; the branch column shows `-` for sessions with no recorded branch
 - `/session [uuid]` prints the `orangu --resume <uuid>` command for the given session; Tab completion after `/session ` (with a trailing space) cycles through all session UUIDs, newest first; with no argument it lists all sessions (same as `/sessions`)
@@ -238,6 +240,7 @@ Local commands can also be entered in plain language. Examples:
 - `switch model to <name>`
 - `pull 58` or `pull request 58` or `pull #58`
 - `add comment on 51 "My comment"` or `comment on 51 "My comment"`
+- `review` or `review changes` or `code review` or `review branch`
 - `log` or `show log` or `git log` or `git lg`
 - `status` or `show status` or `git status`
 - `rebase` or `git rebase`

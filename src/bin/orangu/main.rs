@@ -25,7 +25,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use crossterm::{
     event::{
-        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
@@ -37,9 +37,10 @@ use orangu::{
     session::ChatSession,
     tools::ToolExecutor,
     tui::{
-        FEEDBACK_ERR, FEEDBACK_OK, ScreenRenderArgs, StatusFragment, render_screen,
-        render_thinking_status, render_tool_running_status, render_working_status, terminal_height,
-        terminal_width,
+        FEEDBACK_ERR, FEEDBACK_OK, ReviewCommentEditor, ReviewEntry, ReviewFeedbackView,
+        ReviewScreenArgs, ReviewStatus, ScreenRenderArgs, StatusFragment, render_review_screen,
+        render_screen, render_thinking_status, render_tool_running_status, render_working_status,
+        review_pane_body_height, terminal_height, terminal_width,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,7 @@ use tiktoken_rs::cl100k_base;
 use uuid::Uuid;
 
 use anyhow::Error;
+use commands::ReviewLaunch;
 use commands::{
     CommandContext, CommandOutcome, CommandState, LocalCommand, LocalError, add_file_usage_message,
     amend_usage_message, checkout_usage_message, cherry_pick_usage_message, comment_usage_message,
@@ -62,11 +64,11 @@ use commands::{
     pull_usage_message, remove_file_usage_message, sorted_model_names, system_prompt,
 };
 use git::{
-    add_file_output, amend_output, checkout_output, cherry_pick_output, comment_output,
-    commit_output, create_pull_request_output, delete_branch_output, git_diff_against_branch,
-    git_workspace_diff, init_repo_output, list_workspace_files_tree, log_output, merge_output,
-    move_file_output, open_in_editor, pull_request_output, push_output, rebase_output,
-    remove_file_output, squash_output, status_output, workspace_branch_name,
+    add_file_output, amend_output, checkout_output, cherry_pick_output, collect_review_diff,
+    comment_output, commit_output, create_pull_request_output, delete_branch_output,
+    git_diff_against_branch, git_workspace_diff, init_repo_output, list_workspace_files_tree,
+    log_output, merge_output, move_file_output, open_in_editor, pull_request_output, push_output,
+    rebase_output, remove_file_output, squash_output, status_output, workspace_branch_name,
 };
 use input::{
     EscapeCancelState, InputContext, InputResult, InputState, InterruptState, OutputState,
@@ -494,6 +496,117 @@ async fn run() -> Result<()> {
                 output_state.reset_scroll();
                 continue;
             }
+            CommandOutcome::Review(launch) => {
+                let mut review = ReviewState::new(launch);
+                loop {
+                    let chrome = ReviewChrome {
+                        current_model: &active_model,
+                        prompt_branch: prompt_branch.as_deref(),
+                        pending_count: pending_commands.len(),
+                    };
+                    match run_review_mode(&mut review, &mut viewport, &mut input_state, chrome)? {
+                        ReviewSignal::Exit => break,
+                        ReviewSignal::RequestReview {
+                            path,
+                            patch,
+                            request,
+                        } => {
+                            // Keep the typed request in the input window until the
+                            // review succeeds, so a cancel or error can be retried.
+                            let title = format!("Review: {path}");
+                            // A typed request is echoed in the popup; a plain
+                            // Alt+o (empty input) has no question to echo.
+                            let question = (!request.trim().is_empty()).then(|| request.clone());
+                            let Some(endpoint) = current_endpoint.as_deref() else {
+                                review.feedback = Some(FeedbackWindow {
+                                    title,
+                                    question,
+                                    lines: vec![
+                                        "Error: Not connected to an LLM server".to_string(),
+                                    ],
+                                    scroll: 0,
+                                    x_offset: 0,
+                                });
+                                continue;
+                            };
+                            let Some(profile) = config.llms.get(&active_model) else {
+                                review.feedback = Some(FeedbackWindow {
+                                    title,
+                                    question,
+                                    lines: vec![format!(
+                                        "Error: unknown model profile '{active_model}'"
+                                    )],
+                                    scroll: 0,
+                                    x_offset: 0,
+                                });
+                                continue;
+                            };
+                            let mut prompt_profile = profile.clone();
+                            prompt_profile.endpoint = endpoint.to_string();
+                            let prompt = build_review_prompt(&path, &request, &patch);
+                            let llm_start = std::time::Instant::now();
+                            let tool_before = tools.total_tool_duration();
+                            let result = run_review_request(
+                                &mut session,
+                                &prompt,
+                                &prompt_profile,
+                                &tools,
+                                &review,
+                                &input_state,
+                                &mut viewport,
+                                chrome,
+                            )
+                            .await?;
+                            let lines = match result {
+                                ReviewRequestOutcome::Exit => break,
+                                ReviewRequestOutcome::Cancelled => continue,
+                                ReviewRequestOutcome::Completed(Ok(text)) => {
+                                    let tool_delta =
+                                        tools.total_tool_duration().saturating_sub(tool_before);
+                                    usage_stats.record_response(
+                                        llm_start.elapsed(),
+                                        &text,
+                                        tool_delta,
+                                    );
+                                    // The request succeeded; clear the input window.
+                                    input_state.clear();
+                                    render::render_markdown_for_console(&text)
+                                        .lines()
+                                        .map(str::to_string)
+                                        .collect()
+                                }
+                                ReviewRequestOutcome::Completed(Err(err)) => {
+                                    vec![format!("Error: {err:#}")]
+                                }
+                            };
+                            review.feedback = Some(FeedbackWindow {
+                                title,
+                                question,
+                                lines,
+                                scroll: 0,
+                                x_offset: 0,
+                            });
+                        }
+                    }
+                }
+                // On exit, print the per-file status and comments to the output
+                // window, and copy the comments to the system clipboard.
+                let (lines, clipboard) = review_exit_output(&review.files, &review.comments);
+                for line in &lines {
+                    output_state.push_text(line);
+                }
+                if let Some(text) = clipboard
+                    && let Err(err) = copy_to_clipboard(&text)
+                {
+                    output_state.push_text(&format!(
+                        "Could not copy review comments to the clipboard: {err}"
+                    ));
+                }
+                // The modal view overwrote the screen; the next loop iteration
+                // redraws the normal interface from the top.
+                output_state.reset_scroll();
+                continue;
+            }
             CommandOutcome::Unhandled => {}
         }
 
@@ -908,6 +1021,26 @@ fn handle_command(
             Ok(output) => Ok(CommandOutcome::Output(output)),
             Err(err) => Ok(local_command_error(err)),
         },
+        LocalCommand::Review => match collect_review_diff(workspace) {
+            Ok(review) if review.files.is_empty() => Ok(CommandOutcome::Output(format!(
+                "No changes to review against {}.",
+                review.base_label
+            ))),
+            Ok(review) => {
+                let files = review
+                    .files
+                    .into_iter()
+                    .map(|file| ReviewEntry {
+                        path: file.path,
+                        status: ReviewStatus::Unreviewed,
+                        diff_lines: file.lines,
+                        patch: file.patch,
+                    })
+                    .collect();
+                Ok(CommandOutcome::Review(ReviewLaunch { files }))
+            }
+            Err(err) => Ok(local_command_error(err)),
+        },
         LocalCommand::Status => match status_output(workspace) {
             Ok(output) => Ok(CommandOutcome::Output(output)),
             Err(err) => Ok(local_command_error(err)),
@@ -1085,6 +1218,582 @@ pub fn print_screen(render: RenderContext<'_>, screen: ScreenState<'_>) {
             x_offset: render.x_offset,
         })
     );
+}
+
+/// The Alt+o feedback popup contents.
+struct FeedbackWindow {
+    title: String,
+    /// The asked request, echoed below the title; `None` for a plain review.
+    question: Option<String>,
+    lines: Vec<String>,
+    scroll: usize,
+    x_offset: usize,
+}
+
+/// A review comment kept against a specific diff line of a file.
+struct ReviewComment {
+    file: String,
+    /// Diff-line index within the file (0-based).
+    line: usize,
+    text: String,
+}
+
+/// Interactive state for `/review` mode.
+struct ReviewState {
+    files: Vec<ReviewEntry>,
+    selected: usize,
+    /// Index of the highlighted line within the selected file's diff (moved
+    /// with Up/Down).
+    line: usize,
+    /// Index of the first line shown in the left pane, within the selected
+    /// file's diff.
+    scroll: usize,
+    /// Horizontal pan offset for the left pane.
+    x_offset: usize,
+    /// When set, the LLM feedback popup is open over the panes.
+    feedback: Option<FeedbackWindow>,
+    /// Comments recorded against diff lines, keyed by (file, line).
+    comments: Vec<ReviewComment>,
+    /// When set, the inline comment editor is open for the highlighted line.
+    comment_editor: Option<InputState>,
+}
+
+/// Why `run_review_mode` returned control to the caller.
+enum ReviewSignal {
+    /// Leave review mode.
+    Exit,
+    /// Run an LLM review of the selected file using the typed request.
+    RequestReview {
+        path: String,
+        patch: String,
+        request: String,
+    },
+}
+
+/// Static rendering pieces for the review prompt frame.
+#[derive(Clone, Copy)]
+struct ReviewChrome<'a> {
+    current_model: &'a str,
+    prompt_branch: Option<&'a str>,
+    pending_count: usize,
+}
+
+impl ReviewState {
+    fn new(launch: ReviewLaunch) -> Self {
+        Self {
+            files: launch.files,
+            selected: 0,
+            line: 0,
+            scroll: 0,
+            x_offset: 0,
+            feedback: None,
+            comments: Vec::new(),
+            comment_editor: None,
+        }
+    }
+
+    fn selected_lines(&self) -> &[String] {
+        self.files
+            .get(self.selected)
+            .map(|file| file.diff_lines.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn selected_path(&self) -> Option<&str> {
+        self.files.get(self.selected).map(|file| file.path.as_str())
+    }
+
+    /// The existing comment text for the highlighted line, if any.
+    fn comment_for_selected_line(&self) -> Option<&str> {
+        let path = self.selected_path()?;
+        self.comments
+            .iter()
+            .find(|comment| comment.file == path && comment.line == self.line)
+            .map(|comment| comment.text.as_str())
+    }
+
+    /// Diff-line indices of the selected file that carry a comment.
+    fn commented_lines(&self) -> Vec<usize> {
+        let Some(path) = self.selected_path() else {
+            return Vec::new();
+        };
+        self.comments
+            .iter()
+            .filter(|comment| comment.file == path)
+            .map(|comment| comment.line)
+            .collect()
+    }
+
+    /// Open the inline comment editor for the highlighted line, pre-filled with
+    /// any existing comment, and scroll so the editor box fits below the line.
+    fn open_comment_editor(&mut self, body_height: usize) {
+        let existing = self.comment_for_selected_line().unwrap_or("").to_string();
+        let mut input = InputState::default();
+        input.set_buffer(existing);
+        self.comment_editor = Some(input);
+
+        // Keep the highlighted line high enough that the box fits beneath it.
+        let room = body_height.saturating_sub(orangu::tui::REVIEW_COMMENT_BOX_HEIGHT + 1);
+        if self.line.saturating_sub(self.scroll) > room {
+            self.scroll = self.line.saturating_sub(room);
+        }
+        if self.scroll > self.line {
+            self.scroll = self.line;
+        }
+    }
+
+    /// Save the editor's text as the comment for the highlighted line (an empty
+    /// comment removes any existing one) and close the editor.
+    fn commit_comment(&mut self) {
+        let Some(editor) = self.comment_editor.take() else {
+            return;
+        };
+        let Some(path) = self.selected_path().map(str::to_string) else {
+            return;
+        };
+        let line = self.line;
+        let text = editor.as_str().trim().to_string();
+        self.comments
+            .retain(|comment| !(comment.file == path && comment.line == line));
+        if !text.is_empty() {
+            self.comments.push(ReviewComment {
+                file: path,
+                line,
+                text,
+            });
+        }
+    }
+
+    /// Clamp scroll/pan offsets for whichever view is active.
+    fn clamp(&mut self, body_height: usize, left_width: usize, full_width: usize) {
+        if let Some(feedback) = &mut self.feedback {
+            // A pinned question line costs one row of review text.
+            let review_rows = body_height.saturating_sub(usize::from(feedback.question.is_some()));
+            let max_scroll = feedback.lines.len().saturating_sub(review_rows);
+            feedback.scroll = feedback.scroll.min(max_scroll);
+            let content_width = feedback
+                .lines
+                .iter()
+                .map(|line| orangu::tui::visible_line_width(line))
+                .max()
+                .unwrap_or(0);
+            feedback.x_offset = feedback
+                .x_offset
+                .min(content_width.saturating_sub(full_width));
+        } else {
+            self.line = self.line.min(self.selected_lines().len().saturating_sub(1));
+            let max_scroll = self.selected_lines().len().saturating_sub(body_height);
+            self.scroll = self.scroll.min(max_scroll);
+            let content_width = self
+                .selected_lines()
+                .iter()
+                .map(|line| orangu::tui::visible_line_width(line))
+                .max()
+                .unwrap_or(0);
+            self.x_offset = self.x_offset.min(content_width.saturating_sub(left_width));
+        }
+    }
+
+    /// Move the highlighted line up, scrolling the pane to keep it visible.
+    fn cursor_up(&mut self) {
+        self.line = self.line.saturating_sub(1);
+        if self.line < self.scroll {
+            self.scroll = self.line;
+        }
+    }
+
+    /// Move the highlighted line down, scrolling the pane to keep it visible.
+    fn cursor_down(&mut self, body_height: usize) {
+        let last = self.selected_lines().len().saturating_sub(1);
+        self.line = (self.line + 1).min(last);
+        if body_height > 0 && self.line >= self.scroll + body_height {
+            self.scroll = self.line + 1 - body_height;
+        }
+    }
+
+    fn select_next(&mut self) {
+        if self.selected + 1 < self.files.len() {
+            self.selected += 1;
+            self.line = 0;
+            self.scroll = 0;
+            self.x_offset = 0;
+        }
+    }
+
+    fn select_prev(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+            self.line = 0;
+            self.scroll = 0;
+            self.x_offset = 0;
+        }
+    }
+
+    fn set_status(&mut self, status: ReviewStatus) {
+        if let Some(file) = self.files.get_mut(self.selected) {
+            file.status = status;
+        }
+    }
+}
+
+fn build_review_prompt(path: &str, request: &str, patch: &str) -> String {
+    let request = request.trim();
+    let instruction = if request.is_empty() {
+        format!(
+            "Please review the following changes to `{path}` and give concise, actionable feedback."
+        )
+    } else {
+        format!("Please review the following changes to `{path}`. {request}")
+    };
+    format!("{instruction}\n\n```diff\n{patch}\n```")
+}
+
+/// Copy `text` to the system clipboard.
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    let mut clipboard = arboard::Clipboard::new().context("failed to access the clipboard")?;
+    clipboard
+        .set_text(text.to_string())
+        .context("failed to write to the clipboard")?;
+    Ok(())
+}
+
+/// Format the recorded review comments as `<file>:<line>: <comment>` lines,
+/// ordered by file then line. Line numbers are shown 1-based.
+fn format_review_comments(comments: &[ReviewComment]) -> Vec<String> {
+    let mut ordered: Vec<&ReviewComment> = comments.iter().collect();
+    ordered.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    ordered
+        .into_iter()
+        .map(|comment| format!("{}:{}: {}", comment.file, comment.line + 1, comment.text))
+        .collect()
+}
+
+/// The human-readable status label for a file in the exit summary.
+fn review_status_label(status: ReviewStatus) -> &'static str {
+    match status {
+        ReviewStatus::Approved => "Approved",
+        ReviewStatus::Rejected => "Rejected",
+        ReviewStatus::Unreviewed => "No review",
+    }
+}
+
+/// A colored dot shown after the status label: green/red/white.
+fn review_status_dot(status: ReviewStatus) -> &'static str {
+    match status {
+        ReviewStatus::Approved => "\x1b[38;2;80;200;120m●\x1b[0m",
+        ReviewStatus::Rejected => "\x1b[38;2;220;80;80m●\x1b[0m",
+        ReviewStatus::Unreviewed => "\x1b[38;2;230;230;230m●\x1b[0m",
+    }
+}
+
+/// Build the review exit summary: the lines to print to the output window, and
+/// the text (if any) to copy to the clipboard. When every file is approved and
+/// there are no comments, the summary is just "Patch approved". Otherwise it is
+/// each file's status, then the comments, then a final "Patch rejected" verdict.
+/// Only the comments are copied to the clipboard (never the verdict line).
+fn review_exit_output(
+    files: &[ReviewEntry],
+    comments: &[ReviewComment],
+) -> (Vec<String>, Option<String>) {
+    let comment_lines = format_review_comments(comments);
+    let all_approved = !files.is_empty()
+        && files
+            .iter()
+            .all(|file| file.status == ReviewStatus::Approved);
+    if all_approved && comment_lines.is_empty() {
+        return (vec!["\x1b[1mPatch approved\x1b[0m".to_string()], None);
+    }
+
+    let mut lines: Vec<String> = files
+        .iter()
+        .map(|file| {
+            format!(
+                "{}: {} {}",
+                file.path,
+                review_status_label(file.status),
+                review_status_dot(file.status),
+            )
+        })
+        .collect();
+    let clipboard = (!comment_lines.is_empty()).then(|| comment_lines.join("\n"));
+    lines.extend(comment_lines);
+    lines.push("\x1b[1mPatch rejected\x1b[0m".to_string());
+    (lines, clipboard)
+}
+
+fn print_review_screen(
+    state: &ReviewState,
+    input_state: &InputState,
+    viewport: &ViewportState,
+    chrome: ReviewChrome<'_>,
+    left_status: Option<StatusFragment>,
+) {
+    let feedback = state.feedback.as_ref().map(|feedback| ReviewFeedbackView {
+        title: &feedback.title,
+        question: feedback.question.as_deref(),
+        lines: &feedback.lines,
+        scroll: feedback.scroll,
+        x_offset: feedback.x_offset,
+    });
+    let comment_editor = state
+        .comment_editor
+        .as_ref()
+        .map(|editor| ReviewCommentEditor {
+            text: editor.as_str(),
+            cursor: editor.cursor(),
+        });
+    let commented_lines = state.commented_lines();
+    print!("{CLEAR_TERMINAL_SEQUENCE}");
+    print!(
+        "{}",
+        render_review_screen(ReviewScreenArgs {
+            files: &state.files,
+            selected: state.selected,
+            line: state.line,
+            scroll: state.scroll,
+            x_offset: state.x_offset,
+            feedback,
+            comment_editor,
+            commented_lines: &commented_lines,
+            current_model: chrome.current_model,
+            prompt_branch: chrome.prompt_branch,
+            input: input_state.as_str(),
+            cursor: input_state.cursor(),
+            left_status,
+            pending_count: chrome.pending_count,
+            actual_width: viewport.actual_width,
+            actual_height: viewport.actual_height,
+        })
+    );
+}
+
+/// Run the review event loop until the user exits or asks for an LLM review.
+fn run_review_mode(
+    state: &mut ReviewState,
+    viewport: &mut ViewportState,
+    input_state: &mut InputState,
+    chrome: ReviewChrome<'_>,
+) -> Result<ReviewSignal> {
+    let mut escape_cancel = EscapeCancelState::default();
+    loop {
+        let body_height = review_pane_body_height(
+            viewport.actual_height,
+            input_state.as_str(),
+            chrome.prompt_branch,
+            viewport.actual_width,
+        );
+        let right_width = orangu::tui::review_right_width(&state.files, viewport.actual_width);
+        let left_width = viewport.actual_width.saturating_sub(right_width + 1).max(1);
+        state.clamp(body_height, left_width, viewport.actual_width);
+        print_review_screen(state, input_state, viewport, chrome, None);
+        std::io::stdout().flush()?;
+
+        let (code, modifiers) = match event::read()? {
+            Event::Resize(width, height) => {
+                viewport.on_resize(usize::from(width), usize::from(height));
+                continue;
+            }
+            Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind,
+                ..
+            }) if kind == KeyEventKind::Press || kind == KeyEventKind::Repeat => (code, modifiers),
+            _ => continue,
+        };
+
+        let alt =
+            modifiers.contains(KeyModifiers::ALT) && !modifiers.contains(KeyModifiers::CONTROL);
+        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+
+        // While the feedback popup is open it is modal: scroll it, or close it.
+        if let Some(feedback) = &mut state.feedback {
+            escape_cancel.reset();
+            match code {
+                KeyCode::Char('x') | KeyCode::Esc => state.feedback = None,
+                KeyCode::Up => feedback.scroll = feedback.scroll.saturating_sub(1),
+                KeyCode::Down => feedback.scroll = feedback.scroll.saturating_add(1),
+                KeyCode::Left => feedback.x_offset = feedback.x_offset.saturating_sub(1),
+                KeyCode::Right => feedback.x_offset = feedback.x_offset.saturating_add(1),
+                KeyCode::PageUp => feedback.scroll = feedback.scroll.saturating_sub(body_height),
+                KeyCode::PageDown => feedback.scroll = feedback.scroll.saturating_add(body_height),
+                _ => {}
+            }
+            continue;
+        }
+
+        // While the inline comment editor is open it is modal: type the comment,
+        // Enter saves it, Esc discards it.
+        if state.comment_editor.is_some() {
+            escape_cancel.reset();
+            match (code, alt, ctrl) {
+                (KeyCode::Enter, _, _) => state.commit_comment(),
+                (KeyCode::Esc, _, _) => state.comment_editor = None,
+                (KeyCode::Backspace, true, _) => {
+                    state
+                        .comment_editor
+                        .as_mut()
+                        .unwrap()
+                        .delete_backward_readline_word();
+                }
+                (KeyCode::Backspace, _, _) => state.comment_editor.as_mut().unwrap().backspace(),
+                (KeyCode::Delete, _, _) => state.comment_editor.as_mut().unwrap().delete(),
+                (KeyCode::Left, _, true) => {
+                    state
+                        .comment_editor
+                        .as_mut()
+                        .unwrap()
+                        .move_backward_readline_word();
+                }
+                (KeyCode::Right, _, true) => {
+                    state
+                        .comment_editor
+                        .as_mut()
+                        .unwrap()
+                        .move_forward_readline_word();
+                }
+                (KeyCode::Left, _, _) => state.comment_editor.as_mut().unwrap().move_left(),
+                (KeyCode::Right, _, _) => state.comment_editor.as_mut().unwrap().move_right(),
+                (KeyCode::Home, _, _) => state.comment_editor.as_mut().unwrap().move_home(),
+                (KeyCode::End, _, _) => state.comment_editor.as_mut().unwrap().move_end(),
+                (KeyCode::Char(ch), false, false) => {
+                    state.comment_editor.as_mut().unwrap().insert_char(ch);
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        // A second Esc within the timeout leaves review mode; the first arms it.
+        if code == KeyCode::Esc {
+            if escape_cancel.handle_escape(std::time::Instant::now()) {
+                return Ok(ReviewSignal::Exit);
+            }
+            continue;
+        }
+        escape_cancel.reset();
+
+        match (code, alt, ctrl) {
+            (KeyCode::Char('x'), true, _) => return Ok(ReviewSignal::Exit),
+            (KeyCode::Char('j'), true, _) => state.select_next(),
+            (KeyCode::Char('k'), true, _) => state.select_prev(),
+            (KeyCode::Char('a'), true, _) => state.set_status(ReviewStatus::Approved),
+            (KeyCode::Char('r'), true, _) => state.set_status(ReviewStatus::Rejected),
+            (KeyCode::Char('c'), true, _) => state.open_comment_editor(body_height),
+            (KeyCode::Char('o'), true, _) | (KeyCode::Enter, _, _) => {
+                if let Some(file) = state.files.get(state.selected) {
+                    return Ok(ReviewSignal::RequestReview {
+                        path: file.path.clone(),
+                        patch: file.patch.clone(),
+                        request: input_state.as_str().to_string(),
+                    });
+                }
+            }
+            // Left-pane scrolling (Alt+arrows / PageUp/Down), mirroring the
+            // main output window.
+            (KeyCode::Up, true, _) => state.scroll = state.scroll.saturating_sub(1),
+            (KeyCode::Down, true, _) => state.scroll = state.scroll.saturating_add(1),
+            (KeyCode::Left, true, _) => state.x_offset = state.x_offset.saturating_sub(1),
+            (KeyCode::Right, true, _) => state.x_offset = state.x_offset.saturating_add(1),
+            (KeyCode::PageUp, _, _) => state.scroll = state.scroll.saturating_sub(body_height),
+            (KeyCode::PageDown, _, _) => state.scroll = state.scroll.saturating_add(body_height),
+            // Move the highlighted line through the diff, view following.
+            (KeyCode::Up, false, _) => state.cursor_up(),
+            (KeyCode::Down, false, _) => state.cursor_down(body_height),
+            // Input window editing.
+            (KeyCode::Backspace, true, _) => input_state.delete_backward_readline_word(),
+            (KeyCode::Backspace, _, _) => input_state.backspace(),
+            (KeyCode::Delete, _, _) => input_state.delete(),
+            (KeyCode::Left, _, true) => input_state.move_backward_readline_word(),
+            (KeyCode::Right, _, true) => input_state.move_forward_readline_word(),
+            (KeyCode::Left, _, _) => input_state.move_left(),
+            (KeyCode::Right, _, _) => input_state.move_right(),
+            (KeyCode::Home, _, _) | (KeyCode::Char('a'), _, true) => input_state.move_home(),
+            (KeyCode::End, _, _) | (KeyCode::Char('e'), _, true) => input_state.move_end(),
+            (KeyCode::Char('k'), _, true) => input_state.kill_to_end(),
+            (KeyCode::Char('u'), _, true) => input_state.kill_to_start(),
+            (KeyCode::Char('w'), _, true) => input_state.delete_prev_word(),
+            (KeyCode::Char(ch), false, false) => input_state.insert_char(ch),
+            _ => {}
+        }
+    }
+}
+
+/// Result of an Alt+o review request.
+enum ReviewRequestOutcome {
+    /// The model responded (`Ok`) or the request errored (`Err`); either way the
+    /// outcome is shown in the feedback popup.
+    Completed(Result<String>),
+    /// The user pressed Esc twice — abort and return to the panes.
+    Cancelled,
+    /// The user pressed Alt+x — leave review mode entirely.
+    Exit,
+}
+
+/// Ask the LLM to review the selected file, rendering the review screen with a
+/// thinking indicator until the response arrives. The exchange is recorded in
+/// the session so it can be followed up after leaving review mode. While the
+/// model works, `Esc` `Esc` cancels the request and `Alt+x` exits review mode;
+/// either way the pending exchange is rolled back out of the session.
+#[allow(clippy::too_many_arguments)]
+async fn run_review_request(
+    session: &mut ChatSession,
+    prompt: &str,
+    profile: &LlmConfiguration,
+    tools: &ToolExecutor,
+    state: &ReviewState,
+    input_state: &InputState,
+    viewport: &mut ViewportState,
+    chrome: ReviewChrome<'_>,
+) -> Result<ReviewRequestOutcome> {
+    let checkpoint = session.checkpoint();
+    let mut future = Box::pin(session.prompt(prompt, profile, tools, |_| {}, |_| {}, |_| {}));
+    let mut interval = tokio::time::interval(WAIT_LOOP_POLL_INTERVAL);
+    let started = std::time::Instant::now();
+    let mut escape_cancel = EscapeCancelState::default();
+
+    loop {
+        tokio::select! {
+            result = &mut future => return Ok(ReviewRequestOutcome::Completed(result)),
+            _ = interval.tick() => {
+                while event::poll(std::time::Duration::ZERO)? {
+                    let (code, modifiers) = match event::read()? {
+                        Event::Resize(width, height) => {
+                            viewport.on_resize(usize::from(width), usize::from(height));
+                            continue;
+                        }
+                        Event::Key(KeyEvent { code, modifiers, kind, .. })
+                            if kind == KeyEventKind::Press || kind == KeyEventKind::Repeat =>
+                        {
+                            (code, modifiers)
+                        }
+                        _ => continue,
+                    };
+                    let alt = modifiers.contains(KeyModifiers::ALT)
+                        && !modifiers.contains(KeyModifiers::CONTROL);
+                    if code == KeyCode::Char('x') && alt {
+                        drop(future);
+                        session.rollback(checkpoint);
+                        return Ok(ReviewRequestOutcome::Exit);
+                    }
+                    if code == KeyCode::Esc {
+                        if escape_cancel.handle_escape(std::time::Instant::now()) {
+                            drop(future);
+                            session.rollback(checkpoint);
+                            return Ok(ReviewRequestOutcome::Cancelled);
+                        }
+                    } else {
+                        escape_cancel.reset();
+                    }
+                }
+                let frame = (started.elapsed().as_millis()
+                    / THINKING_FRAME_INTERVAL.as_millis().max(1)) as usize;
+                let status = render_thinking_status(frame, started.elapsed());
+                print_review_screen(state, input_state, viewport, chrome, Some(status));
+                std::io::stdout().flush()?;
+            }
+        }
+    }
 }
 
 async fn wait_for_response(
@@ -2165,6 +2874,339 @@ mod tests {
         assert_eq!(stats.total_llm_duration, Duration::from_secs(3));
         assert_eq!(stats.total_tool_duration, Duration::from_secs(1));
         assert!(stats.total_tokens > 0);
+    }
+
+    #[test]
+    fn review_state_navigation_shows_only_selected_file_diff() {
+        use super::ReviewState;
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let mut state = ReviewState {
+            files: vec![
+                ReviewEntry {
+                    path: "a.txt".to_string(),
+                    status: ReviewStatus::Unreviewed,
+                    diff_lines: (0..30).map(|i| format!("a {i}")).collect(),
+                    patch: String::new(),
+                },
+                ReviewEntry {
+                    path: "b.txt".to_string(),
+                    status: ReviewStatus::Unreviewed,
+                    diff_lines: (0..8).map(|i| format!("b {i}")).collect(),
+                    patch: String::new(),
+                },
+            ],
+            selected: 0,
+            line: 0,
+            scroll: 7,
+            x_offset: 5,
+            feedback: None,
+            comments: Vec::new(),
+            comment_editor: None,
+        };
+
+        // The left pane reflects the selected file's own diff.
+        assert_eq!(state.selected_lines().len(), 30);
+
+        // Moving to the next file shows it from the top.
+        state.select_next();
+        assert_eq!(state.selected, 1);
+        assert_eq!(state.scroll, 0, "scroll resets on file change");
+        assert_eq!(state.x_offset, 0, "horizontal pan resets on file change");
+        assert_eq!(state.selected_lines().len(), 8);
+
+        // Cannot move past the last file.
+        state.select_next();
+        assert_eq!(state.selected, 1);
+
+        // Scroll is clamped to the selected file's diff length minus the body.
+        state.scroll = 999;
+        state.clamp(5, 20, 40);
+        assert_eq!(state.scroll, 8 - 5);
+
+        // Marking sets status on the selected file only.
+        state.set_status(ReviewStatus::Approved);
+        assert_eq!(state.files[1].status, ReviewStatus::Approved);
+        assert_eq!(state.files[0].status, ReviewStatus::Unreviewed);
+
+        state.select_prev();
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.scroll, 0);
+        assert_eq!(state.line, 0, "line cursor resets on file change");
+    }
+
+    #[test]
+    fn review_cursor_moves_and_scrolls_to_follow() {
+        use super::ReviewState;
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let mut state = ReviewState {
+            files: vec![ReviewEntry {
+                path: "a.txt".to_string(),
+                status: ReviewStatus::Unreviewed,
+                diff_lines: (0..20).map(|i| format!("a {i}")).collect(),
+                patch: String::new(),
+            }],
+            selected: 0,
+            line: 0,
+            scroll: 0,
+            x_offset: 0,
+            feedback: None,
+            comments: Vec::new(),
+            comment_editor: None,
+        };
+
+        // Down past the visible body height scrolls the pane to follow.
+        let body = 5;
+        for _ in 0..6 {
+            state.cursor_down(body);
+        }
+        assert_eq!(state.line, 6);
+        assert_eq!(state.scroll, 6 + 1 - body, "view follows the cursor down");
+
+        // Back up above the top scrolls the pane back up.
+        for _ in 0..5 {
+            state.cursor_up();
+        }
+        assert_eq!(state.line, 1);
+        assert_eq!(state.scroll, 1, "view follows the cursor up");
+
+        // The cursor cannot move past the last line.
+        for _ in 0..100 {
+            state.cursor_down(body);
+        }
+        assert_eq!(state.line, 19);
+    }
+
+    #[test]
+    fn review_comments_are_recorded_per_file_and_line() {
+        use super::ReviewState;
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let entry = |path: &str| ReviewEntry {
+            path: path.to_string(),
+            status: ReviewStatus::Unreviewed,
+            diff_lines: (0..10).map(|i| format!("x {i}")).collect(),
+            patch: String::new(),
+        };
+        let mut state = ReviewState {
+            files: vec![entry("a.txt"), entry("b.txt")],
+            selected: 0,
+            line: 3,
+            scroll: 0,
+            x_offset: 0,
+            feedback: None,
+            comments: Vec::new(),
+            comment_editor: None,
+        };
+
+        // Open the editor (pre-filled empty), type, and commit.
+        state.open_comment_editor(20);
+        assert!(state.comment_editor.is_some());
+        for ch in "looks off".chars() {
+            state.comment_editor.as_mut().unwrap().insert_char(ch);
+        }
+        state.commit_comment();
+        assert!(state.comment_editor.is_none());
+        assert_eq!(state.comments.len(), 1);
+        assert_eq!(state.comments[0].file, "a.txt");
+        assert_eq!(state.comments[0].line, 3);
+        assert_eq!(state.comments[0].text, "looks off");
+        assert_eq!(state.commented_lines(), vec![3]);
+
+        // Re-opening pre-fills the existing comment; editing replaces it.
+        state.open_comment_editor(20);
+        assert_eq!(state.comment_editor.as_ref().unwrap().as_str(), "looks off");
+        state.commit_comment();
+        assert_eq!(state.comments.len(), 1, "no duplicate for the same line");
+
+        // An empty comment removes it.
+        state.open_comment_editor(20);
+        state.comment_editor.as_mut().unwrap().kill_to_start();
+        state.commit_comment();
+        assert!(state.comments.is_empty());
+        assert!(state.commented_lines().is_empty());
+
+        // Comments are scoped to the selected file.
+        state.open_comment_editor(20);
+        for ch in "note".chars() {
+            state.comment_editor.as_mut().unwrap().insert_char(ch);
+        }
+        state.commit_comment();
+        state.select_next();
+        assert_eq!(state.selected, 1);
+        assert!(
+            state.commented_lines().is_empty(),
+            "b.txt has no comments yet"
+        );
+    }
+
+    #[test]
+    fn alt_c_on_commented_line_opens_editor_prefilled_in_the_box() {
+        use super::ReviewState;
+        use orangu::tui::{
+            ReviewCommentEditor, ReviewEntry, ReviewScreenArgs, ReviewStatus, render_review_screen,
+        };
+
+        let mut state = ReviewState {
+            files: vec![ReviewEntry {
+                path: "a.txt".to_string(),
+                status: ReviewStatus::Unreviewed,
+                diff_lines: (0..10).map(|i| format!("x {i}")).collect(),
+                patch: String::new(),
+            }],
+            selected: 0,
+            line: 2,
+            scroll: 0,
+            x_offset: 0,
+            feedback: None,
+            comments: Vec::new(),
+            comment_editor: None,
+        };
+
+        // Record a comment on the highlighted line, then re-open with Alt+c.
+        state.open_comment_editor(12);
+        for ch in "needs a guard".chars() {
+            state.comment_editor.as_mut().unwrap().insert_char(ch);
+        }
+        state.commit_comment();
+        state.open_comment_editor(12);
+
+        // The editor holds the existing comment, and it renders inside the box.
+        assert_eq!(
+            state.comment_editor.as_ref().unwrap().as_str(),
+            "needs a guard"
+        );
+        let editor = state
+            .comment_editor
+            .as_ref()
+            .map(|input| ReviewCommentEditor {
+                text: input.as_str(),
+                cursor: input.cursor(),
+            });
+        let commented = state.commented_lines();
+        let rendered = render_review_screen(ReviewScreenArgs {
+            files: &state.files,
+            selected: state.selected,
+            line: state.line,
+            scroll: state.scroll,
+            x_offset: state.x_offset,
+            feedback: None,
+            comment_editor: editor,
+            commented_lines: &commented,
+            current_model: "model",
+            prompt_branch: Some("main"),
+            input: "",
+            cursor: 0,
+            left_status: None,
+            pending_count: 0,
+            actual_width: 60,
+            actual_height: 16,
+        });
+        assert!(
+            rendered.contains("needs a guard"),
+            "existing comment not loaded into the box"
+        );
+    }
+
+    #[test]
+    fn format_review_comments_sorts_and_uses_one_based_lines() {
+        use super::{ReviewComment, format_review_comments};
+
+        let comments = vec![
+            ReviewComment {
+                file: "src/b.rs".to_string(),
+                line: 4,
+                text: "second file".to_string(),
+            },
+            ReviewComment {
+                file: "src/a.rs".to_string(),
+                line: 9,
+                text: "later line".to_string(),
+            },
+            ReviewComment {
+                file: "src/a.rs".to_string(),
+                line: 0,
+                text: "first line".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            format_review_comments(&comments),
+            vec![
+                "src/a.rs:1: first line".to_string(),
+                "src/a.rs:10: later line".to_string(),
+                "src/b.rs:5: second file".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn review_exit_output_summarizes_statuses_and_comments() {
+        use super::{ReviewComment, review_exit_output, review_status_dot};
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let entry = |path: &str, status| ReviewEntry {
+            path: path.to_string(),
+            status,
+            diff_lines: vec!["+x".to_string()],
+            patch: String::new(),
+        };
+        let status_line = |path: &str, label: &str, status| {
+            format!("{path}: {label} {}", review_status_dot(status))
+        };
+
+        // All approved + no comments => just "Patch approved", nothing copied.
+        let files = vec![
+            entry("a.txt", ReviewStatus::Approved),
+            entry("b.txt", ReviewStatus::Approved),
+        ];
+        let (lines, clipboard) = review_exit_output(&files, &[]);
+        assert_eq!(lines, vec!["\x1b[1mPatch approved\x1b[0m".to_string()]);
+        assert!(clipboard.is_none());
+
+        // Mixed statuses: per-file status lines, then comments; only comments
+        // are copied.
+        let files = vec![
+            entry("a.txt", ReviewStatus::Approved),
+            entry("b.txt", ReviewStatus::Rejected),
+            entry("c.txt", ReviewStatus::Unreviewed),
+        ];
+        let comments = vec![ReviewComment {
+            file: "b.txt".to_string(),
+            line: 2,
+            text: "fix this".to_string(),
+        }];
+        let (lines, clipboard) = review_exit_output(&files, &comments);
+        assert_eq!(
+            lines,
+            vec![
+                status_line("a.txt", "Approved", ReviewStatus::Approved),
+                status_line("b.txt", "Rejected", ReviewStatus::Rejected),
+                status_line("c.txt", "No review", ReviewStatus::Unreviewed),
+                "b.txt:3: fix this".to_string(),
+                "\x1b[1mPatch rejected\x1b[0m".to_string(),
+            ]
+        );
+        assert_eq!(clipboard.as_deref(), Some("b.txt:3: fix this"));
+
+        // Approved but with a comment => not the "Patch approved" shortcut.
+        let files = vec![entry("a.txt", ReviewStatus::Approved)];
+        let comments = vec![ReviewComment {
+            file: "a.txt".to_string(),
+            line: 0,
+            text: "nit".to_string(),
+        }];
+        let (lines, clipboard) = review_exit_output(&files, &comments);
+        assert_eq!(
+            lines,
+            vec![
+                status_line("a.txt", "Approved", ReviewStatus::Approved),
+                "a.txt:1: nit".to_string(),
+                "\x1b[1mPatch rejected\x1b[0m".to_string(),
+            ]
+        );
+        assert_eq!(clipboard.as_deref(), Some("a.txt:1: nit"));
     }
 
     #[test]

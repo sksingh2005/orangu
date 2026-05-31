@@ -65,6 +65,7 @@ orangu --config ./orangu.conf
 - `/push --force`
 - `/rebase`
 - `/remove_file README.md`
+- `/review`
 - `/squash`
 - `/status`
 - `/usage`

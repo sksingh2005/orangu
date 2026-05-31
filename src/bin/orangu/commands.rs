@@ -14,7 +14,9 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use anyhow::{Result, anyhow};
-use orangu::{config::LlmConfiguration, session::ChatSession, tools::ToolExecutor};
+use orangu::{
+    config::LlmConfiguration, session::ChatSession, tools::ToolExecutor, tui::ReviewEntry,
+};
 use std::{borrow::Cow, collections::HashMap, path::Path, pin::Pin};
 use terminal_size::{Width, terminal_size};
 
@@ -113,6 +115,14 @@ pub enum CommandOutcome {
     Quit,
     Blocking(Box<dyn FnOnce() -> anyhow::Result<String> + Send + 'static>),
     Async(Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'static>>),
+    /// Enter the interactive `/review` mode with a collected branch diff.
+    Review(ReviewLaunch),
+}
+
+/// Data handed to the interactive review mode: the changed files, each with its
+/// own rendered diff lines.
+pub struct ReviewLaunch {
+    pub files: Vec<ReviewEntry>,
 }
 
 pub enum LocalCommand<'a> {
@@ -128,6 +138,7 @@ pub enum LocalCommand<'a> {
     ModelInfo,
     SetModel(&'a str),
     Diff(Option<Cow<'a, str>>),
+    Review,
     Status,
     Log,
     Pull(Option<u64>),
@@ -212,6 +223,7 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
         "/pull" => Some(LocalCommand::Pull(None)),
         "/comment" => Some(LocalCommand::Comment(None)),
         "/pull_request" => Some(LocalCommand::CreatePullRequest),
+        "/review" => Some(LocalCommand::Review),
         "/push" => Some(LocalCommand::Push(false)),
         "/rebase" => Some(LocalCommand::Rebase),
         "/remove_file" => Some(LocalCommand::RemoveFile(None)),
@@ -428,6 +440,12 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
                 Some(Cow::Borrowed(branch))
             }));
         }
+    }
+    if matches_ci(
+        input,
+        &["review", "review changes", "code review", "review branch"],
+    ) {
+        return Some(LocalCommand::Review);
     }
     if matches_ci(input, &["status", "show status", "git status"]) {
         return Some(LocalCommand::Status);
@@ -1104,6 +1122,22 @@ mod tests {
             parse_local_command("/comment notanumber \"My comment\""),
             Some(LocalCommand::Comment(None))
         ));
+    }
+
+    #[test]
+    fn parses_review_commands() {
+        for input in [
+            "/review",
+            "review",
+            "Review",
+            "review changes",
+            "code review",
+        ] {
+            assert!(
+                matches!(parse_local_command(input), Some(LocalCommand::Review)),
+                "expected {input:?} to parse as Review"
+            );
+        }
     }
 
     #[test]

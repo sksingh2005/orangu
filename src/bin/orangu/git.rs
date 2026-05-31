@@ -320,35 +320,12 @@ pub fn git_workspace_diff(workspace: &Path) -> Result<String> {
         .ok()
         .filter(|path| !path.as_os_str().is_empty());
 
-    let mut command = std::process::Command::new("git");
-    command
-        .arg("-C")
-        .arg(&repo_root)
-        .arg("diff")
-        .arg("--color=always");
-    command.env("COLUMNS", terminal_width.to_string());
+    let mut command = colorized_git_diff_command(&repo_root);
     if let Some(pathspec) = workspace_pathspec {
         command.arg("--").arg(pathspec);
     }
 
-    let output = command.output().context("failed to run git diff")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(anyhow!(
-            "git diff failed{}",
-            if stderr.is_empty() {
-                String::new()
-            } else {
-                format!(": {stderr}")
-            }
-        ));
-    }
-
-    let diff = if let Some(pager_command) = configured_git_diff_pager(&repo_root)? {
-        run_git_diff_pager(&repo_root, &pager_command, &output.stdout, terminal_width)?
-    } else {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    };
+    let diff = render_git_diff(&repo_root, command, terminal_width)?;
     if diff.trim().is_empty() {
         Ok("No changes against the current branch.".to_string())
     } else {
@@ -362,15 +339,39 @@ pub fn git_diff_against_branch(workspace: &Path, branch: &str) -> Result<String>
     };
     let terminal_width = current_terminal_width();
 
+    let mut command = colorized_git_diff_command(&repo_root);
+    command.arg(format!("{branch}...HEAD"));
+
+    let diff = render_git_diff(&repo_root, command, terminal_width)?;
+    if diff.trim().is_empty() {
+        Ok(format!("No changes against {branch}."))
+    } else {
+        Ok(diff)
+    }
+}
+
+/// Start a `git -C <root> diff --color=always` command; callers append the
+/// range and pathspec they need.
+fn colorized_git_diff_command(repo_root: &Path) -> std::process::Command {
     let mut command = std::process::Command::new("git");
     command
         .arg("-C")
-        .arg(&repo_root)
+        .arg(repo_root)
         .arg("diff")
-        .arg("--color=always")
-        .arg(format!("{branch}...HEAD"));
-    command.env("COLUMNS", terminal_width.to_string());
+        .arg("--color=always");
+    command
+}
 
+/// Run a prepared `git diff` command and render it exactly as the `/diff` tool
+/// does: pipe the colorized output through the configured non-interactive git
+/// pager (e.g. `delta`) when one is set, otherwise return the raw colorized
+/// diff.
+fn render_git_diff(
+    repo_root: &Path,
+    mut command: std::process::Command,
+    terminal_width: usize,
+) -> Result<String> {
+    command.env("COLUMNS", terminal_width.to_string());
     let output = command.output().context("failed to run git diff")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -384,16 +385,117 @@ pub fn git_diff_against_branch(workspace: &Path, branch: &str) -> Result<String>
         ));
     }
 
-    let diff = if let Some(pager_command) = configured_git_diff_pager(&repo_root)? {
-        run_git_diff_pager(&repo_root, &pager_command, &output.stdout, terminal_width)?
+    if let Some(pager_command) = configured_git_diff_pager(repo_root)? {
+        run_git_diff_pager(repo_root, &pager_command, &output.stdout, terminal_width)
     } else {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    };
-    if diff.trim().is_empty() {
-        Ok(format!("No changes against {branch}."))
-    } else {
-        Ok(diff)
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
+}
+
+/// The combined diff for `/review`: local (uncommitted) changes plus the
+/// changes committed on the current branch, measured against the merge base
+/// with the default branch (main/master). Returns the colorized diff split
+/// into lines, plus the location of each file's section within those lines.
+pub struct ReviewDiff {
+    pub base_label: String,
+    pub files: Vec<ReviewFileDiff>,
+}
+
+pub struct ReviewFileDiff {
+    pub path: String,
+    /// Colorized diff lines for display (configured pager applied).
+    pub lines: Vec<String>,
+    /// Plain unified diff (no color/pager) suitable for sending to the LLM.
+    pub patch: String,
+}
+
+pub fn collect_review_diff(workspace: &Path) -> Result<ReviewDiff> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("review is only available inside a Git repository"))?;
+    let base_ref = git_find_base_ref(&repo_root)?;
+
+    // Diff against the merge base so we show what this branch adds (committed
+    // and uncommitted) without reverse-diffing commits the base has but we do
+    // not. Fall back to the base ref itself if no merge base can be found.
+    let merge_base = git_merge_base(&repo_root, &base_ref).unwrap_or_else(|| base_ref.clone());
+
+    // The changed files, in git's diff order.
+    let names: Vec<String> = run_git_diff_capture(&repo_root, &["--name-only", &merge_base])?
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    // Render each file's diff separately through the same pipeline as the
+    // `/diff` tool (configured pager included). Each file keeps its own lines so
+    // the review view can show just the selected file's diff.
+    let terminal_width = current_terminal_width();
+    let mut files: Vec<ReviewFileDiff> = Vec::new();
+    for path in names {
+        let mut command = colorized_git_diff_command(&repo_root);
+        command.arg(&merge_base).arg("--").arg(&path);
+        let rendered = render_git_diff(&repo_root, command, terminal_width)?;
+
+        let mut lines: Vec<String> = rendered
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+            .collect();
+        // Drop a trailing empty line produced by the final newline.
+        if matches!(lines.last(), Some(last) if last.is_empty()) {
+            lines.pop();
+        }
+        if lines.is_empty() {
+            continue;
+        }
+
+        // A plain (uncolored, unpaged) patch for the file, for the LLM prompt.
+        let patch = run_git_diff_capture(&repo_root, &[&merge_base, "--", &path])?;
+
+        files.push(ReviewFileDiff { path, lines, patch });
+    }
+
+    Ok(ReviewDiff {
+        base_label: base_ref,
+        files,
+    })
+}
+
+fn git_merge_base(repo_root: &Path, base_ref: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["merge-base", base_ref, "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if merge_base.is_empty() {
+        None
+    } else {
+        Some(merge_base)
+    }
+}
+
+fn run_git_diff_capture(repo_root: &Path, args: &[&str]) -> Result<String> {
+    let mut command = std::process::Command::new("git");
+    command.arg("-C").arg(repo_root).arg("diff");
+    command.args(args);
+    let output = command.output().context("failed to run git diff")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git diff failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 pub fn configured_git_diff_pager(repo_root: &Path) -> Result<Option<String>> {
@@ -1586,7 +1688,7 @@ pub fn git_squash(repo_root: &Path) -> Result<String> {
     Ok(format!("Squashed {count} commits into '{current}'"))
 }
 
-fn git_find_base_ref(repo_root: &Path) -> Result<String> {
+pub fn git_find_base_ref(repo_root: &Path) -> Result<String> {
     for branch in ["origin/main", "origin/master"] {
         let check = std::process::Command::new("git")
             .arg("-C")
@@ -2111,5 +2213,85 @@ mod tests {
             "/usr/bin/delta --width=90 --side-by-side"
         );
         assert_eq!(with_explicit_pager_width("less -FRX", 123), "less -FRX");
+    }
+
+    #[test]
+    fn collect_review_diff_reports_files_and_local_changes() {
+        let _env_lock = process_env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let workspace = tempdir().expect("workspace");
+        let home = tempdir().expect("home");
+        let _home_guard = EnvVarGuard::set_path("HOME", home.path());
+        init_git_for_test(workspace.path());
+
+        // Base commit on main.
+        std::process::Command::new("git")
+            .args(["checkout", "-B", "main"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git checkout -B main");
+        std::fs::write(workspace.path().join("base.txt"), "base\n").expect("write base");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git add base");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "Base commit"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git commit base");
+
+        // Feature branch with a committed change.
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "feature/review-test"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git checkout -b feature");
+        std::fs::write(workspace.path().join("committed.txt"), "committed\n")
+            .expect("write committed");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git add committed");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "Add committed file"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git commit committed");
+
+        // Uncommitted local change.
+        std::fs::write(workspace.path().join("local.txt"), "local\n").expect("write local");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git add local");
+
+        let review = collect_review_diff(workspace.path()).expect("collect review");
+        assert_eq!(review.base_label, "main");
+
+        let paths: Vec<&str> = review.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            paths.contains(&"committed.txt"),
+            "expected committed file in {paths:?}"
+        );
+        assert!(
+            paths.contains(&"local.txt"),
+            "expected local change in {paths:?}"
+        );
+
+        // Each file carries its own diff. With no configured pager (the test
+        // environment), each block starts with the colorized `diff --git`
+        // header for that file.
+        for file in &review.files {
+            assert!(!file.lines.is_empty(), "no diff lines for {}", file.path);
+            assert!(
+                file.lines[0].contains("diff --git"),
+                "first line for {} is not a header: {}",
+                file.path,
+                file.lines[0]
+            );
+        }
     }
 }
