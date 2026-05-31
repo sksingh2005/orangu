@@ -591,7 +591,8 @@ async fn run() -> Result<()> {
                 }
                 // On exit, print the per-file status and comments to the output
                 // window, and copy the comments to the system clipboard.
-                let (lines, clipboard) = review_exit_output(&review.files, &review.comments);
+                let (lines, clipboard) =
+                    review_exit_output(&review.files, &review.comments, &review.general_notes);
                 for line in &lines {
                     output_state.push_text(line);
                 }
@@ -1231,6 +1232,7 @@ struct FeedbackWindow {
 }
 
 /// A review comment kept against a specific diff line of a file.
+#[derive(Clone)]
 struct ReviewComment {
     file: String,
     /// Diff-line index within the file (0-based).
@@ -1254,6 +1256,8 @@ struct ReviewState {
     feedback: Option<FeedbackWindow>,
     /// Comments recorded against diff lines, keyed by (file, line).
     comments: Vec<ReviewComment>,
+    /// General notes entered in the input window as `# <note>`.
+    general_notes: Vec<String>,
     /// When set, the inline comment editor is open for the highlighted line.
     comment_editor: Option<InputState>,
 }
@@ -1288,7 +1292,16 @@ impl ReviewState {
             x_offset: 0,
             feedback: None,
             comments: Vec::new(),
+            general_notes: Vec::new(),
             comment_editor: None,
+        }
+    }
+
+    /// Record a `# <note>` typed in the input window as a general note.
+    fn add_general_note(&mut self, text: &str) {
+        let body = general_comment_body(text);
+        if !body.is_empty() {
+            self.general_notes.push(body);
         }
     }
 
@@ -1486,21 +1499,39 @@ fn review_status_dot(status: ReviewStatus) -> &'static str {
     }
 }
 
+/// The body of a `# <note>` general comment, with the leading `#` removed.
+fn general_comment_body(text: &str) -> String {
+    let trimmed = text.trim_start();
+    trimmed
+        .strip_prefix('#')
+        .unwrap_or(trimmed)
+        .trim_start()
+        .to_string()
+}
+
 /// Build the review exit summary: the lines to print to the output window, and
 /// the text (if any) to copy to the clipboard. When every file is approved and
 /// there are no comments, the summary is just "Patch approved". Otherwise it is
-/// each file's status, then the comments, then a final "Patch rejected" verdict.
-/// Only the comments are copied to the clipboard (never the verdict line).
+/// each file's status, the line comments, then the general notes, then a final
+/// "Patch rejected" verdict. The line comments and general notes are copied to
+/// the clipboard (never the per-file status or the verdict).
 fn review_exit_output(
     files: &[ReviewEntry],
     comments: &[ReviewComment],
+    general_notes: &[String],
 ) -> (Vec<String>, Option<String>) {
-    let comment_lines = format_review_comments(comments);
+    let line_lines = format_review_comments(comments);
+
+    // Both kinds of comment are copied (line comments first, then notes).
+    let mut clip: Vec<String> = line_lines.clone();
+    clip.extend(general_notes.iter().cloned());
+    let clipboard = (!clip.is_empty()).then(|| clip.join("\n"));
+
     let all_approved = !files.is_empty()
         && files
             .iter()
             .all(|file| file.status == ReviewStatus::Approved);
-    if all_approved && comment_lines.is_empty() {
+    if all_approved && clip.is_empty() {
         return (vec!["\x1b[1mPatch approved\x1b[0m".to_string()], None);
     }
 
@@ -1515,8 +1546,8 @@ fn review_exit_output(
             )
         })
         .collect();
-    let clipboard = (!comment_lines.is_empty()).then(|| comment_lines.join("\n"));
-    lines.extend(comment_lines);
+    lines.extend(line_lines);
+    lines.extend(general_notes.iter().cloned());
     lines.push("\x1b[1mPatch rejected\x1b[0m".to_string());
     (lines, clipboard)
 }
@@ -1681,7 +1712,12 @@ fn run_review_mode(
             (KeyCode::Char('r'), true, _) => state.set_status(ReviewStatus::Rejected),
             (KeyCode::Char('c'), true, _) => state.open_comment_editor(body_height),
             (KeyCode::Char('o'), true, _) | (KeyCode::Enter, _, _) => {
-                if let Some(file) = state.files.get(state.selected) {
+                if input_state.as_str().trim_start().starts_with('#') {
+                    // A `# <note>` in the input window is a general note, not an
+                    // LLM request.
+                    state.add_general_note(input_state.as_str());
+                    input_state.clear();
+                } else if let Some(file) = state.files.get(state.selected) {
                     return Ok(ReviewSignal::RequestReview {
                         path: file.path.clone(),
                         patch: file.patch.clone(),
@@ -2902,6 +2938,7 @@ mod tests {
             x_offset: 5,
             feedback: None,
             comments: Vec::new(),
+            general_notes: Vec::new(),
             comment_editor: None,
         };
 
@@ -2953,6 +2990,7 @@ mod tests {
             x_offset: 0,
             feedback: None,
             comments: Vec::new(),
+            general_notes: Vec::new(),
             comment_editor: None,
         };
 
@@ -2997,6 +3035,7 @@ mod tests {
             x_offset: 0,
             feedback: None,
             comments: Vec::new(),
+            general_notes: Vec::new(),
             comment_editor: None,
         };
 
@@ -3061,6 +3100,7 @@ mod tests {
             x_offset: 0,
             feedback: None,
             comments: Vec::new(),
+            general_notes: Vec::new(),
             comment_editor: None,
         };
 
@@ -3161,7 +3201,7 @@ mod tests {
             entry("a.txt", ReviewStatus::Approved),
             entry("b.txt", ReviewStatus::Approved),
         ];
-        let (lines, clipboard) = review_exit_output(&files, &[]);
+        let (lines, clipboard) = review_exit_output(&files, &[], &[]);
         assert_eq!(lines, vec!["\x1b[1mPatch approved\x1b[0m".to_string()]);
         assert!(clipboard.is_none());
 
@@ -3177,7 +3217,7 @@ mod tests {
             line: 2,
             text: "fix this".to_string(),
         }];
-        let (lines, clipboard) = review_exit_output(&files, &comments);
+        let (lines, clipboard) = review_exit_output(&files, &comments, &[]);
         assert_eq!(
             lines,
             vec![
@@ -3197,7 +3237,7 @@ mod tests {
             line: 0,
             text: "nit".to_string(),
         }];
-        let (lines, clipboard) = review_exit_output(&files, &comments);
+        let (lines, clipboard) = review_exit_output(&files, &comments, &[]);
         assert_eq!(
             lines,
             vec![
@@ -3207,6 +3247,82 @@ mod tests {
             ]
         );
         assert_eq!(clipboard.as_deref(), Some("a.txt:1: nit"));
+    }
+
+    #[test]
+    fn review_exit_output_appends_general_notes() {
+        use super::{ReviewComment, review_exit_output, review_status_dot};
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let files = vec![ReviewEntry {
+            path: "a.txt".to_string(),
+            status: ReviewStatus::Approved,
+            diff_lines: vec!["+x".to_string()],
+            patch: String::new(),
+        }];
+        let comments = vec![ReviewComment {
+            file: "a.txt".to_string(),
+            line: 4,
+            text: "tighten this".to_string(),
+        }];
+        // General notes come from the input window with the '#' already stripped.
+        let general_notes = vec!["overall solid, ship after nits".to_string()];
+
+        let (lines, clipboard) = review_exit_output(&files, &comments, &general_notes);
+        // Line comments first, then the general note, then the verdict.
+        assert_eq!(
+            lines,
+            vec![
+                format!(
+                    "a.txt: Approved {}",
+                    review_status_dot(ReviewStatus::Approved)
+                ),
+                "a.txt:5: tighten this".to_string(),
+                "overall solid, ship after nits".to_string(),
+                "\x1b[1mPatch rejected\x1b[0m".to_string(),
+            ]
+        );
+        // Both the line comment and the general note are copied.
+        assert_eq!(
+            clipboard.as_deref(),
+            Some("a.txt:5: tighten this\noverall solid, ship after nits")
+        );
+    }
+
+    #[test]
+    fn add_general_note_strips_hash_and_keeps_line_comments_separate() {
+        use super::ReviewState;
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let mut state = ReviewState {
+            files: vec![ReviewEntry {
+                path: "a.txt".to_string(),
+                status: ReviewStatus::Approved,
+                diff_lines: (0..5).map(|i| format!("x {i}")).collect(),
+                patch: String::new(),
+            }],
+            selected: 0,
+            line: 2,
+            scroll: 0,
+            x_offset: 0,
+            feedback: None,
+            comments: Vec::new(),
+            general_notes: Vec::new(),
+            comment_editor: None,
+        };
+
+        // Input-window "# ..." is stored as a general note with the '#' removed.
+        state.add_general_note("# please add a test");
+        state.add_general_note("#no space");
+        // Whitespace-only / bare '#' notes are ignored.
+        state.add_general_note("#   ");
+
+        assert_eq!(
+            state.general_notes,
+            vec!["please add a test".to_string(), "no space".to_string()]
+        );
+        // General notes do not become line comments.
+        assert!(state.comments.is_empty());
     }
 
     #[test]

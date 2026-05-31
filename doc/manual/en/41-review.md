@@ -55,9 +55,11 @@ Move the highlighted line to the place you want to comment on and press `Alt+c`.
 
 Each comment is recorded against the file and that diff line; lines with a comment are flagged with an amber dot (`●`) at the right edge. Pressing `Alt+c` on a line that already has a comment re-opens it for editing, and saving an empty comment removes it.
 
-When you leave review mode (`Alt+x`), a summary is written to the output window. Each file is listed with its status and a colored dot — `<file>: Approved ●` (green), `Rejected ●` (red), or `No review ●` (white, for unmarked files) — followed by the comments, one per line, as `<file>:<line>: <comment>` (ordered by file then line, with 1-based line numbers), and finally a verdict line. If every file is approved and there are no comments the summary is just `Patch approved`; otherwise (any file rejected or unreviewed, or any comment) the verdict is `Patch rejected`.
+You can also add a **general note** about the patch: type `# <note>` in the input window and press `Enter` (or `Alt+o`). Instead of being sent to the model, it is recorded as a general note (the `#` is dropped). Anything not starting with `#` is still treated as an LLM request.
 
-Only the comments are copied to the system clipboard (the per-file statuses are not). If the clipboard cannot be reached (for example on a headless machine), a short note is shown instead and the output-window summary is unaffected.
+When you leave review mode (`Alt+x`), a summary is written to the output window. Each file is listed with its status and a colored dot — `<file>: Approved ●` (green), `Rejected ●` (red), or `No review ●` (white, for unmarked files) — followed by the line comments, one per line, as `<file>:<line>: <comment>` (ordered by file then line, with 1-based line numbers), then the general notes (with the `#` removed). The summary ends with a bold verdict line. If every file is approved and there are no comments or notes the summary is just `Patch approved`; otherwise (any file rejected or unreviewed, or any comment/note) the verdict is `Patch rejected`.
+
+The comments — both the line comments and the general (`#`) notes — are copied to the system clipboard; the per-file statuses and the verdict are not. If the clipboard cannot be reached (for example on a headless machine), a short note is shown instead and the output-window summary is unaffected.
 
 ## Key bindings
 
