@@ -8,17 +8,27 @@ on:
 permissions:
   contents: write
 
+# Serialize runs for the same tag so a re-push or re-run never races another run
+# on the shared GitHub release (which previously caused "release not found").
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   create-release:
     name: Create release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --verify-tag
+        run: |
+          # Idempotent: don't fail a re-run if the release already exists.
+          if ! gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --verify-tag
+          fi
 
   build:
     name: Build ${{ matrix.target }}
@@ -54,7 +64,7 @@ jobs:
             archive: zip
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -100,14 +110,14 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.ref_name }}" "$ARCHIVE"
+        run: gh release upload "${{ github.ref_name }}" "$ARCHIVE" --clobber
 
   manual:
     name: Build manual
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install pandoc and TeX Live
         run: |
@@ -123,10 +133,14 @@ jobs:
 
       - name: Install eisvogel template
         run: |
+          # The release tarball nests everything under Eisvogel-<version>/, so
+          # strip that component to place eisvogel.latex directly where pandoc's
+          # --template eisvogel looks (the templates data directory).
+          EISVOGEL_VERSION=3.4.0
           mkdir -p ~/.local/share/pandoc/templates
-          curl -sLo /tmp/eisvogel.tar.gz \
-            https://github.com/Wandmalfarbe/pandoc-latex-template/releases/latest/download/Eisvogel.tar.gz
-          tar -xzf /tmp/eisvogel.tar.gz -C ~/.local/share/pandoc/templates/
+          curl -fsSLo /tmp/eisvogel.tar.gz \
+            "https://github.com/Wandmalfarbe/pandoc-latex-template/releases/download/v${EISVOGEL_VERSION}/Eisvogel.tar.gz"
+          tar -xzf /tmp/eisvogel.tar.gz -C ~/.local/share/pandoc/templates --strip-components=1
 
       - name: Build manual
         run: bash doc/build_manual.sh
@@ -137,14 +151,15 @@ jobs:
         run: |
           gh release upload "${{ github.ref_name }}" \
             target/doc/orangu-en.pdf \
-            target/doc/orangu-en.html
+            target/doc/orangu-en.html \
+            --clobber
 
   source:
     name: Source bundle
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Create source bundle
         run: |
@@ -156,4 +171,4 @@ jobs:
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.ref_name }}" "$BUNDLE" "${BUNDLE}.sha256"
+        run: gh release upload "${{ github.ref_name }}" "$BUNDLE" "${BUNDLE}.sha256" --clobber
