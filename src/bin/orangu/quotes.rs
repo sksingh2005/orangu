@@ -68,8 +68,12 @@ impl QuoteModule {
 }
 
 static STAR_TREK: &[&str] = &[
-    "Space: the final frontier. These are the voyages of the starship Enterprise.",
     "Live long and prosper.",
+    "Logic is the beginning of wisdom, not the end.",
+    "The needs of the many outweigh the needs of the few.",
+    "Space: the final frontier. These are the voyages of the starship Enterprise.",
+    "Risk is our business. That's what this starship is all about.",
+    "KHAAAANNN",
     "Make it so.",
     "Resistance is futile.",
     "He's dead, Jim.",
@@ -77,7 +81,9 @@ static STAR_TREK: &[&str] = &[
     "To boldly go where no man has gone before.",
     "Fascinating.",
     "Engage.",
-    "The needs of the many outweigh the needs of the few.",
+    "It is possible to commit no mistakes and still lose. That is not a weakness. That is life.",
+    "Things are only impossible until they're not.",
+    "I canna' change the laws of physics.",
 ];
 
 static STAR_WARS: &[&str] = &[
