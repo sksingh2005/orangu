@@ -57,11 +57,12 @@ use uuid::Uuid;
 use anyhow::Error;
 use commands::ReviewLaunch;
 use commands::{
-    CommandContext, CommandOutcome, CommandState, LocalCommand, LocalError, add_file_usage_message,
-    amend_usage_message, checkout_usage_message, cherry_pick_usage_message, comment_usage_message,
-    commit_usage_message, connect_usage_message, delete_branch_usage_message, merge_usage_message,
-    model_usage_message, move_file_usage_message, open_file_usage_message, parse_local_command,
-    pull_usage_message, remove_file_usage_message, sorted_model_names, system_prompt,
+    CommandContext, CommandOutcome, CommandState, LocalCommand, LocalError, StashSubcommand,
+    add_file_usage_message, amend_usage_message, checkout_usage_message, cherry_pick_usage_message,
+    comment_usage_message, commit_usage_message, connect_usage_message,
+    delete_branch_usage_message, merge_usage_message, model_usage_message, move_file_usage_message,
+    open_file_usage_message, parse_local_command, pull_usage_message, remove_file_usage_message,
+    sorted_model_names, system_prompt,
 };
 use git::{
     add_file_output, amend_output, checkout_output, cherry_pick_output, collect_review_diff,
@@ -69,7 +70,8 @@ use git::{
     discover_git_root, git_diff_against_branch, git_workspace_diff, init_repo_output,
     list_workspace_files_tree, log_output, merge_output, move_file_output, open_in_editor,
     pull_request_output, push_output, rebase_output, remove_file_output, squash_output,
-    status_output, sync_default_branch, workspace_branch_name,
+    stash_drop_output, stash_list_output, stash_output, stash_pop_output, status_output,
+    sync_default_branch, workspace_branch_name,
 };
 use input::{
     EscapeCancelState, IDLE_STATUS_REFRESH_INTERVAL, InputContext, InputResult, InputState,
@@ -1199,6 +1201,15 @@ fn handle_command(
             Ok(_) => Ok(CommandOutcome::Quiet),
             Err(err) => Ok(local_command_error(err)),
         },
+        LocalCommand::Stash(sub) => {
+            let ws = workspace.to_path_buf();
+            Ok(CommandOutcome::Blocking(Box::new(move || match sub {
+                StashSubcommand::Push => stash_output(&ws),
+                StashSubcommand::Pop => stash_pop_output(&ws),
+                StashSubcommand::List => stash_list_output(&ws),
+                StashSubcommand::Drop => stash_drop_output(&ws),
+            })))
+        }
         LocalCommand::DeleteBranch(None) => Ok(CommandOutcome::OutputError(
             delete_branch_usage_message().to_string(),
         )),

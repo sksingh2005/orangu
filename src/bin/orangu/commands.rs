@@ -125,6 +125,13 @@ pub struct ReviewLaunch {
     pub files: Vec<ReviewEntry>,
 }
 
+pub enum StashSubcommand {
+    Push,
+    Pop,
+    List,
+    Drop,
+}
+
 pub enum LocalCommand<'a> {
     Help,
     ConnectDefault,
@@ -156,6 +163,7 @@ pub enum LocalCommand<'a> {
     Push(bool),
     InitRepo,
     Squash,
+    Stash(StashSubcommand),
     DeleteBranch(Option<Cow<'a, str>>),
     OpenFile(&'a str),
     Session(Option<Cow<'a, str>>),
@@ -229,6 +237,7 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
         "/rebase" => Some(LocalCommand::Rebase),
         "/remove_file" => Some(LocalCommand::RemoveFile(None)),
         "/squash" => Some(LocalCommand::Squash),
+        "/stash" => Some(LocalCommand::Stash(StashSubcommand::Push)),
         "/status" => Some(LocalCommand::Status),
         "/usage" => Some(LocalCommand::Usage),
         "/clear" => Some(LocalCommand::Clear),
@@ -344,6 +353,14 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
                 if flag == "--force" || flag == "-f" || flag.eq_ignore_ascii_case("force") {
                     return Some(LocalCommand::Push(true));
                 }
+            }
+            if let Some(sub) = input.strip_prefix("/stash ") {
+                return Some(LocalCommand::Stash(match sub.trim() {
+                    "pop" => StashSubcommand::Pop,
+                    "list" => StashSubcommand::List,
+                    "drop" => StashSubcommand::Drop,
+                    _ => StashSubcommand::Push,
+                }));
             }
             if let Some(args) = input.strip_prefix("/delete ") {
                 let branch = args.trim();
@@ -496,6 +513,18 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
         ],
     ) {
         return Some(LocalCommand::CreatePullRequest);
+    }
+    if matches_ci(input, &["stash", "git stash", "git stash push"]) {
+        return Some(LocalCommand::Stash(StashSubcommand::Push));
+    }
+    if matches_ci(input, &["stash pop", "pop stash", "git stash pop"]) {
+        return Some(LocalCommand::Stash(StashSubcommand::Pop));
+    }
+    if matches_ci(input, &["stash list", "list stashes", "git stash list"]) {
+        return Some(LocalCommand::Stash(StashSubcommand::List));
+    }
+    if matches_ci(input, &["stash drop", "drop stash", "git stash drop"]) {
+        return Some(LocalCommand::Stash(StashSubcommand::Drop));
     }
     if matches_ci(input, &["rebase", "git rebase"]) {
         return Some(LocalCommand::Rebase);

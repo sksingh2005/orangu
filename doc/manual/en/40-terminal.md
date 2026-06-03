@@ -190,6 +190,10 @@ All slash commands are handled locally. They are not sent to the model.
 | `/remove_file <path>` | Remove a file or directory from Git tracking |
 | `/review` | Review branch changes against main/master in a split view |
 | `/squash` | Squash all branch commits into one using the first commit message |
+| `/stash` | Save uncommitted changes with git stash push |
+| `/stash pop` | Restore the most recent stash with git stash pop |
+| `/stash list` | List all saved stashes |
+| `/stash drop` | Discard the most recent stash with git stash drop |
 | `/status` | Show working tree status with color highlighting |
 | `/usage` | Show usage statistics for this session |
 | `/clear` | Clear the current conversation |
@@ -223,6 +227,7 @@ Free-form prompts are blocked when the server or model status in the header is r
 - `/push [--force]` requires a Git repository and runs `git push origin <branch>` using the current branch name; `gh` has no equivalent so it always uses plain Git; `--force` (or `-f` or `force`) runs `git push -f origin <branch>` but is blocked on `main` and `master` to prevent accidental history rewrites
 - `/init_repo` runs `git init` in the workspace directory; works both inside and outside an existing Git repository (reinitializing an existing repo is safe); `gh` has no equivalent so it always uses plain Git
 - `/squash` requires a Git repository; squashes all commits on the current branch (relative to `origin/main`, `origin/master`, `main`, or `master`, tried in that order) into a single commit using the oldest commit's message; `gh` has no equivalent so it always uses plain Git; squashing on `main` or `master` is blocked; requires at least two commits on the branch
+- `/stash` requires a Git repository and runs `git stash push` to save all uncommitted changes (both staged and unstaged) to the stash stack; `/stash pop` restores and removes the most recent stash entry with `git stash pop`; `/stash list` shows all stash entries with their index and description; `/stash drop` discards the most recent stash entry with `git stash drop`; `gh` has no stash equivalent so all four operations always use plain Git; running `/stash` with a clean working tree produces an error from Git
 - `/review` requires a Git repository; it opens a full-screen, two-pane review of the branch's changes (local plus committed) against the default branch — see the [review chapter](#review) for the full layout and key bindings; `gh` has no equivalent so it always uses plain Git
 - `/delete <branch>` requires a Git repository and runs `git branch -D`; `gh` has no equivalent so it always uses plain Git; deleting `main` or `master` is blocked; Tab completion offers local branch names excluding `main` and `master`
 - `/sessions [workspace]` lists all sessions found under `~/.orangu/sessions/`; output is one line per session with aligned columns: UUID, start date, last-updated date, command count, branch, and workspace path; sessions are sorted by creation time, most-recent first; an optional workspace argument filters the list to sessions whose workspace path contains the given string; the branch column shows `-` for sessions with no recorded branch
@@ -260,6 +265,10 @@ Local commands can also be entered in plain language. Examples:
 - `commit "[#42] My feature"` or `commit Fix the bug` or `git commit -m "Fix the bug"`
 - `amend "[#42] My feature"` or `amend Fix the bug` or `git amend "[#42] My feature"` or `git commit --amend -m "Fix the bug"`
 - `pull request` or `create pull request` or `open pull request` or `create pr` or `open pr`
+- `stash` or `git stash` or `git stash push`
+- `stash pop` or `pop stash` or `git stash pop`
+- `stash list` or `list stashes` or `git stash list`
+- `stash drop` or `drop stash` or `git stash drop`
 - `push` or `git push` or `git push origin`
 - `force push` or `push force` or `push --force`
 - `init` or `init repo` or `git init`

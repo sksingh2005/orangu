@@ -1976,6 +1976,118 @@ pub fn git_delete_branch(repo_root: &Path, branch: &str) -> Result<String> {
     Ok(format!("Deleted branch '{branch}'"))
 }
 
+pub fn stash_output(workspace: &Path) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("stash is only available inside a Git repository"))?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["stash", "push"])
+        .output()
+        .context("failed to run git stash push")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git stash push failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(if stdout.is_empty() {
+        "Changes stashed".to_string()
+    } else {
+        stdout
+    })
+}
+
+pub fn stash_pop_output(workspace: &Path) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("stash is only available inside a Git repository"))?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["stash", "pop"])
+        .output()
+        .context("failed to run git stash pop")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git stash pop failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(if stdout.is_empty() {
+        "Stash applied and dropped".to_string()
+    } else {
+        stdout
+    })
+}
+
+pub fn stash_list_output(workspace: &Path) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("stash is only available inside a Git repository"))?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["stash", "list"])
+        .output()
+        .context("failed to run git stash list")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git stash list failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(if stdout.is_empty() {
+        "No stashes found".to_string()
+    } else {
+        stdout
+    })
+}
+
+pub fn stash_drop_output(workspace: &Path) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("stash is only available inside a Git repository"))?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["stash", "drop"])
+        .output()
+        .context("failed to run git stash drop")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git stash drop failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(if stdout.is_empty() {
+        "Stash dropped".to_string()
+    } else {
+        stdout
+    })
+}
+
 /// Test helper: initialize a git repo with test user config.
 #[cfg(test)]
 pub fn init_git_for_test(workspace: &Path) {
