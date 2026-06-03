@@ -187,7 +187,7 @@ pub fn help_text() -> &'static str {
 /amend <message>                              Rewrite the last commit message with git commit --amend
 /checkout <branch|file>                       Switch branch or restore a file
 /cherry_pick <commit>                         Cherry-pick a commit onto the current branch
-/comment <number> "<comment>"                 Add a comment to a GitHub issue with gh issue comment
+/comment <number> "<comment>"                 Add a comment to a GitHub/GitLab issue with gh/glab
 /commit <message>                             Commit all tracked changes with git commit -a -m
 /delete <branch>                              Delete a local branch with git branch -D
 /diff                                         Show a color unified diff against the current branch
@@ -195,7 +195,7 @@ pub fn help_text() -> &'static str {
 /log                                          Show commit log (uses git lg alias if configured)
 /merge <branch>                               Merge a branch into the current branch
 /move_file <source> <destination>             Rename or move a tracked file with git mv
-/pull <number>                                Check out a GitHub pull request on a dedicated branch
+/pull <number>                                Check out a GitHub/GitLab pull/merge request on a dedicated branch
 /pull_request                                 Create a pull request for the current branch
 /push [--force]                               Push the current branch to origin
 /rebase                                       Rebase the current branch against master/main

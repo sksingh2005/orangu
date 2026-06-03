@@ -35,6 +35,7 @@ pub struct ClientAppConfiguration {
     pub auto_rebase: bool,
     pub auto_squash: bool,
     pub terminal: String,
+    pub platform: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -99,8 +100,11 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
             client.get("auto_squash").map(String::as_str).unwrap_or(""),
         ),
         terminal: client.get("terminal").cloned().unwrap_or_default(),
+        platform: client.get("platform").cloned().unwrap_or_default(),
     })
 }
+
+pub const DEFAULT_PLATFORM: &str = "github";
 
 /// Parse a typed value from the `[orangu]` section, falling back to `default`
 /// when the key is absent. Profile names and values may freely contain `.`
@@ -184,6 +188,19 @@ fn normalize_client_configuration(
     mut conf: ClientAppConfiguration,
 ) -> Result<ClientAppConfiguration> {
     conf.default_model = conf.default_model.trim().to_string();
+
+    conf.platform = conf.platform.trim().to_lowercase();
+    if conf.platform.is_empty() {
+        conf.platform = DEFAULT_PLATFORM.to_string();
+    }
+    match conf.platform.as_str() {
+        "github" | "gitlab" => {}
+        other => {
+            return Err(anyhow!(
+                "Unsupported [{CLIENT_SECTION}].platform '{other}'; expected 'github' or 'gitlab'"
+            ));
+        }
+    }
 
     if conf.llms.is_empty() {
         return Err(anyhow!("At least one named LLM profile must be defined"));
@@ -299,6 +316,32 @@ mod tests {
         assert_eq!(conf.llms["gemma"].provider, "llama.cpp");
         assert_eq!(conf.llms["gemma"].request_timeout_seconds, 45);
         assert_eq!(conf.llms["gemma"].max_tool_rounds, 12);
+        // Absent platform defaults to GitHub.
+        assert_eq!(conf.platform, "github");
+    }
+
+    #[test]
+    fn parses_and_validates_platform() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu]\nmodel = a\nplatform = GitLab\n\n[a]\nprovider = llama.cpp\nendpoint = http://x/v1\nmodel = m\n"
+        )
+        .unwrap();
+        let conf = load_client_configuration(file.path()).unwrap();
+        assert_eq!(conf.platform, "gitlab");
+
+        let mut bad = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            bad,
+            "[orangu]\nmodel = a\nplatform = bitbucket\n\n[a]\nprovider = llama.cpp\nendpoint = http://x/v1\nmodel = m\n"
+        )
+        .unwrap();
+        let err = load_client_configuration(bad.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("Unsupported [orangu].platform"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

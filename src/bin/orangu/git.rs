@@ -25,6 +25,33 @@ use super::commands::{current_terminal_width, shell_words};
 use super::render::{ANSI_FG_LIGHT_GREEN, ANSI_FG_LIGHT_RED, ANSI_FG_RESET, ANSI_FG_SUBTLE};
 use orangu::tools::resolve_workspace_path;
 
+/// A code-hosting platform whose CLI orangu drives for pull/merge-request and
+/// issue operations. `gh` for GitHub, `glab` for GitLab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Forge {
+    GitHub,
+    GitLab,
+}
+
+impl Forge {
+    /// Resolve a `[orangu].platform` value into a forge. Unknown values fall
+    /// back to GitHub, matching the configuration default.
+    pub fn from_platform(platform: &str) -> Forge {
+        match platform.trim().to_lowercase().as_str() {
+            "gitlab" | "glab" => Forge::GitLab,
+            _ => Forge::GitHub,
+        }
+    }
+
+    /// The command-line tool that talks to this forge.
+    pub fn cli(self) -> &'static str {
+        match self {
+            Forge::GitHub => "gh",
+            Forge::GitLab => "glab",
+        }
+    }
+}
+
 pub fn discover_git_root(workspace: &Path) -> Option<PathBuf> {
     discover_git_repository(workspace).map(|(root, _)| root)
 }
@@ -830,29 +857,40 @@ pub fn git_log(repo_root: &Path) -> Result<String> {
     }
 }
 
-pub fn pull_request_output(workspace: &Path, pr_number: u64) -> Result<String> {
+pub fn pull_request_output(workspace: &Path, pr_number: u64, forge: Forge) -> Result<String> {
     let repo_root = discover_git_root(workspace)
         .ok_or_else(|| anyhow!("pull is only available inside a Git repository"))?;
-    if let Some(output) = try_gh_pr_checkout(&repo_root, pr_number)? {
+    if let Some(output) = try_forge_pr_checkout(&repo_root, pr_number, forge)? {
         return Ok(output);
     }
     git_pr_checkout(&repo_root, pr_number)
 }
 
-pub fn try_gh_pr_checkout(repo_root: &Path, pr_number: u64) -> Result<Option<String>> {
-    let output = match std::process::Command::new("gh")
-        .args(["pr", "checkout", &pr_number.to_string()])
+pub fn try_forge_pr_checkout(
+    repo_root: &Path,
+    pr_number: u64,
+    forge: Forge,
+) -> Result<Option<String>> {
+    let cli = forge.cli();
+    // `gh pr checkout N` and `glab mr checkout N` are spelled the same way
+    // apart from the request noun.
+    let request = match forge {
+        Forge::GitHub => "pr",
+        Forge::GitLab => "mr",
+    };
+    let output = match std::process::Command::new(cli)
+        .args([request, "checkout", &pr_number.to_string()])
         .current_dir(repo_root)
         .output()
     {
         Ok(output) => output,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).context("failed to run gh"),
+        Err(err) => return Err(err).context(format!("failed to run {cli}")),
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(anyhow!(
-            "gh pr checkout failed{}",
+            "{cli} {request} checkout failed{}",
             if stderr.is_empty() {
                 String::new()
             } else {
@@ -933,30 +971,36 @@ pub fn git_pr_checkout(repo_root: &Path, pr_number: u64) -> Result<String> {
     })
 }
 
-pub fn comment_output(workspace: &Path, issue_number: u64, body: &str) -> Result<String> {
+pub fn comment_output(
+    workspace: &Path,
+    issue_number: u64,
+    body: &str,
+    forge: Forge,
+) -> Result<String> {
     let repo_root = discover_git_root(workspace)
         .ok_or_else(|| anyhow!("comment is only available inside a Git repository"))?;
-    let output = match std::process::Command::new("gh")
-        .args([
-            "issue",
-            "comment",
-            &issue_number.to_string(),
-            "--body",
-            body,
-        ])
+    let cli = forge.cli();
+    let number = issue_number.to_string();
+    // GitHub: `gh issue comment N --body B`. GitLab: `glab issue note N --message B`.
+    let args: Vec<&str> = match forge {
+        Forge::GitHub => vec!["issue", "comment", &number, "--body", body],
+        Forge::GitLab => vec!["issue", "note", &number, "--message", body],
+    };
+    let output = match std::process::Command::new(cli)
+        .args(&args)
         .current_dir(&repo_root)
         .output()
     {
         Ok(output) => output,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(anyhow!("comment requires the gh CLI to be installed"));
+            return Err(anyhow!("comment requires the {cli} CLI to be installed"));
         }
-        Err(err) => return Err(err).context("failed to run gh"),
+        Err(err) => return Err(err).context(format!("failed to run {cli}")),
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(anyhow!(
-            "gh issue comment failed{}",
+            "{cli} issue comment failed{}",
             if stderr.is_empty() {
                 String::new()
             } else {
@@ -976,6 +1020,7 @@ pub fn create_pull_request_output(
     workspace: &Path,
     auto_rebase: bool,
     auto_squash: bool,
+    forge: Forge,
 ) -> Result<String> {
     let repo_root = discover_git_root(workspace)
         .ok_or_else(|| anyhow!("pull_request is only available inside a Git repository"))?;
@@ -996,7 +1041,7 @@ pub fn create_pull_request_output(
     let behind = git_commit_count(&repo_root, &format!("HEAD..{base_ref}"))?;
     if behind > 0 {
         if auto_rebase {
-            rebase_output(workspace)?;
+            rebase_output(workspace, forge)?;
         } else {
             return Err(anyhow!(
                 "branch is {behind} commit{} behind {base_ref}; run /rebase first",
@@ -1014,7 +1059,7 @@ pub fn create_pull_request_output(
             ));
         }
     }
-    try_gh_create_pr(&repo_root, &current, &base_ref)
+    try_forge_create_pr(&repo_root, &current, &base_ref, forge)
 }
 
 fn git_commit_count(repo_root: &Path, range: &str) -> Result<usize> {
@@ -1032,7 +1077,12 @@ fn git_commit_count(repo_root: &Path, range: &str) -> Result<usize> {
     .unwrap_or(0))
 }
 
-pub fn try_gh_create_pr(repo_root: &Path, branch: &str, base_ref: &str) -> Result<String> {
+pub fn try_forge_create_pr(
+    repo_root: &Path,
+    branch: &str,
+    base_ref: &str,
+    forge: Forge,
+) -> Result<String> {
     let full_message = String::from_utf8_lossy(
         &std::process::Command::new("git")
             .arg("-C")
@@ -1071,23 +1121,46 @@ pub fn try_gh_create_pr(repo_root: &Path, branch: &str, base_ref: &str) -> Resul
         ));
     }
     let base = base_ref.trim_start_matches("origin/");
-    let output = match std::process::Command::new("gh")
-        .args([
+    let cli = forge.cli();
+    // GitHub: `gh pr create --title T --body B --base BASE`.
+    // GitLab: `glab mr create --title T --description B --source-branch BRANCH
+    //          --target-branch BASE --yes` (`--yes` skips the interactive prompt).
+    let args: Vec<&str> = match forge {
+        Forge::GitHub => vec![
             "pr", "create", "--title", &title, "--body", &body, "--base", base,
-        ])
+        ],
+        Forge::GitLab => vec![
+            "mr",
+            "create",
+            "--title",
+            &title,
+            "--description",
+            &body,
+            "--source-branch",
+            branch,
+            "--target-branch",
+            base,
+            "--yes",
+        ],
+    };
+    let output = match std::process::Command::new(cli)
+        .args(&args)
         .current_dir(repo_root)
         .output()
     {
         Ok(output) => output,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(anyhow!("pull_request requires the gh CLI to be installed"));
+            return Err(anyhow!(
+                "pull_request requires the {cli} CLI to be installed"
+            ));
         }
-        Err(err) => return Err(err).context("failed to run gh"),
+        Err(err) => return Err(err).context(format!("failed to run {cli}")),
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let request = if forge == Forge::GitHub { "pr" } else { "mr" };
         return Err(anyhow!(
-            "gh pr create failed{}",
+            "{cli} {request} create failed{}",
             if stderr.is_empty() {
                 String::new()
             } else {
@@ -1103,16 +1176,21 @@ pub fn try_gh_create_pr(repo_root: &Path, branch: &str, base_ref: &str) -> Resul
     })
 }
 
-pub fn rebase_output(workspace: &Path) -> Result<String> {
+pub fn rebase_output(workspace: &Path, forge: Forge) -> Result<String> {
     let repo_root = discover_git_root(workspace)
         .ok_or_else(|| anyhow!("rebase is only available inside a Git repository"))?;
-    if let Some(output) = try_gh_rebase(&repo_root)? {
+    if let Some(output) = try_gh_rebase(&repo_root, forge)? {
         return Ok(output);
     }
     git_rebase_main(&repo_root)
 }
 
-pub fn try_gh_rebase(repo_root: &Path) -> Result<Option<String>> {
+pub fn try_gh_rebase(repo_root: &Path, forge: Forge) -> Result<Option<String>> {
+    // Only GitHub's `gh` exposes the default branch directly; for GitLab we
+    // fall through to the git-based detection in `git_rebase_main`.
+    if forge != Forge::GitHub {
+        return Ok(None);
+    }
     let branch_output = match std::process::Command::new("gh")
         .args([
             "repo",
@@ -1208,10 +1286,12 @@ pub fn git_rebase_onto(repo_root: &Path, branch: &str) -> Result<String> {
 }
 
 /// Determine the repository's default branch name (e.g. `main`), preferring
-/// `gh`, then `origin/HEAD`, then the first of `main`/`master` present on origin.
-fn git_default_branch(repo_root: &Path) -> Option<String> {
-    if let Ok(output) = std::process::Command::new("gh")
-        .args([
+/// `gh` (GitHub only), then `origin/HEAD`, then the first of `main`/`master`
+/// present on origin. GitLab relies on the git-based detection.
+fn git_default_branch(repo_root: &Path, forge: Forge) -> Option<String> {
+    if forge == Forge::GitHub
+        && let Ok(output) = std::process::Command::new("gh")
+            .args([
             "repo",
             "view",
             "--json",
@@ -1266,7 +1346,7 @@ fn git_default_branch(repo_root: &Path) -> Option<String> {
 /// branch's working tree. Returns `Ok(None)` when there is nothing to do (no
 /// `origin` remote or no detectable default branch), `Ok(Some(msg))` on a
 /// successful sync, and `Err` if a sync was attempted but failed.
-pub fn sync_default_branch(workspace: &Path) -> Result<Option<String>> {
+pub fn sync_default_branch(workspace: &Path, forge: Forge) -> Result<Option<String>> {
     let Some(repo_root) = discover_git_root(workspace) else {
         return Ok(None);
     };
@@ -1286,7 +1366,7 @@ pub fn sync_default_branch(workspace: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let Some(default) = git_default_branch(&repo_root) else {
+    let Some(default) = git_default_branch(&repo_root, forge) else {
         return Ok(None);
     };
 
@@ -1324,32 +1404,40 @@ pub fn sync_default_branch(workspace: &Path) -> Result<Option<String>> {
     Ok(Some(format!("Synced {default} with origin")))
 }
 
-pub fn merge_output(workspace: &Path, branch: &str) -> Result<String> {
+pub fn merge_output(workspace: &Path, branch: &str, forge: Forge) -> Result<String> {
     let repo_root = discover_git_root(workspace)
         .ok_or_else(|| anyhow!("merge is only available inside a Git repository"))?;
     let is_local = git_local_branch_names(&repo_root)
         .iter()
         .any(|b| b == branch);
-    if !is_local && let Some(output) = try_gh_merge(&repo_root, branch)? {
+    if !is_local && let Some(output) = try_gh_merge(&repo_root, branch, forge)? {
         return Ok(output);
     }
     git_merge(&repo_root, branch)
 }
 
-pub fn try_gh_merge(repo_root: &Path, branch: &str) -> Result<Option<String>> {
-    let output = match std::process::Command::new("gh")
-        .args(["pr", "merge", "--merge", branch])
+pub fn try_gh_merge(repo_root: &Path, branch: &str, forge: Forge) -> Result<Option<String>> {
+    let cli = forge.cli();
+    // GitHub: `gh pr merge --merge BRANCH`. GitLab: `glab mr merge BRANCH --yes`
+    // (positional source branch, `--yes` skips the confirmation prompt).
+    let args: Vec<&str> = match forge {
+        Forge::GitHub => vec!["pr", "merge", "--merge", branch],
+        Forge::GitLab => vec!["mr", "merge", branch, "--yes"],
+    };
+    let output = match std::process::Command::new(cli)
+        .args(&args)
         .current_dir(repo_root)
         .output()
     {
         Ok(output) => output,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).context("failed to run gh"),
+        Err(err) => return Err(err).context(format!("failed to run {cli}")),
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let request = if forge == Forge::GitHub { "pr" } else { "mr" };
         return Err(anyhow!(
-            "gh pr merge failed{}",
+            "{cli} {request} merge failed{}",
             if stderr.is_empty() {
                 String::new()
             } else {
@@ -2695,7 +2783,7 @@ mod tests {
         git_run(author.path(), &["push", "origin", "main"]);
 
         // On main, sync fast-forwards the working tree.
-        let message = sync_default_branch(consumer.path()).expect("sync");
+        let message = sync_default_branch(consumer.path(), Forge::GitHub).expect("sync");
         assert_eq!(message.as_deref(), Some("Synced main with origin"));
         assert_eq!(rev_count(consumer.path(), "HEAD"), 2);
 
@@ -2705,7 +2793,7 @@ mod tests {
         git_run(author.path(), &["commit", "-am", "third"]);
         git_run(author.path(), &["push", "origin", "main"]);
 
-        sync_default_branch(consumer.path()).expect("sync on feature");
+        sync_default_branch(consumer.path(), Forge::GitHub).expect("sync on feature");
         assert_eq!(rev_count(consumer.path(), "main"), 3);
         assert_eq!(
             workspace_branch_name(consumer.path()).as_deref(),
@@ -2723,7 +2811,7 @@ mod tests {
         init_git_for_test(workspace.path());
 
         // No origin remote configured ⇒ nothing to sync, no error.
-        assert_eq!(sync_default_branch(workspace.path()).unwrap(), None);
+        assert_eq!(sync_default_branch(workspace.path(), Forge::GitHub).unwrap(), None);
     }
 
     #[test]

@@ -65,7 +65,7 @@ use commands::{
     sorted_model_names, system_prompt,
 };
 use git::{
-    add_file_output, amend_output, checkout_output, cherry_pick_output, collect_review_diff,
+    Forge, add_file_output, amend_output, checkout_output, cherry_pick_output, collect_review_diff,
     comment_output, commit_output, create_pull_request_output, delete_branch_output,
     discover_git_root, git_diff_against_branch, git_workspace_diff, init_repo_output,
     list_workspace_files_tree, log_output, merge_output, move_file_output, open_in_editor,
@@ -244,9 +244,10 @@ async fn run() -> Result<()> {
     // In a Git repository, fast-forward the local default branch to origin on
     // startup. Run it in the background so it never blocks the UI; its progress
     // and result are shown on the left of the status bar.
+    let forge = Forge::from_platform(&config.platform);
     let mut sync_handle = discover_git_root(tools.workspace()).map(|_| {
         let sync_workspace = tools.workspace().to_path_buf();
-        tokio::task::spawn_blocking(move || sync_default_branch(&sync_workspace))
+        tokio::task::spawn_blocking(move || sync_default_branch(&sync_workspace, forge))
     });
     let mut sync_notice: Option<(String, std::time::Instant)> = None;
 
@@ -414,6 +415,7 @@ async fn run() -> Result<()> {
                 auto_rebase: config.auto_rebase,
                 auto_squash: config.auto_squash,
                 terminal: &config.terminal,
+                forge,
             },
         )? {
             CommandOutcome::Quit => {
@@ -968,6 +970,7 @@ fn handle_command(
         auto_rebase,
         auto_squash,
         terminal,
+        forge,
     } = context;
 
     match command {
@@ -1110,7 +1113,8 @@ fn handle_command(
         LocalCommand::Pull(None) => Ok(CommandOutcome::OutputError(
             pull_usage_message().to_string(),
         )),
-        LocalCommand::Pull(Some(pr_number)) => match pull_request_output(workspace, pr_number) {
+        LocalCommand::Pull(Some(pr_number)) => match pull_request_output(workspace, pr_number, forge)
+        {
             Ok(_) => Ok(CommandOutcome::Quiet),
             Err(err) => Ok(local_command_error(err)),
         },
@@ -1118,7 +1122,7 @@ fn handle_command(
             comment_usage_message().to_string(),
         )),
         LocalCommand::Comment(Some((issue_number, body))) => {
-            match comment_output(workspace, issue_number, &body) {
+            match comment_output(workspace, issue_number, &body, forge) {
                 Ok(_) => Ok(CommandOutcome::Quiet),
                 Err(err) => Ok(local_command_error(err)),
             }
@@ -1126,17 +1130,17 @@ fn handle_command(
         LocalCommand::CreatePullRequest => {
             let ws = workspace.to_path_buf();
             Ok(CommandOutcome::Blocking(Box::new(move || {
-                create_pull_request_output(&ws, auto_rebase, auto_squash)
+                create_pull_request_output(&ws, auto_rebase, auto_squash, forge)
             })))
         }
-        LocalCommand::Rebase => match rebase_output(workspace) {
+        LocalCommand::Rebase => match rebase_output(workspace, forge) {
             Ok(_) => Ok(CommandOutcome::Quiet),
             Err(err) => Ok(local_command_error(err)),
         },
         LocalCommand::Merge(None) => Ok(CommandOutcome::OutputError(
             merge_usage_message().to_string(),
         )),
-        LocalCommand::Merge(Some(branch)) => match merge_output(workspace, &branch) {
+        LocalCommand::Merge(Some(branch)) => match merge_output(workspace, &branch, forge) {
             Ok(_) => Ok(CommandOutcome::Quiet),
             Err(err) => Ok(local_command_error(err)),
         },
@@ -3512,6 +3516,7 @@ mod tests {
                 auto_rebase: false,
                 auto_squash: false,
                 terminal: "",
+                forge: crate::git::Forge::GitHub,
             },
         )
         .expect("handle command");
@@ -3691,6 +3696,7 @@ mod tests {
                     auto_rebase: false,
                     auto_squash: false,
                     terminal: "",
+                    forge: crate::git::Forge::GitHub,
                 },
             )
             .expect("handle command");
@@ -3753,6 +3759,7 @@ mod tests {
                 auto_rebase: false,
                 auto_squash: false,
                 terminal: "",
+                forge: crate::git::Forge::GitHub,
             },
         )
         .expect("handle command");
@@ -4039,6 +4046,7 @@ mod tests {
                 auto_rebase: false,
                 auto_squash: false,
                 terminal: "",
+                forge: crate::git::Forge::GitHub,
             },
         )
         .expect("handle command");
@@ -4091,6 +4099,7 @@ mod tests {
                 auto_rebase: false,
                 auto_squash: false,
                 terminal: "",
+                forge: crate::git::Forge::GitHub,
             },
         )
         .expect("command outcome");

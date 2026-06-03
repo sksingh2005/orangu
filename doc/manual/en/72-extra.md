@@ -76,6 +76,8 @@ Please refer to the upstream documentation for full installation and configurati
 
 [**gh**](https://cli.github.com/) is the official GitHub CLI. It provides commands such as `gh repo clone`, `gh pr create`, and `gh issue list` for interacting with GitHub repositories directly from the terminal.
 
+**orangu** selects the CLI based on the `[orangu].platform` setting: `github` (the default) uses `gh`, and `gitlab` uses `glab` (see [GitLab CLI](#glab) below). The descriptions here apply to `gh`; the GitLab equivalents are described in the next section.
+
 If it is installed, **orangu** will use it for `/pull` to check out pull requests, for `/rebase` to determine the default branch, for `/merge` to merge pull requests, and to detect the default branch for the startup sync (see below). Without it, **orangu** falls back to plain Git for all of these. The `/comment` command requires `gh` and runs `gh issue comment` to add a comment to a GitHub issue; there is no plain Git fallback for it. The `/pull_request` command also requires `gh` and runs `gh pr create` to open a pull request from the current branch; there is no plain Git fallback for it.
 
 **Installation**
@@ -96,3 +98,34 @@ gh auth login
 Please refer to the upstream documentation for full installation and configuration details:
 
 <https://cli.github.com/manual/>
+
+### glab
+
+[**glab**](https://gitlab.com/gitlab-org/cli) is the official GitLab CLI. It provides commands such as `glab mr create`, `glab mr merge`, and `glab issue note` for interacting with GitLab projects directly from the terminal.
+
+Set `platform = gitlab` in the `[orangu]` section to drive `glab` instead of `gh`. The behaviour mirrors the GitHub integration, mapping each command to its GitLab equivalent:
+
+| orangu command | GitLab command |
+| :-- | :-- |
+| `/pull <number>` | `glab mr checkout <number>` |
+| `/pull_request` | `glab mr create --title … --description … --source-branch … --target-branch … --yes` |
+| `/merge <branch>` | `glab mr merge <branch> --yes` |
+| `/comment <number> "…"` | `glab issue note <number> --message "…"` |
+
+As with `gh`, `/pull` and `/merge` fall back to plain Git when `glab` is not installed, while `/comment` and `/pull_request` require it. The default branch used by `/rebase` and the startup sync is detected through Git (`origin/HEAD`, then `main`/`master`) when running against GitLab.
+
+**Installation**
+
+```sh
+sudo dnf install glab
+```
+
+After installation, authenticate with your GitLab account:
+
+```sh
+glab auth login
+```
+
+Please refer to the upstream documentation for full installation and configuration details:
+
+<https://gitlab.com/gitlab-org/cli>

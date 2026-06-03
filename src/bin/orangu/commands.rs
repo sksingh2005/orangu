@@ -186,6 +186,7 @@ pub struct CommandContext<'a> {
     pub auto_rebase: bool,
     pub auto_squash: bool,
     pub terminal: &'a str,
+    pub forge: crate::git::Forge,
 }
 
 pub struct CommandState<'a> {
