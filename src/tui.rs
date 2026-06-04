@@ -185,11 +185,10 @@ pub fn help_text() -> &'static str {
 /build                                        Build the project
 /add_file <path>                              Stage a file or directory with git add
 /amend <message>                              Rewrite the last commit message with git commit --amend
-/checkout <branch|file>                       Switch branch or restore a file
+/branch [<name>|-a|-b|-m|-d <name>]           List, switch, create, rename or delete a branch
 /cherry_pick <commit>                         Cherry-pick a commit onto the current branch
 /comment <number> "<comment>"                 Add a comment to a GitHub/GitLab issue with gh/glab
 /commit <message>                             Commit all tracked changes with git commit -a -m
-/delete <branch>                              Delete a local branch with git branch -D
 /diff                                         Show a color unified diff against the current branch
 /init_repo                                    Initialize a Git repository in the workspace
 /log                                          Show commit log (uses git lg alias if configured)
@@ -200,6 +199,7 @@ pub fn help_text() -> &'static str {
 /push [--force]                               Push the current branch to origin
 /rebase                                       Rebase the current branch against master/main
 /remove_file <path>                           Remove a file or directory from Git tracking
+/restore [--staged] <file>                    Restore a file or unstage it (git restore)
 /review                                       Review branch changes against main/master in a split view
 /squash                                       Squash all branch commits into one
 /stash                                        Save uncommitted changes (git stash push)
@@ -211,7 +211,7 @@ pub fn help_text() -> &'static str {
 /clear                                        Clear the current conversation
 /quit                                         Exit the client
 
-Natural-language forms such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `status`, `rebase`, `squash`, `merge feature/foo`, `checkout main`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `amend "[#42] My feature"`, `push`, `force push`, `add comment on 51 "My comment"`, `review`, `create pull request`, `stash`, `stash pop`, `stash list`, `stash drop`, `init repo`, `delete feature/foo`, and `show help` are also handled locally.
+Natural-language forms such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `status`, `rebase`, `squash`, `merge feature/foo`, `branch`, `list branches`, `checkout main`, `switch to main`, `create branch feature/x`, `rename to new-name`, `delete feature/foo`, `restore README.md`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `amend "[#42] My feature"`, `push`, `force push`, `add comment on 51 "My comment"`, `review`, `create pull request`, `stash`, `stash pop`, `stash list`, `stash drop`, `init repo`, and `show help` are also handled locally.
 
 The prompt uses standard Unix shell keys, including Ctrl+Left, Ctrl+Right, Ctrl+A, Ctrl+E, Ctrl+K, Ctrl+U, Ctrl+W, Alt+Backspace, Alt+D, and Tab completion.
 
@@ -1192,7 +1192,8 @@ impl OranguHelper {
                 "/pull".to_string(),
                 "/rebase".to_string(),
                 "/merge".to_string(),
-                "/checkout".to_string(),
+                "/branch".to_string(),
+                "/restore".to_string(),
                 "/add_file".to_string(),
                 "/remove_file".to_string(),
                 "/move_file".to_string(),
@@ -1202,7 +1203,6 @@ impl OranguHelper {
                 "/push".to_string(),
                 "/init_repo".to_string(),
                 "/squash".to_string(),
-                "/delete".to_string(),
                 "/clear".to_string(),
                 "/quit".to_string(),
             ],

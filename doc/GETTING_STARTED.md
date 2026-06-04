@@ -50,11 +50,14 @@ orangu --config ./orangu.conf
 - `/build`
 - `/add_file README.md`
 - `/amend <message>`
-- `/checkout main`
+- `/branch main`
+- `/branch -b feature/new`
+- `/branch -m new-name`
+- `/branch -d feature/old`
 - `/cherry_pick <commit>`
 - `/comment 51 "My comment"`
 - `/commit <message>`
-- `/delete feature/foo`
+- `/restore README.md`
 - `/diff`
 - `/init_repo`
 - `/log`

@@ -173,11 +173,10 @@ All slash commands are handled locally. They are not sent to the model.
 | `/build` | Build the workspace project (Rust, C, or Java) |
 | `/add_file <path>` | Stage a file or directory with git add |
 | `/amend <message>` | Rewrite the last commit message |
-| `/checkout <branch\|file>` | Switch branch or restore a file |
+| `/branch [<name>\|-b <name>\|-m <name>\|-d <name>\|-a]` | List, switch, create, rename, or delete branches |
 | `/cherry_pick <commit>` | Cherry-pick a commit onto the current branch |
 | `/comment <number> "<comment>"` | Add a comment to a GitHub issue with gh issue comment |
 | `/commit <message>` | Commit all tracked changes with git commit -a -m |
-| `/delete <branch>` | Delete a local branch |
 | `/diff [branch]` | Show a color unified diff; without a branch shows unstaged changes, with a branch shows changes since diverging from it |
 | `/init_repo` | Initialize a Git repository in the workspace |
 | `/log` | Show commit log (uses `git lg` alias if configured) |
@@ -188,6 +187,7 @@ All slash commands are handled locally. They are not sent to the model.
 | `/push [--force]` | Push the current branch to origin |
 | `/rebase` | Rebase the current branch against master/main |
 | `/remove_file <path>` | Remove a file or directory from Git tracking |
+| `/restore [--staged] <file>` | Restore a file or unstage it with git restore |
 | `/review` | Review branch changes against main/master in a split view |
 | `/squash` | Squash all branch commits into one using the first commit message |
 | `/stash` | Save uncommitted changes with git stash push |
@@ -216,10 +216,11 @@ Free-form prompts are blocked when the server or model status in the header is r
 - `/pull_request` requires a Git repository and the `gh` CLI; it runs several pre-flight checks before creating the pull request: it blocks on `main` and `master`, requires at least one commit ahead of the base branch, blocks if the branch is behind the base (suggesting `/rebase`), and blocks if there is more than one commit ahead (suggesting `/squash`); when all checks pass it pushes the branch with `--set-upstream origin` and calls `gh pr create` with the title and body derived from the single commit message; the checks can be bypassed by setting `auto_rebase = on` or `auto_squash = on` in the `[orangu]` config section, which triggers the corresponding fix automatically before continuing
 - `/rebase` requires a Git repository; if `gh` is installed it queries the repository default branch, otherwise it probes `origin/main` then `origin/master`
 - `/merge <branch>` requires a Git repository; if `gh` is installed it uses `gh pr merge --merge`, otherwise it uses `git merge`
-- `/checkout <branch|file>` requires a Git repository and runs `git checkout`; Tab completion offers branch names first, then workspace file paths
+- `/branch` requires a Git repository; with no arguments it lists local branches (`git branch`); `/branch -a` lists all branches including remote; `/branch <name>` switches to an existing branch; `/branch -b <name>` creates and switches to a new branch (`git checkout -b`); `/branch -m <new-name>` renames the current branch (`git branch -m`); `/branch -d <name>` deletes the branch (`git branch -D`), blocked on `main` and `master`; Tab completion after `/branch ` offers local branch names; `gh` has no equivalent so all operations always use plain Git
 - `/add_file <path>` requires a Git repository and runs `git add`; Tab completion offers untracked directories first, then untracked files
 - `/remove_file <path>` requires a Git repository and runs `git rm` (with `-r` for directories); Tab completion offers tracked directories first, then tracked files
 - `/move_file <source> <destination>` requires a Git repository and runs `git mv`; Tab completion for the first argument offers tracked directories first, then tracked files; Tab completion for the second argument offers workspace paths
+- `/restore [--staged] <file>` requires a Git repository and runs `git restore <file>` to discard working tree changes; with `--staged` it runs `git restore --staged <file>` to unstage the file; `gh` has no equivalent so it always uses plain Git
 - `/cherry_pick <commit>` requires a Git repository and runs `git cherry-pick`; `gh` has no equivalent so it always uses plain Git; Tab completion offers abbreviated commit hashes from the default branch (`origin/main`, `origin/master`, `main`, or `master`)
 - `/comment <number> "<comment>"` requires a Git repository and the `gh` CLI, and runs `gh issue comment <number> --body <comment>` to add a comment to a GitHub issue; without `gh` installed it reports an error since there is no plain Git equivalent; the comment text may be bare (`/comment 51 My comment`) or quoted (`/comment 51 "My comment"`); the natural-language form `add comment on 51 "My comment"` is also handled
 - `/commit <message>` requires a Git repository and runs `git commit -a -m <message>`; `gh` has no equivalent so it always uses plain Git; the message may be bare (`/commit Fix the bug`) or quoted (`/commit "[#42] My feature"`)
@@ -229,7 +230,6 @@ Free-form prompts are blocked when the server or model status in the header is r
 - `/squash` requires a Git repository; squashes all commits on the current branch (relative to `origin/main`, `origin/master`, `main`, or `master`, tried in that order) into a single commit using the oldest commit's message; `gh` has no equivalent so it always uses plain Git; squashing on `main` or `master` is blocked; requires at least two commits on the branch
 - `/stash` requires a Git repository and runs `git stash push` to save all uncommitted changes (both staged and unstaged) to the stash stack; `/stash pop` restores and removes the most recent stash entry with `git stash pop`; `/stash list` shows all stash entries with their index and description; `/stash drop` discards the most recent stash entry with `git stash drop`; `gh` has no stash equivalent so all four operations always use plain Git; running `/stash` with a clean working tree produces an error from Git
 - `/review` requires a Git repository; it opens a full-screen, two-pane review of the branch's changes (local plus committed) against the default branch — see the [review chapter](#review) for the full layout and key bindings; `gh` has no equivalent so it always uses plain Git
-- `/delete <branch>` requires a Git repository and runs `git branch -D`; `gh` has no equivalent so it always uses plain Git; deleting `main` or `master` is blocked; Tab completion offers local branch names excluding `main` and `master`
 - `/sessions [workspace]` lists all sessions found under `~/.orangu/sessions/`; output is one line per session with aligned columns: UUID, start date, last-updated date, command count, branch, and workspace path; sessions are sorted by creation time, most-recent first; an optional workspace argument filters the list to sessions whose workspace path contains the given string; the branch column shows `-` for sessions with no recorded branch
 - `/session [uuid]` prints the `orangu --resume <uuid>` command for the given session; Tab completion after `/session ` (with a trailing space) cycles through all session UUIDs, newest first; with no argument it lists all sessions (same as `/sessions`)
 - `/usage` shows session statistics: total application time, total time spent waiting for LLM responses, total tokens generated (counted with the bundled tokenizer), and average tokens per second
@@ -256,11 +256,16 @@ Local commands can also be entered in plain language. Examples:
 - `status` or `show status` or `git status`
 - `rebase` or `git rebase`
 - `merge feature/foo` or `git merge feature/foo`
-- `checkout main` or `checkout README.md` or `git checkout main`
-- `switch to main` or `switch to feature/foo` or `switch to main branch`
+- `branch` or `list branches` or `git branch`
+- `list all branches` or `branch -a`
+- `checkout main` or `git checkout main` or `switch to main` or `switch to main branch`
+- `create branch feature/x` or `new branch feature/x` or `branch -b feature/x`
+- `rename to new-name` or `rename branch to new-name`
+- `delete feature/foo` or `delete branch feature/foo` or `git branch -D feature/foo`
 - `add README.md` or `add file src/` or `git add README.md`
 - `remove README.md` or `remove file src/` or `git rm README.md`
 - `move old.rs new.rs` or `move file old.rs new.rs` or `git mv old.rs new.rs`
+- `restore README.md` or `git restore README.md`
 - `cherry pick abc1234` or `cherry-pick abc1234` or `git cherry-pick abc1234`
 - `commit "[#42] My feature"` or `commit Fix the bug` or `git commit -m "Fix the bug"`
 - `amend "[#42] My feature"` or `amend Fix the bug` or `git amend "[#42] My feature"` or `git commit --amend -m "Fix the bug"`
@@ -272,7 +277,6 @@ Local commands can also be entered in plain language. Examples:
 - `push` or `git push` or `git push origin`
 - `force push` or `push force` or `push --force`
 - `init` or `init repo` or `git init`
-- `delete feature/foo` or `delete branch feature/foo` or `git branch -D feature/foo`
 - `usage` or `show usage`
 - `session` or `switch session`
 
@@ -317,13 +321,13 @@ Completion cycling is reset as soon as you edit the line, move the cursor, paste
 
 The completion modes are checked in order:
 
-1. If the line starts with `/checkout `, or with the natural-language prefixes `checkout ` or `git checkout `, complete branch names first (from `git branch --all`), then workspace file paths. Branch names always appear before file names in the candidate list. If the line starts with the natural-language prefix `switch to `, complete branch names and tag names (from `git tag`), sorted together; workspace file paths are excluded.
+1. If the line starts with `/branch `, `/checkout `, or with the natural-language prefixes `checkout ` or `git checkout `, complete branch names first (from `git branch --all`), then workspace file paths. Branch names always appear before file names in the candidate list. If the line starts with the natural-language prefix `switch to `, complete branch names and tag names (from `git tag`), sorted together; workspace file paths are excluded.
 2. If the line starts with `/add_file `, or with the natural-language prefixes `add `, `add file `, or `git add `, complete untracked directories first (from `git ls-files --others --directory`), then untracked files. Already-tracked content is excluded.
 3. If the line starts with `/remove_file `, or with the natural-language prefixes `remove `, `remove file `, or `git rm `, complete tracked directories first (from `git ls-files`), then tracked files. Untracked content is excluded.
 4. If the line starts with `/move_file `, or with the natural-language prefixes `move `, `move file `, or `git mv `, complete the first argument from tracked directories and files; complete the second argument from all workspace paths.
 5. If the line starts with `/cherry_pick `, or with the natural-language prefixes `cherry pick `, `cherry-pick `, or `git cherry-pick `, complete abbreviated commit hashes from the default branch (`origin/main`, `origin/master`, `main`, or `master`, tried in that order).
 6. If the line starts with `/merge `, or with the natural-language prefixes `merge ` or `git merge `, complete local branch names first (from `git branch`), then remote-only branch names (from `git branch --all`).
-7. If the line starts with `/delete `, or with the natural-language prefixes `delete `, `delete branch `, or `git branch -D `, complete local branch names (from `git branch`) excluding `main` and `master`.
+7. If the line starts with `/branch -d `, or with the natural-language prefixes `delete `, `delete branch `, or `git branch -D `, complete local branch names (from `git branch`) excluding `main` and `master`.
 8. If the line starts with `/session ` (with a trailing space), complete session UUIDs sorted newest-first by last-modified time.
 9. If the line starts with `/model `, complete configured model profile names.
 10. If the line starts with `/open_file ` or `/show_file `, complete workspace file paths recursively for the first positional argument. `/show_file` also completes `--hash` and `--author`. When a file path is already present, the next Tab press cycles through that file's commit history (abbreviated hashes from `git log --follow`).

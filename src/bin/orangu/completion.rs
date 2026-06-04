@@ -41,7 +41,8 @@ pub const COMMANDS: &[&str] = &[
     "/comment",
     "/rebase",
     "/merge",
-    "/checkout",
+    "/branch",
+    "/restore",
     "/add_file",
     "/remove_file",
     "/move_file",
@@ -53,7 +54,6 @@ pub const COMMANDS: &[&str] = &[
     "/init_repo",
     "/squash",
     "/stash",
-    "/delete",
     "/open_file",
     "/session",
     "/sessions",
@@ -344,7 +344,9 @@ pub fn checkout_completion_candidates(
     prefix: &str,
     workspace: &Path,
 ) -> Option<(usize, Vec<String>)> {
-    let (start, token, switch_form) = if let Some(rest) = prefix.strip_prefix("/checkout ") {
+    let (start, token, switch_form) = if let Some(rest) = prefix.strip_prefix("/branch ") {
+        ("/branch ".len(), rest, false)
+    } else if let Some(rest) = prefix.strip_prefix("/checkout ") {
         ("/checkout ".len(), rest, false)
     } else if let Some(rest) = strip_ascii_prefix(prefix, "git checkout ") {
         (prefix.len() - rest.len(), rest, false)

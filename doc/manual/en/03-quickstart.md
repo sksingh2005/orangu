@@ -67,11 +67,14 @@ Then start with:
 /build
 /add_file README.md
 /amend "[#42] My feature"
-/checkout main
+/branch main
+/branch -b feature/new
+/branch -m new-name
+/branch -d feature/old
 /cherry_pick abc1234
 /comment 51 "My comment"
 /commit "[#42] My feature"
-/delete feature/foo
+/restore README.md
 /diff
 /init_repo
 /log

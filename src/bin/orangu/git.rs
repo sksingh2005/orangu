@@ -1493,19 +1493,6 @@ pub fn git_merge(repo_root: &Path, branch: &str) -> Result<String> {
     })
 }
 
-pub fn checkout_output(workspace: &Path, target: &str) -> Result<String> {
-    let repo_root = discover_git_root(workspace)
-        .ok_or_else(|| anyhow!("checkout is only available inside a Git repository"))?;
-    if let Some(output) = try_gh_checkout(&repo_root, target)? {
-        return Ok(output);
-    }
-    git_checkout(&repo_root, target)
-}
-
-pub fn try_gh_checkout(_repo_root: &Path, _target: &str) -> Result<Option<String>> {
-    Ok(None)
-}
-
 pub fn git_checkout(repo_root: &Path, target: &str) -> Result<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -2021,49 +2008,6 @@ pub fn git_find_base_ref(repo_root: &Path) -> Result<String> {
     ))
 }
 
-pub fn delete_branch_output(workspace: &Path, branch: &str) -> Result<String> {
-    let repo_root = discover_git_root(workspace)
-        .ok_or_else(|| anyhow!("delete is only available inside a Git repository"))?;
-    if is_protected_branch(branch) {
-        return Err(anyhow!("deleting the '{}' branch is not allowed", branch));
-    }
-    if let Some(output) = try_gh_delete_branch(&repo_root, branch)? {
-        return Ok(output);
-    }
-    git_delete_branch(&repo_root, branch)
-}
-
-pub fn try_gh_delete_branch(_repo_root: &Path, _branch: &str) -> Result<Option<String>> {
-    Ok(None)
-}
-
-pub fn git_delete_branch(repo_root: &Path, branch: &str) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(["branch", "-D", branch])
-        .output()
-        .context("failed to run git branch -D")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = [stdout, stderr]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(anyhow!(
-            "git branch -D failed{}",
-            if detail.is_empty() {
-                String::new()
-            } else {
-                format!(": {detail}")
-            }
-        ));
-    }
-    Ok(format!("Deleted branch '{branch}'"))
-}
-
 pub fn stash_output(workspace: &Path) -> Result<String> {
     let repo_root = discover_git_root(workspace)
         .ok_or_else(|| anyhow!("stash is only available inside a Git repository"))?;
@@ -2173,6 +2117,177 @@ pub fn stash_drop_output(workspace: &Path) -> Result<String> {
         "Stash dropped".to_string()
     } else {
         stdout
+    })
+}
+
+pub fn branch_list_output(workspace: &Path) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("branch is only available inside a Git repository"))?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["branch"])
+        .output()
+        .context("failed to run git branch")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git branch failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(if stdout.is_empty() {
+        "No local branches found".to_string()
+    } else {
+        stdout
+    })
+}
+
+pub fn branch_list_all_output(workspace: &Path) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("branch is only available inside a Git repository"))?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["branch", "-a"])
+        .output()
+        .context("failed to run git branch -a")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git branch -a failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(if stdout.is_empty() {
+        "No branches found".to_string()
+    } else {
+        stdout
+    })
+}
+
+pub fn branch_create_output(workspace: &Path, name: &str) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("branch is only available inside a Git repository"))?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["checkout", "-b", name])
+        .output()
+        .context("failed to run git checkout -b")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git checkout -b failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Ok(if stderr.is_empty() {
+        format!("Switched to a new branch '{name}'")
+    } else {
+        stderr
+    })
+}
+
+pub fn branch_rename_output(workspace: &Path, new_name: &str) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("branch is only available inside a Git repository"))?;
+    let current = git_current_branch(&repo_root)?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["branch", "-m", new_name])
+        .output()
+        .context("failed to run git branch -m")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git branch -m failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    Ok(format!("Renamed branch '{current}' to '{new_name}'"))
+}
+
+pub fn branch_delete_output(workspace: &Path, name: &str) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("branch is only available inside a Git repository"))?;
+    if is_protected_branch(name) {
+        return Err(anyhow!("deleting the '{}' branch is not allowed", name));
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["branch", "-D", name])
+        .output()
+        .context("failed to run git branch -D")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git branch -D failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(if stdout.is_empty() {
+        format!("Deleted branch '{name}'")
+    } else {
+        stdout
+    })
+}
+
+pub fn restore_output(workspace: &Path, path: &str, staged: bool) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("restore is only available inside a Git repository"))?;
+    let args: &[&str] = if staged {
+        &["restore", "--staged", path]
+    } else {
+        &["restore", path]
+    };
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(args)
+        .output()
+        .context("failed to run git restore")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "git restore failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    Ok(if staged {
+        format!("Unstaged '{path}'")
+    } else {
+        format!("Restored '{path}'")
     })
 }
 
@@ -2298,7 +2413,7 @@ mod tests {
             .output()
             .expect("git init");
         for branch in ["main", "master"] {
-            let result = delete_branch_output(workspace.path(), branch);
+            let result = branch_delete_output(workspace.path(), branch);
             assert!(result.is_err(), "should block deletion of '{branch}'");
             let msg = result.unwrap_err().to_string();
             assert!(

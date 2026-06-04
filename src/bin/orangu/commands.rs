@@ -132,6 +132,15 @@ pub enum StashSubcommand {
     Drop,
 }
 
+pub enum BranchSubcommand<'a> {
+    List,
+    ListAll,
+    Switch(Cow<'a, str>),
+    Create(Cow<'a, str>),
+    Rename(Cow<'a, str>),
+    Delete(Cow<'a, str>),
+}
+
 pub enum LocalCommand<'a> {
     Help,
     ConnectDefault,
@@ -153,7 +162,8 @@ pub enum LocalCommand<'a> {
     CreatePullRequest,
     Rebase,
     Merge(Option<Cow<'a, str>>),
-    Checkout(Option<Cow<'a, str>>),
+    Branch(BranchSubcommand<'a>),
+    Restore(Option<Cow<'a, str>>),
     AddFile(Option<Cow<'a, str>>),
     RemoveFile(Option<Cow<'a, str>>),
     MoveFile(Option<(Cow<'a, str>, Cow<'a, str>)>),
@@ -164,7 +174,6 @@ pub enum LocalCommand<'a> {
     InitRepo,
     Squash,
     Stash(StashSubcommand),
-    DeleteBranch(Option<Cow<'a, str>>),
     OpenFile(&'a str),
     Session(Option<Cow<'a, str>>),
     Sessions(Option<Cow<'a, str>>),
@@ -221,10 +230,10 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
         "/build" => Some(LocalCommand::Build),
         "/add_file" => Some(LocalCommand::AddFile(None)),
         "/amend" => Some(LocalCommand::Amend(None)),
-        "/checkout" => Some(LocalCommand::Checkout(None)),
+        "/branch" => Some(LocalCommand::Branch(BranchSubcommand::List)),
         "/cherry_pick" => Some(LocalCommand::CherryPick(None)),
         "/commit" => Some(LocalCommand::Commit(None)),
-        "/delete" => Some(LocalCommand::DeleteBranch(None)),
+        "/restore" => Some(LocalCommand::Restore(None)),
         "/diff" => Some(LocalCommand::Diff(None)),
         "/init_repo" => Some(LocalCommand::InitRepo),
         "/log" => Some(LocalCommand::Log),
@@ -293,11 +302,11 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
             }
             if let Some(args) = input.strip_prefix("/checkout ") {
                 let target = args.trim();
-                return Some(LocalCommand::Checkout(if target.is_empty() {
-                    None
-                } else {
-                    Some(Cow::Borrowed(target))
-                }));
+                if !target.is_empty() {
+                    return Some(LocalCommand::Branch(BranchSubcommand::Switch(
+                        Cow::Borrowed(target),
+                    )));
+                }
             }
             if let Some(args) = input.strip_prefix("/add_file ") {
                 let path = args.trim();
@@ -355,6 +364,56 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
                     return Some(LocalCommand::Push(true));
                 }
             }
+            if let Some(sub) = input.strip_prefix("/branch ") {
+                let sub = sub.trim();
+                return Some(LocalCommand::Branch(match sub {
+                    "-a" | "--all" => BranchSubcommand::ListAll,
+                    _ if sub.starts_with("-b ") => {
+                        let name = sub[3..].trim();
+                        if name.is_empty() {
+                            BranchSubcommand::List
+                        } else {
+                            BranchSubcommand::Create(Cow::Borrowed(name))
+                        }
+                    }
+                    _ if sub.starts_with("-m ") => {
+                        let name = sub[3..].trim();
+                        if name.is_empty() {
+                            BranchSubcommand::List
+                        } else {
+                            BranchSubcommand::Rename(Cow::Borrowed(name))
+                        }
+                    }
+                    _ if sub.starts_with("-d ") => {
+                        let name = sub[3..].trim();
+                        if name.is_empty() {
+                            BranchSubcommand::List
+                        } else {
+                            BranchSubcommand::Delete(Cow::Borrowed(name))
+                        }
+                    }
+                    _ if !sub.is_empty() => BranchSubcommand::Switch(Cow::Borrowed(sub)),
+                    _ => BranchSubcommand::List,
+                }));
+            }
+            if let Some(path) = input.strip_prefix("/restore ") {
+                let path = path.trim();
+                let staged = path.starts_with("--staged ") || path.starts_with("-S ");
+                let file = if staged {
+                    path.split_once(' ').map(|x| x.1).unwrap_or("").trim()
+                } else {
+                    path
+                };
+                return Some(LocalCommand::Restore(if file.is_empty() {
+                    None
+                } else {
+                    Some(Cow::Owned(format!(
+                        "{}{}",
+                        if staged { "--staged " } else { "" },
+                        file
+                    )))
+                }));
+            }
             if let Some(sub) = input.strip_prefix("/stash ") {
                 return Some(LocalCommand::Stash(match sub.trim() {
                     "pop" => StashSubcommand::Pop,
@@ -365,11 +424,11 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
             }
             if let Some(args) = input.strip_prefix("/delete ") {
                 let branch = args.trim();
-                return Some(LocalCommand::DeleteBranch(if branch.is_empty() {
-                    None
-                } else {
-                    Some(Cow::Borrowed(branch))
-                }));
+                if !branch.is_empty() {
+                    return Some(LocalCommand::Branch(BranchSubcommand::Delete(
+                        Cow::Borrowed(branch),
+                    )));
+                }
             }
             if let Some(args) = input.strip_prefix("/open_file ")
                 && args.trim().is_empty()
@@ -541,24 +600,59 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
     if matches_ci(input, &["merge"]) {
         return Some(LocalCommand::Merge(None));
     }
-    for prefix in ["git checkout ", "checkout "] {
+    for prefix in [
+        "git checkout ",
+        "checkout ",
+        "switch to branch ",
+        "switch to ",
+    ] {
         if let Some(target) = strip_ascii_prefix(input, prefix) {
-            let target = target.trim();
+            let target = strip_ascii_suffix(target.trim(), " branch")
+                .map(str::trim)
+                .unwrap_or(target.trim());
             if !target.is_empty() {
-                return Some(LocalCommand::Checkout(Some(Cow::Borrowed(target))));
+                return Some(LocalCommand::Branch(BranchSubcommand::Switch(
+                    Cow::Borrowed(target),
+                )));
             }
         }
     }
-    if let Some(target) = strip_ascii_prefix(input, "switch to ") {
-        let target = strip_ascii_suffix(target.trim(), " branch")
-            .map(str::trim)
-            .unwrap_or(target.trim());
-        if !target.is_empty() {
-            return Some(LocalCommand::Checkout(Some(Cow::Borrowed(target))));
+    for prefix in ["create branch ", "new branch ", "branch -b "] {
+        if let Some(name) = strip_ascii_prefix(input, prefix) {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(LocalCommand::Branch(BranchSubcommand::Create(
+                    Cow::Borrowed(name),
+                )));
+            }
         }
     }
-    if matches_ci(input, &["checkout", "switch to"]) {
-        return Some(LocalCommand::Checkout(None));
+    for prefix in ["rename branch to ", "rename to ", "branch -m "] {
+        if let Some(name) = strip_ascii_prefix(input, prefix) {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(LocalCommand::Branch(BranchSubcommand::Rename(
+                    Cow::Borrowed(name),
+                )));
+            }
+        }
+    }
+    if matches_ci(
+        input,
+        &["branch", "list branches", "git branch", "checkout"],
+    ) {
+        return Some(LocalCommand::Branch(BranchSubcommand::List));
+    }
+    if matches_ci(input, &["list all branches", "branch -a", "branch --all"]) {
+        return Some(LocalCommand::Branch(BranchSubcommand::ListAll));
+    }
+    for prefix in ["restore ", "git restore "] {
+        if let Some(path) = strip_ascii_prefix(input, prefix) {
+            let path = path.trim();
+            if !path.is_empty() {
+                return Some(LocalCommand::Restore(Some(Cow::Borrowed(path))));
+            }
+        }
     }
     for prefix in ["git add ", "add file ", "add "] {
         if let Some(path) = strip_ascii_prefix(input, prefix) {
@@ -665,13 +759,15 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
         return Some(LocalCommand::Squash);
     }
     if matches_ci(input, &["delete", "delete branch"]) {
-        return Some(LocalCommand::DeleteBranch(None));
+        return Some(LocalCommand::Branch(BranchSubcommand::List));
     }
     for prefix in ["git branch -D ", "delete branch ", "delete "] {
         if let Some(branch) = strip_ascii_prefix(input, prefix) {
             let branch = branch.trim();
             if !branch.is_empty() {
-                return Some(LocalCommand::DeleteBranch(Some(Cow::Borrowed(branch))));
+                return Some(LocalCommand::Branch(BranchSubcommand::Delete(
+                    Cow::Borrowed(branch),
+                )));
             }
         }
     }
@@ -911,8 +1007,8 @@ pub fn merge_usage_message() -> &'static str {
     "Usage: /merge <branch>. Use /help to see available commands."
 }
 
-pub fn checkout_usage_message() -> &'static str {
-    "Usage: /checkout <branch|file>. Use /help to see available commands."
+pub fn restore_usage_message() -> &'static str {
+    "Usage: /restore [--staged] <file>. Use /help to see available commands."
 }
 
 pub fn add_file_usage_message() -> &'static str {
@@ -937,10 +1033,6 @@ pub fn commit_usage_message() -> &'static str {
 
 pub fn amend_usage_message() -> &'static str {
     "Usage: /amend <message>. Use /help to see available commands."
-}
-
-pub fn delete_branch_usage_message() -> &'static str {
-    "Usage: /delete <branch>"
 }
 
 #[cfg(test)]
@@ -1280,75 +1372,85 @@ mod tests {
     }
 
     #[test]
-    fn parses_checkout_commands() {
+    fn parses_branch_commands() {
         assert!(matches!(
-            parse_local_command("/checkout"),
-            Some(LocalCommand::Checkout(None))
+            parse_local_command("/branch"),
+            Some(LocalCommand::Branch(BranchSubcommand::List))
         ));
         assert!(matches!(
-            parse_local_command("/checkout "),
-            Some(LocalCommand::Checkout(None))
+            parse_local_command("branch"),
+            Some(LocalCommand::Branch(BranchSubcommand::List))
+        ));
+        assert!(matches!(
+            parse_local_command("list branches"),
+            Some(LocalCommand::Branch(BranchSubcommand::List))
         ));
         assert!(matches!(
             parse_local_command("checkout"),
-            Some(LocalCommand::Checkout(None))
+            Some(LocalCommand::Branch(BranchSubcommand::List))
         ));
         assert!(matches!(
-            parse_local_command("Checkout"),
-            Some(LocalCommand::Checkout(None))
+            parse_local_command("/branch -a"),
+            Some(LocalCommand::Branch(BranchSubcommand::ListAll))
         ));
-        match parse_local_command("/checkout feature/foo") {
-            Some(LocalCommand::Checkout(Some(target))) => {
+        assert!(matches!(
+            parse_local_command("list all branches"),
+            Some(LocalCommand::Branch(BranchSubcommand::ListAll))
+        ));
+        match parse_local_command("/branch feature/foo") {
+            Some(LocalCommand::Branch(BranchSubcommand::Switch(target))) => {
                 assert_eq!(target.as_ref(), "feature/foo")
             }
-            _ => panic!("expected checkout with branch"),
+            _ => panic!("expected branch switch"),
+        }
+        match parse_local_command("/checkout feature/foo") {
+            Some(LocalCommand::Branch(BranchSubcommand::Switch(target))) => {
+                assert_eq!(target.as_ref(), "feature/foo")
+            }
+            _ => panic!("expected checkout alias switch"),
         }
         match parse_local_command("checkout feature/foo") {
-            Some(LocalCommand::Checkout(Some(target))) => {
+            Some(LocalCommand::Branch(BranchSubcommand::Switch(target))) => {
                 assert_eq!(target.as_ref(), "feature/foo")
             }
-            _ => panic!("expected natural checkout with branch"),
-        }
-        match parse_local_command("Checkout README.md") {
-            Some(LocalCommand::Checkout(Some(target))) => {
-                assert_eq!(target.as_ref(), "README.md")
-            }
-            _ => panic!("expected case-insensitive checkout with file"),
-        }
-        match parse_local_command("git checkout feature/foo") {
-            Some(LocalCommand::Checkout(Some(target))) => {
-                assert_eq!(target.as_ref(), "feature/foo")
-            }
-            _ => panic!("expected git checkout natural language"),
+            _ => panic!("expected natural checkout switch"),
         }
         match parse_local_command("switch to main") {
-            Some(LocalCommand::Checkout(Some(target))) => {
+            Some(LocalCommand::Branch(BranchSubcommand::Switch(target))) => {
                 assert_eq!(target.as_ref(), "main")
             }
             _ => panic!("expected switch to main"),
         }
-        match parse_local_command("Switch to main") {
-            Some(LocalCommand::Checkout(Some(target))) => {
-                assert_eq!(target.as_ref(), "main")
-            }
-            _ => panic!("expected case-insensitive switch to main"),
-        }
-        match parse_local_command("switch to feature/foo") {
-            Some(LocalCommand::Checkout(Some(target))) => {
-                assert_eq!(target.as_ref(), "feature/foo")
-            }
-            _ => panic!("expected switch to feature/foo"),
-        }
         match parse_local_command("switch to main branch") {
-            Some(LocalCommand::Checkout(Some(target))) => {
+            Some(LocalCommand::Branch(BranchSubcommand::Switch(target))) => {
                 assert_eq!(target.as_ref(), "main")
             }
             _ => panic!("expected switch to main branch -> main"),
         }
-        assert!(matches!(
-            parse_local_command("switch to"),
-            Some(LocalCommand::Checkout(None))
-        ));
+        match parse_local_command("/branch -b feature/new") {
+            Some(LocalCommand::Branch(BranchSubcommand::Create(name))) => {
+                assert_eq!(name.as_ref(), "feature/new")
+            }
+            _ => panic!("expected branch create"),
+        }
+        match parse_local_command("create branch feature/new") {
+            Some(LocalCommand::Branch(BranchSubcommand::Create(name))) => {
+                assert_eq!(name.as_ref(), "feature/new")
+            }
+            _ => panic!("expected NL branch create"),
+        }
+        match parse_local_command("/branch -m new-name") {
+            Some(LocalCommand::Branch(BranchSubcommand::Rename(name))) => {
+                assert_eq!(name.as_ref(), "new-name")
+            }
+            _ => panic!("expected branch rename"),
+        }
+        match parse_local_command("/branch -d feature/old") {
+            Some(LocalCommand::Branch(BranchSubcommand::Delete(name))) => {
+                assert_eq!(name.as_ref(), "feature/old")
+            }
+            _ => panic!("expected branch delete"),
+        }
     }
 
     #[test]
@@ -1710,40 +1812,36 @@ mod tests {
     #[test]
     fn parses_delete_branch_commands() {
         assert!(matches!(
-            parse_local_command("/delete feature/foo"),
-            Some(LocalCommand::DeleteBranch(Some(_)))
-        ));
-        assert!(matches!(
-            parse_local_command("/delete"),
-            Some(LocalCommand::DeleteBranch(None))
+            parse_local_command("/branch -d feature/foo"),
+            Some(LocalCommand::Branch(BranchSubcommand::Delete(_)))
         ));
         assert!(matches!(
             parse_local_command("delete feature/foo"),
-            Some(LocalCommand::DeleteBranch(Some(_)))
+            Some(LocalCommand::Branch(BranchSubcommand::Delete(_)))
         ));
         assert!(matches!(
             parse_local_command("Delete feature/foo"),
-            Some(LocalCommand::DeleteBranch(Some(_)))
+            Some(LocalCommand::Branch(BranchSubcommand::Delete(_)))
         ));
         assert!(matches!(
             parse_local_command("delete branch feature/foo"),
-            Some(LocalCommand::DeleteBranch(Some(_)))
+            Some(LocalCommand::Branch(BranchSubcommand::Delete(_)))
         ));
         assert!(matches!(
             parse_local_command("Delete Branch feature/foo"),
-            Some(LocalCommand::DeleteBranch(Some(_)))
+            Some(LocalCommand::Branch(BranchSubcommand::Delete(_)))
         ));
         assert!(matches!(
             parse_local_command("git branch -D feature/foo"),
-            Some(LocalCommand::DeleteBranch(Some(_)))
+            Some(LocalCommand::Branch(BranchSubcommand::Delete(_)))
         ));
         assert!(matches!(
             parse_local_command("delete branch"),
-            Some(LocalCommand::DeleteBranch(None))
+            Some(LocalCommand::Branch(BranchSubcommand::List))
         ));
         assert!(matches!(
             parse_local_command("delete"),
-            Some(LocalCommand::DeleteBranch(None))
+            Some(LocalCommand::Branch(BranchSubcommand::List))
         ));
     }
 

@@ -57,21 +57,22 @@ use uuid::Uuid;
 use anyhow::Error;
 use commands::ReviewLaunch;
 use commands::{
-    CommandContext, CommandOutcome, CommandState, LocalCommand, LocalError, StashSubcommand,
-    add_file_usage_message, amend_usage_message, checkout_usage_message, cherry_pick_usage_message,
-    comment_usage_message, commit_usage_message, connect_usage_message,
-    delete_branch_usage_message, merge_usage_message, model_usage_message, move_file_usage_message,
-    open_file_usage_message, parse_local_command, pull_usage_message, remove_file_usage_message,
-    sorted_model_names, system_prompt,
+    BranchSubcommand, CommandContext, CommandOutcome, CommandState, LocalCommand, LocalError,
+    StashSubcommand, add_file_usage_message, amend_usage_message, cherry_pick_usage_message,
+    comment_usage_message, commit_usage_message, connect_usage_message, merge_usage_message,
+    model_usage_message, move_file_usage_message, open_file_usage_message, parse_local_command,
+    pull_usage_message, remove_file_usage_message, restore_usage_message, sorted_model_names,
+    system_prompt,
 };
 use git::{
-    Forge, add_file_output, amend_output, checkout_output, cherry_pick_output, collect_review_diff,
-    comment_output, commit_output, create_pull_request_output, delete_branch_output,
-    discover_git_root, git_diff_against_branch, git_workspace_diff, init_repo_output,
+    Forge, add_file_output, amend_output, branch_create_output, branch_delete_output,
+    branch_list_all_output, branch_list_output, branch_rename_output, cherry_pick_output,
+    collect_review_diff, comment_output, commit_output, create_pull_request_output,
+    discover_git_root, git_checkout, git_diff_against_branch, git_workspace_diff, init_repo_output,
     list_workspace_files_tree, log_output, merge_output, move_file_output, open_in_editor,
-    pull_request_output, push_output, rebase_output, remove_file_output, squash_output,
-    stash_drop_output, stash_list_output, stash_output, stash_pop_output, status_output,
-    sync_default_branch, workspace_branch_name,
+    pull_request_output, push_output, rebase_output, remove_file_output, restore_output,
+    squash_output, stash_drop_output, stash_list_output, stash_output, stash_pop_output,
+    status_output, sync_default_branch, workspace_branch_name,
 };
 use input::{
     EscapeCancelState, IDLE_STATUS_REFRESH_INTERVAL, InputContext, InputResult, InputState,
@@ -1145,13 +1146,61 @@ fn handle_command(
             Ok(_) => Ok(CommandOutcome::Quiet),
             Err(err) => Ok(local_command_error(err)),
         },
-        LocalCommand::Checkout(None) => Ok(CommandOutcome::OutputError(
-            checkout_usage_message().to_string(),
-        )),
-        LocalCommand::Checkout(Some(target)) => match checkout_output(workspace, &target) {
-            Ok(_) => Ok(CommandOutcome::Quiet),
-            Err(err) => Ok(local_command_error(err)),
+        LocalCommand::Branch(sub) => match sub {
+            BranchSubcommand::List => match branch_list_output(workspace) {
+                Ok(output) => Ok(CommandOutcome::Output(output)),
+                Err(err) => Ok(local_command_error(err)),
+            },
+            BranchSubcommand::ListAll => match branch_list_all_output(workspace) {
+                Ok(output) => Ok(CommandOutcome::Output(output)),
+                Err(err) => Ok(local_command_error(err)),
+            },
+            BranchSubcommand::Switch(name) => {
+                let root = match discover_git_root(workspace) {
+                    Some(r) => r,
+                    None => {
+                        return Ok(local_command_error(anyhow::anyhow!(
+                            "branch is only available inside a Git repository"
+                        )));
+                    }
+                };
+                match git_checkout(&root, &name) {
+                    Ok(_) => Ok(CommandOutcome::Quiet),
+                    Err(err) => Ok(local_command_error(err)),
+                }
+            }
+            BranchSubcommand::Create(name) => match branch_create_output(workspace, &name) {
+                Ok(_) => Ok(CommandOutcome::Quiet),
+                Err(err) => Ok(local_command_error(err)),
+            },
+            BranchSubcommand::Rename(name) => match branch_rename_output(workspace, &name) {
+                Ok(output) => Ok(CommandOutcome::Output(output)),
+                Err(err) => Ok(local_command_error(err)),
+            },
+            BranchSubcommand::Delete(name) => match branch_delete_output(workspace, &name) {
+                Ok(_) => Ok(CommandOutcome::Quiet),
+                Err(err) => Ok(local_command_error(err)),
+            },
         },
+        LocalCommand::Restore(None) => Ok(CommandOutcome::OutputError(
+            restore_usage_message().to_string(),
+        )),
+        LocalCommand::Restore(Some(arg)) => {
+            let staged = arg.starts_with("--staged ");
+            let path = if staged {
+                arg.split_once(' ')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            } else {
+                arg.to_string()
+            };
+            match restore_output(workspace, &path, staged) {
+                Ok(_) => Ok(CommandOutcome::Quiet),
+                Err(err) => Ok(local_command_error(err)),
+            }
+        }
         LocalCommand::AddFile(None) => Ok(CommandOutcome::OutputError(
             add_file_usage_message().to_string(),
         )),
@@ -1214,15 +1263,6 @@ fn handle_command(
                 StashSubcommand::List => stash_list_output(&ws),
                 StashSubcommand::Drop => stash_drop_output(&ws),
             })))
-        }
-        LocalCommand::DeleteBranch(None) => Ok(CommandOutcome::OutputError(
-            delete_branch_usage_message().to_string(),
-        )),
-        LocalCommand::DeleteBranch(Some(branch)) => {
-            match delete_branch_output(workspace, &branch) {
-                Ok(_) => Ok(CommandOutcome::Quiet),
-                Err(err) => Ok(local_command_error(err)),
-            }
         }
         LocalCommand::OpenFile(path) => {
             if path.is_empty() {
@@ -2816,7 +2856,7 @@ mod tests {
     use super::completion::completion_candidates;
     use super::git::with_explicit_pager_width;
     use super::git::{
-        delete_branch_output, discover_git_dir, discover_git_root, git_workspace_diff,
+        branch_delete_output, discover_git_dir, discover_git_root, git_workspace_diff,
         init_repo_output, is_protected_branch, list_workspace_files_tree, workspace_branch_name,
     };
     use super::input::idle_status_refresh_timeout;
@@ -3813,7 +3853,7 @@ mod tests {
             .output()
             .expect("git init");
         for branch in ["main", "master"] {
-            let result = delete_branch_output(workspace.path(), branch);
+            let result = branch_delete_output(workspace.path(), branch);
             assert!(result.is_err(), "should block deletion of '{branch}'");
             let msg = result.unwrap_err().to_string();
             assert!(
