@@ -28,6 +28,7 @@ pub const COMMANDS: &[&str] = &[
     "/connect",
     "/disconnect",
     "/reload",
+    "/restart",
     "/models",
     "/list_files",
     "/show_file",

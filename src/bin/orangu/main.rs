@@ -209,6 +209,7 @@ async fn run() -> Result<()> {
     let mut pending_commands = VecDeque::new();
     let mut usage_stats = UsageStats::new().with_session(&session_id);
     let mut history = load_history(&session_hist_path)?;
+    let mut restart_requested = false;
     let mut startup_notice_until: Option<std::time::Instant> =
         if is_resumed && args.resume.is_none() {
             Some(std::time::Instant::now() + std::time::Duration::from_secs(5))
@@ -424,6 +425,14 @@ async fn run() -> Result<()> {
                 update_session_metadata_timestamp(&session_metadata_path)?;
                 print!("{CLEAR_TERMINAL_SEQUENCE}");
                 std::io::stdout().flush()?;
+                break;
+            }
+            CommandOutcome::Restart => {
+                save_session_messages(&session_messages_path, session.messages())?;
+                update_session_metadata_timestamp(&session_metadata_path)?;
+                print!("{CLEAR_TERMINAL_SEQUENCE}");
+                std::io::stdout().flush()?;
+                restart_requested = true;
                 break;
             }
             CommandOutcome::Quiet => {
@@ -779,6 +788,34 @@ async fn run() -> Result<()> {
     }
 
     drop(_terminal_ui_guard);
+
+    if restart_requested {
+        let exe = std::env::current_exe()?;
+        let mut command = std::process::Command::new(&exe);
+        command
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("--resume")
+            .arg(&session_id);
+        // Replace the current process image so the restarted client keeps the
+        // controlling terminal as the foreground process. Spawning a child and
+        // exiting instead would hand the terminal back to the launching shell,
+        // leaving the new process in the background where terminal I/O fails
+        // with EIO. The PID is preserved, mirroring how `exec $SHELL` restarts.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            return Err(command.exec().into());
+        }
+        #[cfg(not(unix))]
+        {
+            let status = command.status()?;
+            std::process::exit(status.code().unwrap_or(0));
+        }
+    }
+
     if usage_stats.total_tokens == 0 && is_ephemeral_branch(current_branch.as_deref().unwrap_or(""))
     {
         delete_session_dir(&session_dir);
@@ -844,13 +881,14 @@ impl UsageStats {
             0.0
         };
         format!(
-            "Application time : {}\nLLM time         : {}\nTool time        : {}\nTotal tokens     : {}\nAvg tokens/sec   : {:.1}\nSession          : {}",
+            "Application time : {}\nLLM time         : {}\nTool time        : {}\nTotal tokens     : {}\nAvg tokens/sec   : {:.1}\nSession          : {}\nPID              : {}",
             format_duration(app_elapsed),
             format_duration(self.total_llm_duration),
             format_duration(self.total_tool_duration),
             self.total_tokens,
             avg_tps,
             self.session_id,
+            std::process::id(),
         )
     }
 }
@@ -1008,6 +1046,7 @@ fn handle_command(
             session.clear(prompt);
             Ok(CommandOutcome::Quiet)
         }
+        LocalCommand::Restart => Ok(CommandOutcome::Restart),
         LocalCommand::ListModels => {
             let names = sorted_model_names(llms);
             let configs: Vec<(String, LlmConfiguration)> = names

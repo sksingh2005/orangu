@@ -113,6 +113,7 @@ pub enum CommandOutcome {
     OutputError(String),
     Cleared,
     Quit,
+    Restart,
     Blocking(Box<dyn FnOnce() -> anyhow::Result<String> + Send + 'static>),
     Async(Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'static>>),
     /// Enter the interactive `/review` mode with a collected branch diff.
@@ -147,6 +148,7 @@ pub enum LocalCommand<'a> {
     ConnectTo(&'a str),
     Disconnect,
     Reload,
+    Restart,
     ListModels,
     ListFiles,
     ShowFile(Cow<'a, str>),
@@ -219,6 +221,7 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
         "/connect" => Some(LocalCommand::ConnectDefault),
         "/disconnect" => Some(LocalCommand::Disconnect),
         "/reload" => Some(LocalCommand::Reload),
+        "/restart" => Some(LocalCommand::Restart),
         "/tools" => Some(LocalCommand::Tools),
         "/model" => Some(LocalCommand::ModelInfo),
         "/models" => Some(LocalCommand::ListModels),
@@ -463,6 +466,9 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
     }
     if matches_ci(input, &["reload", "reload configuration", "reset session"]) {
         return Some(LocalCommand::Reload);
+    }
+    if matches_ci(input, &["restart", "restart orangu"]) {
+        return Some(LocalCommand::Restart);
     }
     if matches_ci(
         input,

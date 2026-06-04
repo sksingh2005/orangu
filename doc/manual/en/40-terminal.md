@@ -162,6 +162,7 @@ All slash commands are handled locally. They are not sent to the model.
 | `/connect [url]` | Connect to the configured server, or a specific server |
 | `/disconnect` | Disconnect from the current server |
 | `/reload` | Restore the configured model and server |
+| `/restart` | Restart orangu, resuming the same workspace and session |
 | `/tools` | List tools |
 | `/model [name]` | Switch to the configured model, or a specific model |
 | `/models` | List models |
@@ -235,6 +236,7 @@ Free-form prompts are blocked when the server or model status in the header is r
 - `/usage` shows session statistics: total application time, total time spent waiting for LLM responses, total tokens generated (counted with the bundled tokenizer), and average tokens per second
 - `/list_files` is a local convenience command and is separate from the model-facing `list_directory` tool
 - `/reload` also clears the current conversation history in memory
+- `/restart` saves the current session, then replaces the running process via `exec` with the same binary, passing `--workspace`, `--config`, and `--resume <session-id>` so the new process picks up exactly where the old one left off; useful after updating the orangu binary or config without losing conversation context
 - `/quit` exits immediately, while `Ctrl+C` uses a two-step confirmation; on exit the full resume command is printed unless the session had no LLM interaction and was on `main`, `master`, or outside a Git repository — in that case the session directory is deleted silently
 - Unknown slash commands are handled locally and produce an error message that points back to `/help`
 
