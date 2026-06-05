@@ -21,7 +21,7 @@ use std::{
     process::Stdio,
 };
 
-use super::commands::{current_terminal_width, shell_words};
+use super::commands::{CommentBody, current_terminal_width, shell_words};
 use super::render::{
     ANSI_BOLD_OFF, ANSI_BOLD_ON, ANSI_FG_LIGHT_GREEN, ANSI_FG_LIGHT_RED, ANSI_FG_RESET,
     ANSI_FG_SUBTLE,
@@ -1126,17 +1126,28 @@ pub fn git_pr_checkout(repo_root: &Path, pr_number: u64) -> Result<String> {
 pub fn comment_output(
     workspace: &Path,
     issue_number: u64,
-    body: &str,
+    body: &CommentBody<'_>,
     forge: Forge,
 ) -> Result<String> {
     let repo_root = discover_git_root(workspace)
         .ok_or_else(|| anyhow!("comment is only available inside a Git repository"))?;
+    let body_text: String = match body {
+        CommentBody::Inline(s) => s.to_string(),
+        CommentBody::File(filename) => {
+            let path = home::home_dir()
+                .ok_or_else(|| anyhow!("failed to resolve home directory"))?
+                .join(".orangu/comments")
+                .join(filename.as_ref());
+            fs::read_to_string(&path)
+                .with_context(|| format!("failed to read comment file {}", path.display()))?
+        }
+    };
     let cli = forge.cli();
     let number = issue_number.to_string();
     // GitHub: `gh issue comment N --body B`. GitLab: `glab issue note N --message B`.
     let args: Vec<&str> = match forge {
-        Forge::GitHub => vec!["issue", "comment", &number, "--body", body],
-        Forge::GitLab => vec!["issue", "note", &number, "--message", body],
+        Forge::GitHub => vec!["issue", "comment", &number, "--body", &body_text],
+        Forge::GitLab => vec!["issue", "note", &number, "--message", &body_text],
     };
     let output = match std::process::Command::new(cli)
         .args(&args)

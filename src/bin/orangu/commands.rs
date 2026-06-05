@@ -137,6 +137,13 @@ pub struct ReviewLaunch {
     pub files: Vec<ReviewEntry>,
 }
 
+pub enum CommentBody<'a> {
+    /// An inline comment body supplied directly in the command (`"..."` or bare text).
+    Inline(Cow<'a, str>),
+    /// A filename under `~/.orangu/comments/` whose content is the comment body.
+    File(Cow<'a, str>),
+}
+
 pub enum StashSubcommand {
     Push,
     Pop,
@@ -172,7 +179,7 @@ pub enum LocalCommand<'a> {
     Status,
     Log(Option<u64>),
     Pull(Option<u64>),
-    Comment(Option<(u64, Cow<'a, str>)>),
+    Comment(Option<(u64, CommentBody<'a>)>),
     CreatePullRequest,
     Rebase,
     Merge(Option<Cow<'a, str>>),
@@ -944,15 +951,23 @@ pub fn parse_pull_pr_number(input: &str) -> Option<u64> {
     None
 }
 
-pub fn parse_comment_args(input: &str) -> Option<(u64, Cow<'_, str>)> {
+pub fn parse_comment_args(input: &str) -> Option<(u64, CommentBody<'_>)> {
     let input = input.trim();
     let (number, rest) = input.split_once(char::is_whitespace)?;
     let number = number.trim_start_matches('#').parse::<u64>().ok()?;
-    let body = strip_matching_quotes(rest.trim());
-    if body.is_empty() {
+    let rest = rest.trim();
+    if rest.is_empty() {
         return None;
     }
-    Some((number, Cow::Borrowed(body)))
+    if rest.starts_with('"') || rest.starts_with('\'') {
+        let body = strip_matching_quotes(rest);
+        if body.is_empty() {
+            return None;
+        }
+        Some((number, CommentBody::Inline(Cow::Borrowed(body))))
+    } else {
+        Some((number, CommentBody::File(Cow::Borrowed(rest))))
+    }
 }
 
 pub fn strip_ascii_suffix<'a>(input: &'a str, suffix: &str) -> Option<&'a str> {
@@ -1045,7 +1060,7 @@ pub fn pull_usage_message() -> &'static str {
 }
 
 pub fn comment_usage_message() -> &'static str {
-    "Usage: /comment <number> \"<comment>\". Use /help to see available commands."
+    "Usage: /comment <number> \"<comment>\" or /comment <number> <file>. Use /help to see available commands."
 }
 
 pub fn merge_usage_message() -> &'static str {
@@ -1260,23 +1275,27 @@ mod tests {
     fn parses_comment_commands() {
         assert!(matches!(
             parse_local_command("/comment 51 \"My comment\""),
-            Some(LocalCommand::Comment(Some((51, ref body)))) if body == "My comment"
+            Some(LocalCommand::Comment(Some((51, CommentBody::Inline(ref body))))) if body == "My comment"
         ));
         assert!(matches!(
             parse_local_command("/comment 51 My comment"),
-            Some(LocalCommand::Comment(Some((51, ref body)))) if body == "My comment"
+            Some(LocalCommand::Comment(Some((51, CommentBody::File(ref name))))) if name == "My comment"
         ));
         assert!(matches!(
             parse_local_command("/comment #51 \"My comment\""),
-            Some(LocalCommand::Comment(Some((51, ref body)))) if body == "My comment"
+            Some(LocalCommand::Comment(Some((51, CommentBody::Inline(ref body))))) if body == "My comment"
         ));
         assert!(matches!(
             parse_local_command("Add comment on 51 \"My comment\""),
-            Some(LocalCommand::Comment(Some((51, ref body)))) if body == "My comment"
+            Some(LocalCommand::Comment(Some((51, CommentBody::Inline(ref body))))) if body == "My comment"
         ));
         assert!(matches!(
             parse_local_command("comment on 51 \"My comment\""),
-            Some(LocalCommand::Comment(Some((51, ref body)))) if body == "My comment"
+            Some(LocalCommand::Comment(Some((51, CommentBody::Inline(ref body))))) if body == "My comment"
+        ));
+        assert!(matches!(
+            parse_local_command("/comment 51 merged.md"),
+            Some(LocalCommand::Comment(Some((51, CommentBody::File(ref name))))) if name == "merged.md"
         ));
         assert!(matches!(
             parse_local_command("/comment"),

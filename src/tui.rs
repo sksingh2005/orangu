@@ -188,7 +188,7 @@ pub fn help_text() -> &'static str {
 /amend <message>                              Rewrite the last commit message with git commit --amend
 /branch [<name>|-a|-b|-m|-d <name>]           List, switch, create, rename or delete a branch
 /cherry_pick <commit>                         Cherry-pick a commit onto the current branch
-/comment <number> "<comment>"                 Add a comment to a GitHub/GitLab issue with gh/glab
+/comment <number> "<comment>"|<file>          Add a comment to a GitHub/GitLab issue; inline body or file from ~/.orangu/comments/
 /commit <message>                             Commit all tracked changes with git commit -a -m
 /diff                                         Show a color unified diff against the current branch
 /grep <pattern>                               Search the workspace with git grep

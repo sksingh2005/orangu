@@ -106,6 +106,10 @@ pub fn completion_candidates(
         ));
     }
 
+    if let Some((start, candidates)) = comment_file_completion_candidates(prefix) {
+        return Some((start, cursor, candidates));
+    }
+
     if let Some((start, candidates)) = checkout_completion_candidates(prefix, workspace) {
         return Some((start, cursor, candidates));
     }
@@ -771,4 +775,37 @@ pub fn natural_show_file_completion_prefix(prefix: &str) -> Option<(usize, &str)
     }
 
     Some((prefix.len() - path_prefix.len(), path_prefix))
+}
+
+/// Returns `(start, candidates)` for `/comment <number> <file-prefix>` where the third
+/// argument is a bare word (no leading quote), completing against `~/.orangu/comments/`.
+pub fn comment_file_completion_candidates(prefix: &str) -> Option<(usize, Vec<String>)> {
+    let rest = prefix.strip_prefix("/comment ")?;
+    let rest = rest.trim_start();
+    // skip the issue number token
+    let (_, after_number) = rest.split_once(char::is_whitespace)?;
+    let file_prefix = after_number.trim_start();
+    // quoted argument = inline comment body, not a file
+    if file_prefix.starts_with('"') || file_prefix.starts_with('\'') {
+        return None;
+    }
+    let comments_dir = home::home_dir()?.join(".orangu/comments");
+    let entries = fs::read_dir(comments_dir).ok()?;
+    let mut candidates: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            if !entry.file_type().ok()?.is_file() {
+                return None;
+            }
+            let name = entry.file_name().to_str()?.to_string();
+            if name.starts_with(file_prefix) {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort();
+    let start = prefix.len() - file_prefix.len();
+    Some((start, candidates))
 }
