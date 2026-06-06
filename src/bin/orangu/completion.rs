@@ -791,10 +791,23 @@ pub fn natural_show_file_completion_prefix(prefix: &str) -> Option<(usize, &str)
     Some((prefix.len() - path_prefix.len(), path_prefix))
 }
 
-/// Returns `(start, candidates)` for `/comment <number> <file-prefix>` where the third
-/// argument is a bare word (no leading quote), completing against `~/.orangu/comments/`.
+/// Returns `(start, candidates)` for a comment command's `<number> <file-prefix>` argument
+/// where the file argument is a bare word (no leading quote), completing against
+/// `~/.orangu/comments/`. Handles both `/comment` and the natural-language forms
+/// (`add comment on`, `add comment to`, `comment on`).
 pub fn comment_file_completion_candidates(prefix: &str) -> Option<(usize, Vec<String>)> {
-    let rest = prefix.strip_prefix("/comment ")?;
+    let rest = if let Some(rest) = prefix.strip_prefix("/comment ") {
+        rest
+    } else {
+        let mut found = None;
+        for command_prefix in ["add comment on ", "add comment to ", "comment on "] {
+            if let Some(rest) = strip_ascii_prefix(prefix, command_prefix) {
+                found = Some(rest);
+                break;
+            }
+        }
+        found?
+    };
     let rest = rest.trim_start();
     // skip the issue number token
     let (_, after_number) = rest.split_once(char::is_whitespace)?;
