@@ -4,6 +4,31 @@
 
 `orangu` uses an INI configuration file.
 
+## Interactive setup (`--init`)
+
+Run `orangu --init` (short form `-i`) to generate the configuration
+interactively instead of editing the file by hand:
+
+```sh
+orangu --init
+```
+
+The wizard:
+
+1. Asks for the **LLM URL** (the server `endpoint`).
+2. Queries the server's `/v1/models` endpoint and pre-fills the first
+   advertised model as the **Model** value; if no model can be detected, you
+   enter one manually.
+3. Walks every `[orangu]` and server option, showing its default in
+   `[brackets]`. Press Enter to keep the default. Boolean options accept
+   `Yes`/`Y`/`No`/`N` (case-insensitive).
+4. Shows the resulting configuration and asks for confirmation before writing.
+
+The provider is assumed to be `llama.cpp`. Only values that differ from their
+default are written, so the generated file stays minimal. It is written to
+`~/.orangu/orangu.conf`, creating `~/.orangu/` if needed and overwriting any
+existing file.
+
 ## `[orangu]`
 
 The main section selects the default server and client-wide limits. The

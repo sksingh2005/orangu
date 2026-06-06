@@ -8,6 +8,7 @@ startup flags and their arguments:
 | `-c`  | `--config`    | files             |
 | `-w`  | `--workspace` | directories       |
 | `-r`  | `--resume`    | session UUIDs from `~/.orangu/sessions` (newest first) |
+| `-i`  | `--init`      | —                 |
 | `-h`  | `--help`      | —                 |
 
 | Shell | File           |

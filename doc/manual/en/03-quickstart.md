@@ -26,7 +26,16 @@ http://localhost:8100/v1
 
 ## Create a configuration
 
-Copy the sample:
+The fastest path is the interactive wizard, which auto-detects a model from the
+server and writes `~/.orangu/orangu.conf`:
+
+```sh
+orangu --init
+```
+
+See [Configuration](20-configuration.md) for the details of the wizard.
+
+Or copy the sample:
 
 ```sh
 cp doc/etc/orangu.conf ./orangu.conf
@@ -97,7 +106,7 @@ Then start with:
 
 By default the tools operate on the current directory. Use `--workspace /path/to/project` to point **orangu** at another tree.
 
-The startup flags have short forms: `-c` for `--config`, `-w` for `--workspace`, and `-r` for `--resume`.
+The startup flags have short forms: `-c` for `--config`, `-w` for `--workspace`, `-r` for `--resume`, and `-i` for `--init`.
 
 **orangu** automatically resumes an existing session when you return to the same workspace and Git branch. When a previous session is found, the status bar shows:
 

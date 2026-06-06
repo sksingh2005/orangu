@@ -17,6 +17,7 @@ mod build;
 mod commands;
 mod completion;
 mod git;
+mod init;
 mod input;
 mod quotes;
 mod render;
@@ -100,6 +101,9 @@ struct Args {
     workspace: Option<PathBuf>,
     #[arg(short, long)]
     resume: Option<String>,
+    /// Interactively create ~/.orangu/orangu.conf and exit.
+    #[arg(short, long)]
+    init: bool,
 }
 
 #[tokio::main]
@@ -116,6 +120,9 @@ async fn main() -> ExitCode {
 async fn run() -> Result<()> {
     let _terminal_title_guard = TerminalTitleGuard::new(TERMINAL_TITLE);
     let args = Args::parse();
+    if args.init {
+        return init::run_init().await;
+    }
     let config_path = match args.config.or_else(default_client_config_path) {
         Some(path) => path,
         None => {

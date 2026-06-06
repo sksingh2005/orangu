@@ -10,6 +10,7 @@ complete the startup flags and their arguments:
 | `-c`  | `--config`    | files        |
 | `-w`  | `--workspace` | directories  |
 | `-r`  | `--resume`    | session UUIDs |
+| `-i`  | `--init`      | —            |
 | `-h`  | `--help`      | —            |
 
 Completion for `--resume` scans `~/.orangu/sessions/` for the available session

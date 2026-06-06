@@ -86,7 +86,20 @@ target/debug/orangu
 
 ## Configuration and first run
 
-Start from the sample configuration:
+The quickest way to get a working configuration is the interactive wizard:
+
+```sh
+orangu --init
+```
+
+It asks for the **LLM URL**, auto-detects a model the server advertises (and
+pre-fills it as the **Model**), then walks every option showing its default.
+Anything left at its default is omitted from the file, and the result is shown
+for confirmation before being written to `~/.orangu/orangu.conf` (creating the
+directory if needed, and overwriting any existing file). The provider is
+assumed to be [llama.cpp](https://github.com/ggml-org/llama.cpp).
+
+Alternatively, start from the sample configuration:
 
 ```sh
 cp doc/etc/orangu.conf ./orangu.conf
@@ -111,7 +124,7 @@ Or run it directly from the build tree:
 
 By default, local tools operate on the current working directory. Use `--workspace /path/to/project` (`-w`) to point **orangu** at another tree.
 
-The startup flags also have short forms: `-c` for `--config`, `-w` for `--workspace`, and `-r` for `--resume`.
+The startup flags also have short forms: `-c` for `--config`, `-w` for `--workspace`, `-r` for `--resume`, and `-i` for `--init`.
 
 Shell completion scripts (bash, zsh, fish) for these flags live in [`contrib/shell/`](contrib/shell/README.md).
 

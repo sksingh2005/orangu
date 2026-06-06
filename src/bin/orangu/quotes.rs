@@ -23,6 +23,18 @@ pub enum QuoteModule {
     All,
 }
 
+/// The quote-set names accepted in `[orangu].quotes`, in the order offered for
+/// completion. Kept next to [`QuoteModule::from_str`], which parses them.
+pub const QUOTE_OPTIONS: &[&str] = &[
+    "none",
+    "star_trek",
+    "star_wars",
+    "marco_pierre_white",
+    "gordon_ramsay",
+    "calvin_and_hobbes",
+    "all",
+];
+
 impl QuoteModule {
     pub fn from_str(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {

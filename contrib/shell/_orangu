@@ -19,6 +19,7 @@ _orangu() {
         '(-c --config)'{-c,--config}'[Path to the configuration file (orangu.conf)]:config file:_files' \
         '(-w --workspace)'{-w,--workspace}'[Workspace root for local tools]:workspace directory:_files -/' \
         '(-r --resume)'{-r,--resume}'[Resume a session by UUID]:session uuid:_orangu_sessions' \
+        '(-i --init)'{-i,--init}'[Interactively create ~/.orangu/orangu.conf and exit]' \
         '(-h --help)'{-h,--help}'[Print help]'
 }
 

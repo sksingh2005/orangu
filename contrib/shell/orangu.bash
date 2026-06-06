@@ -38,7 +38,7 @@ _orangu() {
 
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W \
-            "-c --config -w --workspace -r --resume -h --help" -- "$cur") )
+            "-c --config -w --workspace -r --resume -i --init -h --help" -- "$cur") )
         return 0
     fi
 }

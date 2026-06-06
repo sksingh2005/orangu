@@ -13,15 +13,37 @@ llama-server \
 
 ## 2. Create a client configuration
 
-Start from the sample file:
+The quickest way is the interactive wizard, which asks for the LLM URL,
+auto-detects a model the server advertises, walks every option showing its
+default, and writes `~/.orangu/orangu.conf` after a confirmation:
+
+```sh
+orangu --init
+```
+
+Or, with an uninstalled build:
+
+```sh
+cargo run --bin orangu -- --init
+```
+
+Alternatively, start from the sample file and adjust the model name and
+endpoint if needed:
 
 ```sh
 cp doc/etc/orangu.conf ./orangu.conf
 ```
 
-Adjust the model name and endpoint if needed.
-
 ## 3. Run the client
+
+If you used `orangu --init`, the configuration already lives at
+`~/.orangu/orangu.conf` (a default lookup location), so just run:
+
+```sh
+orangu
+```
+
+Otherwise point the client at your configuration file:
 
 ```sh
 cargo run --bin orangu -- --config ./orangu.conf
