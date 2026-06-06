@@ -14,10 +14,21 @@ _orangu_sessions() {
     _describe -t sessions 'session' uuids
 }
 
+# Completes unique workspace roots from past sessions in ~/.orangu/sessions,
+# extracted from each session's metadata.
+_orangu_workspaces() {
+    local sessions_dir="${HOME}/.orangu/sessions"
+    [[ -d $sessions_dir ]] || return
+    local -a workspaces
+    workspaces=( ${(fu)"$(sed -n 's/.*"workspace":"\([^"]*\)".*/\1/p' \
+        $sessions_dir/*/metadata(N) 2>/dev/null)"} )
+    compadd -a workspaces
+}
+
 _orangu() {
     _arguments -s \
         '(-c --config)'{-c,--config}'[Path to the configuration file (orangu.conf)]:config file:_files' \
-        '(-w --workspace)'{-w,--workspace}'[Workspace root for local tools]:workspace directory:_files -/' \
+        '(-w --workspace)'{-w,--workspace}'[Workspace root for local tools]:workspace:_orangu_workspaces' \
         '(-r --resume)'{-r,--resume}'[Resume a session by UUID]:session uuid:_orangu_sessions' \
         '(-i --init)'{-i,--init}'[Interactively create ~/.orangu/orangu.conf and exit]' \
         '(-h --help)'{-h,--help}'[Print help]'

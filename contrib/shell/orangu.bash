@@ -19,9 +19,16 @@ _orangu() {
             return 0
             ;;
         -w|--workspace)
-            # Workspace root: directories only
-            COMPREPLY=( $(compgen -d -- "$cur") )
-            compopt -o dirnames 2>/dev/null
+            # Workspace root: unique workspaces from past sessions in
+            # ~/.orangu/sessions, extracted from each session's metadata.
+            local sessions_dir="${HOME}/.orangu/sessions"
+            if [[ -d "$sessions_dir" ]]; then
+                local workspaces
+                workspaces=$(sed -n 's/.*"workspace":"\([^"]*\)".*/\1/p' \
+                    "$sessions_dir"/*/metadata 2>/dev/null | sort -u)
+                COMPREPLY=( $(compgen -W "$workspaces" -- "$cur") )
+            fi
+            compopt -o filenames 2>/dev/null
             return 0
             ;;
         -r|--resume)
