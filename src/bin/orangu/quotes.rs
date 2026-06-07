@@ -136,6 +136,7 @@ static MARCO_PIERRE_WHITE: &[&str] = &[
     "Success is born out of arrogance, but greatness comes from humility.",
     "Once you accept you are being judged by people who have less knowledge than yourself, then what's it worth?",
     "People who can give themselves every day. They're the people that I admire, they're real people.",
+    "A person who works with their hands is a labourer, a person who works with their hands and their brain is a craftsman, a person who works with their hands, their brain and their heart is an artist. Ask yourself, who are you?",
 ];
 
 static GORDON_RAMSAY: &[&str] = &[
