@@ -22,6 +22,7 @@ pub enum QuoteModule {
     CalvinAndHobbes,
     SunTzuMandarin,
     SunTzuEnglish,
+    AttilaTheHun,
     All,
 }
 
@@ -36,6 +37,7 @@ pub const QUOTE_OPTIONS: &[&str] = &[
     "calvin_and_hobbes",
     "sun_tzu_mandarin",
     "sun_tzu_english",
+    "attila_the_hun",
     "all",
 ];
 
@@ -49,6 +51,7 @@ impl QuoteModule {
             "calvin_and_hobbes" => Self::CalvinAndHobbes,
             "sun_tzu_mandarin" => Self::SunTzuMandarin,
             "sun_tzu_english" => Self::SunTzuEnglish,
+            "attila_the_hun" => Self::AttilaTheHun,
             "all" => Self::All,
             _ => Self::None,
         }
@@ -64,6 +67,7 @@ impl QuoteModule {
             Self::CalvinAndHobbes => &[CALVIN_AND_HOBBES],
             Self::SunTzuMandarin => &[SUN_TZU_MANDARIN],
             Self::SunTzuEnglish => &[SUN_TZU_ENGLISH],
+            Self::AttilaTheHun => &[ATTILA_THE_HUN],
             Self::All => &[
                 STAR_TREK,
                 STAR_WARS,
@@ -72,6 +76,7 @@ impl QuoteModule {
                 CALVIN_AND_HOBBES,
                 SUN_TZU_MANDARIN,
                 SUN_TZU_ENGLISH,
+                ATTILA_THE_HUN,
             ],
         };
         let total: usize = pool.iter().map(|s| s.len()).sum();
@@ -199,6 +204,24 @@ static SUN_TZU_ENGLISH: &[&str] = &[
     "Let your rapidity be that of the wind, your compactness that of the forest. In raiding and plundering be like fire, in immovability like a mountain.",
 ];
 
+// Attila the Hun, in the leadership tradition of Wess Roberts' "Leadership
+// Secrets of Attila the Hun".
+static ATTILA_THE_HUN: &[&str] = &[
+    "There, where I have passed, the grass will never grow again.",
+    "Chieftains seldom err in being too kind; however, they often err in being too lenient.",
+    "A king without a people is no king at all.",
+    "Leaders must teach their Huns well that which is expected of them. Otherwise, Huns will probably do something not expected of them.",
+    "The greatness of a Hun is measured by the sacrifices he is willing to make for the good of the nation.",
+    "It is unfortunate when final decisions are made by chieftains headquartered miles away from the front, where they can only guess at conditions and potentialities known only to the captain of the battle.",
+    "Wise chieftains never take themselves too seriously.",
+    "Superficial leadership will not work in the heat of battle, nor in the heat of life.",
+    "Huns should never be made to feel that they are alone in their struggle, even when on a lonely and arduous mission.",
+    "A wise chieftain never depends on luck. Rather, he always tips chance in his favor.",
+    "Adequate compensation for a year's loyalty is a year's pay. Loyalty cannot be bought; it must be earned.",
+    "Strong, able, willing Huns with marginal skills can be taught to perfect their abilities. The greater task is to teach them humility and to control their fanaticism.",
+    "It is not enough that I succeed, everybody else must fail.",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +241,7 @@ mod tests {
         assert!(QuoteModule::CalvinAndHobbes.pick(4).is_some());
         assert!(QuoteModule::SunTzuMandarin.pick(5).is_some());
         assert!(QuoteModule::SunTzuEnglish.pick(6).is_some());
+        assert!(QuoteModule::AttilaTheHun.pick(7).is_some());
     }
 
     #[test]
@@ -230,6 +254,7 @@ mod tests {
             CALVIN_AND_HOBBES,
             SUN_TZU_MANDARIN,
             SUN_TZU_ENGLISH,
+            ATTILA_THE_HUN,
         ]
         .iter()
         .map(|s| s.len())
@@ -269,6 +294,10 @@ mod tests {
         assert!(matches!(
             QuoteModule::from_str("sun_tzu_english"),
             QuoteModule::SunTzuEnglish
+        ));
+        assert!(matches!(
+            QuoteModule::from_str("attila_the_hun"),
+            QuoteModule::AttilaTheHun
         ));
         assert!(matches!(QuoteModule::from_str("all"), QuoteModule::All));
         assert!(matches!(
