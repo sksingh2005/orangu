@@ -2,6 +2,31 @@
 
 ## Optional external tools
 
+**orangu** integrates with several optional command-line tools. None of them
+are required, but when present they improve the output of the corresponding
+commands. The sections below describe each tool and, importantly, **how it is
+configured to be used** — installing a tool is not always enough; some must
+also be wired into your Git configuration.
+
+The interactive setup wizard (`orangu --init`, short form `-i`) reports the
+state of each tool just before writing the configuration:
+
+- `No` — the tool is not installed.
+- `Yes (Used)` — the tool is installed **and** configured so orangu will use
+  it.
+- `Yes (Not used)` — the tool is installed but not configured to be used; for
+  example `delta` is on your `PATH` but is not set as your Git diff pager.
+
+What "configured to be used" means for each tool:
+
+| Tool | Used when |
+| :-- | :-- |
+| `git lg` | the `lg` alias is set in `~/.gitconfig` |
+| `delta` | it is installed and resolves as the Git diff pager (`pager.diff`, then `core.pager`) |
+| `bat` | it is installed (no further configuration needed) |
+| `gh` | it is installed and `[orangu].platform` is `github` (the default) |
+| `glab` | it is installed and `[orangu].platform` is `gitlab` |
+
 ### git lg
 
 `git lg` is a compact, graph-formatted commit log alias for Git. When it is configured in `~/.gitconfig`, **orangu** will use it automatically for `/log` output instead of the plain `git log` fallback.
@@ -65,7 +90,9 @@ Please refer to the upstream documentation for full installation and configurati
 
 [**bat**](https://github.com/sharkdp/bat/) is an optional `cat` clone with syntax highlighting and Git integration.
 
-If it is installed, **orangu** will use it for plain `/show_file` output.
+If it is installed, **orangu** will use it for plain `/show_file` output. No
+further configuration is required — installing `bat` is enough for it to be
+used.
 
 **Installation**
 

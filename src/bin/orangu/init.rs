@@ -163,6 +163,8 @@ pub async fn run_init() -> Result<()> {
         server.join("\n"),
     );
 
+    report_optional_tools(&platform);
+
     println!("\nConfiguration to write:\n");
     println!("{contents}");
 
@@ -182,6 +184,126 @@ pub async fn run_init() -> Result<()> {
     println!("Wrote {}", path.display());
 
     Ok(())
+}
+
+/// Print whether each optional external tool documented under "Optional
+/// external tools" in the manual is detected on this system, and whether it is
+/// actually wired up to be used. Shown just before the configuration preview so
+/// the user can see which integrations orangu will pick up:
+///
+/// * `git lg` for `/log` — used when the `lg` alias is set in `~/.gitconfig`.
+/// * `delta` for `/diff` — used when it is the configured Git diff pager.
+/// * `bat` for `/show_file` — used automatically whenever it is installed.
+/// * `gh`/`glab` for the forge commands — used for the selected `platform`.
+///
+/// Each line reads `No` when the tool is absent, `Yes (Used)` when installed
+/// and active, or `Yes (Not used)` when installed but not configured to be
+/// used.
+fn report_optional_tools(platform: &str) {
+    let delta_installed = command_available("delta");
+    let bat_installed = command_available("bat");
+    let gh_installed = command_available("gh");
+    let glab_installed = command_available("glab");
+
+    println!("\nDetected optional tools:\n");
+    // `git lg` has no separate binary: the alias in `~/.gitconfig` both
+    // installs and activates it, so it is only ever absent or used.
+    let lg = git_lg_configured();
+    println!("  git lg: {}", tool_status(lg, lg));
+    // delta is only used when it resolves as the Git diff pager.
+    println!(
+        "  delta:  {}",
+        tool_status(delta_installed, delta_installed && delta_is_git_diff_pager())
+    );
+    // bat needs no configuration; orangu uses it whenever it is installed.
+    println!("  bat:    {}", tool_status(bat_installed, bat_installed));
+    // gh/glab are selected by `[orangu].platform`.
+    println!(
+        "  gh:     {}",
+        tool_status(gh_installed, gh_installed && platform == "github")
+    );
+    println!(
+        "  glab:   {}",
+        tool_status(glab_installed, glab_installed && platform == "gitlab")
+    );
+}
+
+/// Format a detection result for the wizard: `No` when the tool is not
+/// installed, `Yes (Used)` when installed and active, or `Yes (Not used)` when
+/// installed but not configured to be used.
+fn tool_status(installed: bool, used: bool) -> &'static str {
+    match (installed, used) {
+        (false, _) => "No",
+        (true, true) => "Yes (Used)",
+        (true, false) => "Yes (Not used)",
+    }
+}
+
+/// Whether the `lg` Git alias is configured globally, matching the check `/log`
+/// uses to decide between `git lg` and the plain `git log` fallback.
+fn git_lg_configured() -> bool {
+    std::process::Command::new("git")
+        .args(["config", "--global", "--get", "alias.lg"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether `command --version` runs successfully, used to detect an optional
+/// executable on `PATH`. A missing binary (or any spawn failure) reports
+/// `false`.
+fn command_available(command: &str) -> bool {
+    std::process::Command::new(command)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether `delta` is the effective Git diff pager in `~/.gitconfig`, mirroring
+/// how `/diff` resolves a pager: `pager.diff` wins over `core.pager`, and an
+/// interactive pager (`less`, `more`, …) is skipped so the next candidate is
+/// considered. Only the global config is inspected, since the wizard runs
+/// outside any particular repository.
+fn delta_is_git_diff_pager() -> bool {
+    for key in ["pager.diff", "core.pager"] {
+        let Some(value) = git_global_config(key) else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let executable = pager_executable(value);
+        // An interactive pager cannot run non-interactively, so orangu ignores
+        // it and falls through to the next key.
+        if matches!(executable, "less" | "more" | "most" | "lv") {
+            continue;
+        }
+        return executable == "delta";
+    }
+    false
+}
+
+/// Read a single value from the global Git configuration (`~/.gitconfig`),
+/// returning `None` when the key is unset or Git cannot be run.
+fn git_global_config(key: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["config", "--global", "--get", key])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// The bare executable name of a configured pager command, dropping any
+/// directory prefix and arguments (e.g. `/usr/bin/delta --side-by-side` →
+/// `delta`).
+fn pager_executable(command: &str) -> &str {
+    let first = command.split_whitespace().next().unwrap_or(command);
+    first.rsplit(['/', '\\']).next().unwrap_or(first)
 }
 
 /// Query the server's `/v1/models` endpoint and return the first advertised
@@ -378,5 +500,25 @@ fn prompt_bool(label: &str, default: bool) -> Result<bool> {
             "no" | "n" => return Ok(false),
             _ => println!("Please answer Yes/Y or No/N."),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{pager_executable, tool_status};
+
+    #[test]
+    fn tool_status_reports_install_and_usage() {
+        assert_eq!(tool_status(false, false), "No");
+        assert_eq!(tool_status(true, true), "Yes (Used)");
+        assert_eq!(tool_status(true, false), "Yes (Not used)");
+    }
+
+    #[test]
+    fn pager_executable_strips_path_and_arguments() {
+        assert_eq!(pager_executable("delta"), "delta");
+        assert_eq!(pager_executable("delta --side-by-side"), "delta");
+        assert_eq!(pager_executable("/usr/bin/delta --width=90"), "delta");
+        assert_eq!(pager_executable("less"), "less");
     }
 }

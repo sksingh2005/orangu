@@ -22,7 +22,14 @@ The wizard:
 3. Walks every `[orangu]` and server option, showing its default in
    `[brackets]`. Press Enter to keep the default. Boolean options accept
    `Yes`/`Y`/`No`/`N` (case-insensitive).
-4. Shows the resulting configuration and asks for confirmation before writing.
+4. Reports which [optional external tools](#optional-external-tools) it
+   detects (`git lg`, `delta`, `bat`, `gh`, and `glab`). Each is shown as `No`
+   when the tool is absent, `Yes (Used)` when it is installed and configured to
+   be used, or `Yes (Not used)` when it is installed but not yet wired up — for
+   example `delta` installed but not set as your Git diff pager. See
+   [Optional external tools](#optional-external-tools) for how each one is
+   activated.
+5. Shows the resulting configuration and asks for confirmation before writing.
 
 The provider is assumed to be `llama.cpp`. Only values that differ from their
 default are written, so the generated file stays minimal. It is written to
