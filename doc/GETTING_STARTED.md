@@ -77,6 +77,7 @@ orangu --config ./orangu.conf
 - `/cherry_pick <commit>`
 - `/comment 51 "My comment"`
 - `/close -i 51`
+- `/get_comments -i 51`
 - `/commit <message>`
 - `/restore README.md`
 - `/diff`

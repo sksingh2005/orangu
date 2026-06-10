@@ -46,6 +46,7 @@ pub const COMMANDS: &[&str] = &[
     "/pull",
     "/comment",
     "/close",
+    "/get_comments",
     "/prune",
     "/rebase",
     "/merge",
@@ -1233,6 +1234,20 @@ mod tests {
         // Empty token offers every cached number.
         assert_eq!(pull_number_candidates(""), vec!["9", "58", "90"]);
         set_active_pull_requests(&[]);
+    }
+
+    #[test]
+    fn get_comments_ghost_offers_issue_and_pull_request() {
+        // After `get comments for ` the ghost hint cycles between the two
+        // targets; once a target is partially typed only it remains.
+        assert_eq!(
+            natural_language_ghost_candidates("get comments for "),
+            vec!["issue ", "pull request "]
+        );
+        assert_eq!(
+            natural_language_ghost_candidates("get comments for p"),
+            vec!["ull request "]
+        );
     }
 
     #[test]

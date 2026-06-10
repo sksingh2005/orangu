@@ -598,3 +598,41 @@ Natural-language forms:
 close issue 51
 close pr 58
 ```
+
+\newpage
+
+## /get_comments
+
+Lists the comments on a GitHub/GitLab issue or pull request. Requires the `gh` or `glab` CLI.
+
+```text
+/get_comments -i <number>
+/get_comments -p <number>
+```
+
+- `-i <number>` runs `gh api repos/{owner}/{repo}/issues/<number>/comments` (or `glab api projects/:id/issues/<number>/notes`) to list the comments on an issue.
+- `-p <number>` lists the comments on a pull request or merge request. On GitHub a pull request keeps its conversation comments and its inline review comments on separate endpoints, so both `gh api repos/{owner}/{repo}/issues/<number>/comments` and `gh api repos/{owner}/{repo}/pulls/<number>/comments` are fetched and merged chronologically. On GitLab it runs `glab api projects/:id/merge_requests/<number>/notes`, which already mixes discussion and inline diff notes.
+
+Each comment is shown as a block: a grey `● <date> <author>` header line, then the body indented two spaces. On GitLab, system notes (label changes, assignments, and so on) are skipped.
+
+```text
+● 2026-06-01 12:30:45 alice
+  Looks good!
+
+● 2026-06-02 08:00:00 bob
+  Merged.
+```
+
+### Examples
+
+```text
+/get_comments -i 51
+/get_comments -p 58
+```
+
+Natural-language forms (after `get comments for ` the inline ghost hint offers `issue` and `pull request`; Tab accepts, Shift+Tab cycles):
+
+```text
+get comments for issue 51
+get comments for pull request 58
+```

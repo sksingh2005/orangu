@@ -21,7 +21,9 @@ use std::{
     process::Stdio,
 };
 
-use super::commands::{CloseTarget, CommentBody, current_terminal_width, shell_words};
+use super::commands::{
+    CloseTarget, CommentBody, GetCommentsTarget, current_terminal_width, shell_words,
+};
 use super::render::{
     ANSI_BOLD_OFF, ANSI_BOLD_ON, ANSI_FG_LIGHT_GREEN, ANSI_FG_LIGHT_RED, ANSI_FG_RESET,
     ANSI_FG_SUBTLE,
@@ -1307,6 +1309,174 @@ pub fn close_output(workspace: &Path, target: &CloseTarget, forge: Forge) -> Res
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// One comment on an issue or pull/merge request, as fetched by
+/// [`get_comments_output`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct IssueComment {
+    pub author: String,
+    pub date: String,
+    pub body: String,
+}
+
+pub fn get_comments_output(
+    workspace: &Path,
+    target: &GetCommentsTarget,
+    forge: Forge,
+) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("get_comments is only available inside a Git repository"))?;
+    let cli = forge.cli();
+    let number = match target {
+        GetCommentsTarget::Issue(n) | GetCommentsTarget::PullRequest(n) => n.to_string(),
+    };
+    // Neither CLI has a comment listing subcommand that covers everything, so go
+    // through `gh api` / `glab api`, which resolve `{owner}/{repo}` / `:id` to
+    // the current repository. A GitHub pull request keeps its conversation
+    // comments on the issues endpoint and its inline review comments on the
+    // pulls endpoint, so both are fetched and merged; GitLab keeps inline diff
+    // notes in the same notes list as discussion notes.
+    let endpoints: Vec<String> = match (forge, target) {
+        (Forge::GitHub, GetCommentsTarget::Issue(_)) => vec![format!(
+            "repos/{{owner}}/{{repo}}/issues/{number}/comments?per_page=100"
+        )],
+        (Forge::GitHub, GetCommentsTarget::PullRequest(_)) => vec![
+            format!("repos/{{owner}}/{{repo}}/issues/{number}/comments?per_page=100"),
+            format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments?per_page=100"),
+        ],
+        (Forge::GitLab, GetCommentsTarget::Issue(_)) => {
+            vec![format!("projects/:id/issues/{number}/notes?per_page=100")]
+        }
+        (Forge::GitLab, GetCommentsTarget::PullRequest(_)) => vec![format!(
+            "projects/:id/merge_requests/{number}/notes?per_page=100"
+        )],
+    };
+    let mut comments = Vec::new();
+    for endpoint in &endpoints {
+        let output = match std::process::Command::new(cli)
+            .args(["api", endpoint])
+            .current_dir(&repo_root)
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(anyhow!(
+                    "get_comments requires the {cli} CLI to be installed"
+                ));
+            }
+            Err(err) => return Err(err).context(format!("failed to run {cli}")),
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(anyhow!(
+                "{cli} get_comments failed{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            ));
+        }
+        comments.extend(parse_comment_list(&output.stdout, forge)?);
+    }
+    // Conversation and review comments come from separate endpoints; interleave
+    // them chronologically. The formatted dates sort lexicographically.
+    comments.sort_by(|a, b| a.date.cmp(&b.date));
+    let label = match target {
+        GetCommentsTarget::Issue(_) => "issue",
+        GetCommentsTarget::PullRequest(_) => "pull request",
+    };
+    if comments.is_empty() {
+        return Ok(format!("No comments on {label} #{number}"));
+    }
+    Ok(format_comment_blocks(&comments))
+}
+
+/// Parse a JSON comment array printed by `gh api` (issue conversation comments
+/// or pull request review comments; the author is under `user`) or by
+/// `glab api .../notes` (the author is under `author`) into [`IssueComment`]s.
+/// GitLab system notes (label changes, assignments, ...) are skipped; only
+/// comments written by a person remain.
+pub fn parse_comment_list(stdout: &[u8], forge: Forge) -> Result<Vec<IssueComment>> {
+    let text = String::from_utf8_lossy(stdout);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).context("failed to parse forge comment list as JSON")?;
+    let (author_key, name_key) = match forge {
+        Forge::GitHub => ("user", "login"),
+        Forge::GitLab => ("author", "username"),
+    };
+    let Some(entries) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    Ok(entries
+        .iter()
+        .filter(|entry| {
+            forge == Forge::GitHub
+                || !entry
+                    .get("system")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+        })
+        .map(|entry| IssueComment {
+            author: entry
+                .get(author_key)
+                .and_then(|author| author.get(name_key))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            date: format_comment_date(
+                entry
+                    .get("created_at")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+            ),
+            body: entry
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        })
+        .collect())
+}
+
+/// Render comments as blocks separated by blank lines: a subtle
+/// `● <date> <author>` header line, then the body indented two spaces so it
+/// aligns under the date and stands out against the grey header.
+fn format_comment_blocks(comments: &[IssueComment]) -> String {
+    comments
+        .iter()
+        .map(|comment| {
+            let body = comment
+                .body
+                .lines()
+                .map(|line| format!("  {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "{ANSI_FG_SUBTLE}● {} {}{ANSI_FG_RESET}\n{body}",
+                comment.date, comment.author
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Turn an ISO 8601 timestamp (`2026-06-01T12:30:45Z`, with or without
+/// fractional seconds) into `2026-06-01 12:30:45`. Anything that does not look
+/// like one is returned unchanged.
+fn format_comment_date(date: &str) -> String {
+    let bytes = date.as_bytes();
+    if bytes.len() >= 19 && bytes[10] == b'T' {
+        format!("{} {}", &date[..10], &date[11..19])
+    } else {
+        date.to_string()
+    }
 }
 
 pub fn create_pull_request_output(
@@ -2674,6 +2844,64 @@ mod tests {
         );
         assert!(
             parse_pull_request_list(b"[]\n", Forge::GitHub)
+                .expect("parse")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn parses_github_comment_list() {
+        // The REST shape served by `gh api .../comments`; conversation comments
+        // and pull request review comments both look like this.
+        let json = br#"[{"user":{"login":"alice"},"created_at":"2026-06-01T12:30:45Z","body":"Looks good!\n"},{"user":{"login":"bob"},"created_at":"2026-06-02T08:00:00Z","body":"Merged."}]"#;
+        let comments = parse_comment_list(json, Forge::GitHub).expect("parse");
+        assert_eq!(
+            comments,
+            vec![
+                IssueComment {
+                    author: "alice".to_string(),
+                    date: "2026-06-01 12:30:45".to_string(),
+                    body: "Looks good!".to_string(),
+                },
+                IssueComment {
+                    author: "bob".to_string(),
+                    date: "2026-06-02 08:00:00".to_string(),
+                    body: "Merged.".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_gitlab_note_list_and_skips_system_notes() {
+        // GitLab notes mix human comments with system notes (label changes,
+        // assignments, ...); only the human ones must survive.
+        let json = br#"[{"author":{"username":"alice"},"created_at":"2026-06-01T12:30:45.123Z","body":"Looks good!","system":false},{"author":{"username":"bot"},"created_at":"2026-06-01T13:00:00.000Z","body":"changed the label","system":true}]"#;
+        let comments = parse_comment_list(json, Forge::GitLab).expect("parse");
+        assert_eq!(
+            comments,
+            vec![IssueComment {
+                author: "alice".to_string(),
+                date: "2026-06-01 12:30:45".to_string(),
+                body: "Looks good!".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn empty_comment_list_is_empty() {
+        assert!(
+            parse_comment_list(b"", Forge::GitHub)
+                .expect("parse")
+                .is_empty()
+        );
+        assert!(
+            parse_comment_list(b"[]\n", Forge::GitHub)
+                .expect("parse")
+                .is_empty()
+        );
+        assert!(
+            parse_comment_list(b"[]\n", Forge::GitLab)
                 .expect("parse")
                 .is_empty()
         );

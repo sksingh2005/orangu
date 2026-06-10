@@ -155,6 +155,11 @@ pub enum CloseTarget {
     PullRequest(u64),
 }
 
+pub enum GetCommentsTarget {
+    Issue(u64),
+    PullRequest(u64),
+}
+
 pub enum PruneTarget {
     Uuid(String),
     Workspace(String),
@@ -198,6 +203,7 @@ pub enum LocalCommand<'a> {
     Pull(Option<u64>),
     Comment(Option<(u64, CommentBody<'a>)>),
     Close(Option<CloseTarget>),
+    GetComments(Option<GetCommentsTarget>),
     Prune(Option<PruneTarget>),
     CreatePullRequest,
     Rebase,
@@ -283,6 +289,7 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
         "/pull" => Some(LocalCommand::Pull(None)),
         "/comment" => Some(LocalCommand::Comment(None)),
         "/close" => Some(LocalCommand::Close(None)),
+        "/get_comments" => Some(LocalCommand::GetComments(None)),
         "/prune" => Some(LocalCommand::Prune(None)),
         "/pull_request" => Some(LocalCommand::CreatePullRequest),
         "/review" => Some(LocalCommand::Review),
@@ -340,6 +347,11 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
             }
             if let Some(args) = input.strip_prefix("/close ") {
                 return Some(LocalCommand::Close(parse_close_args(args.trim())));
+            }
+            if let Some(args) = input.strip_prefix("/get_comments ") {
+                return Some(LocalCommand::GetComments(parse_get_comments_args(
+                    args.trim(),
+                )));
             }
             if let Some(args) = input.strip_prefix("/prune ") {
                 return Some(LocalCommand::Prune(parse_prune_args(args.trim())));
@@ -616,6 +628,9 @@ pub const NATURAL_LANGUAGE_BINDINGS: &[&str] = &[
     "close pr ",
     "close pull request ",
     "close -p ",
+    // --- get comments for issue / pull request ---
+    "get comments for issue ",
+    "get comments for pull request ",
     // --- stash ---
     "stash",
     "git stash",
@@ -906,6 +921,16 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
             let n = rest.trim().trim_start_matches('#').parse::<u64>().ok();
             return Some(LocalCommand::Close(n.map(CloseTarget::PullRequest)));
         }
+    }
+    if let Some(rest) = strip_ascii_prefix(input, "get comments for issue ") {
+        let n = rest.trim().trim_start_matches('#').parse::<u64>().ok();
+        return Some(LocalCommand::GetComments(n.map(GetCommentsTarget::Issue)));
+    }
+    if let Some(rest) = strip_ascii_prefix(input, "get comments for pull request ") {
+        let n = rest.trim().trim_start_matches('#').parse::<u64>().ok();
+        return Some(LocalCommand::GetComments(
+            n.map(GetCommentsTarget::PullRequest),
+        ));
     }
     if matches_ci(input, &["stash", "git stash", "git stash push"]) {
         return Some(LocalCommand::Stash(StashSubcommand::Push));
@@ -1384,6 +1409,31 @@ pub fn close_usage_message() -> &'static str {
     "Usage: /close -i <number> or /close -p <number>. Use /help to see available commands."
 }
 
+pub fn parse_get_comments_args(input: &str) -> Option<GetCommentsTarget> {
+    let input = input.trim();
+    if let Some(rest) = input.strip_prefix("-i ") {
+        return rest
+            .trim()
+            .trim_start_matches('#')
+            .parse::<u64>()
+            .ok()
+            .map(GetCommentsTarget::Issue);
+    }
+    if let Some(rest) = input.strip_prefix("-p ") {
+        return rest
+            .trim()
+            .trim_start_matches('#')
+            .parse::<u64>()
+            .ok()
+            .map(GetCommentsTarget::PullRequest);
+    }
+    None
+}
+
+pub fn get_comments_usage_message() -> &'static str {
+    "Usage: /get_comments -i <number> or /get_comments -p <number>. Use /help to see available commands."
+}
+
 pub fn comment_usage_message() -> &'static str {
     "Usage: /comment <number> \"<comment>\" or /comment <number> <file>. Use /help to see available commands."
 }
@@ -1715,6 +1765,46 @@ mod tests {
         assert!(matches!(
             parse_local_command("/close -p notanumber"),
             Some(LocalCommand::Close(None))
+        ));
+    }
+
+    #[test]
+    fn parses_get_comments_commands() {
+        assert!(matches!(
+            parse_local_command("/get_comments -i 69"),
+            Some(LocalCommand::GetComments(Some(GetCommentsTarget::Issue(
+                69
+            ))))
+        ));
+        assert!(matches!(
+            parse_local_command("/get_comments -p 42"),
+            Some(LocalCommand::GetComments(Some(
+                GetCommentsTarget::PullRequest(42)
+            )))
+        ));
+        assert!(matches!(
+            parse_local_command("get comments for issue 69"),
+            Some(LocalCommand::GetComments(Some(GetCommentsTarget::Issue(
+                69
+            ))))
+        ));
+        assert!(matches!(
+            parse_local_command("get comments for pull request 42"),
+            Some(LocalCommand::GetComments(Some(
+                GetCommentsTarget::PullRequest(42)
+            )))
+        ));
+        assert!(matches!(
+            parse_local_command("/get_comments"),
+            Some(LocalCommand::GetComments(None))
+        ));
+        assert!(matches!(
+            parse_local_command("/get_comments -i"),
+            Some(LocalCommand::GetComments(None))
+        ));
+        assert!(matches!(
+            parse_local_command("/get_comments -p notanumber"),
+            Some(LocalCommand::GetComments(None))
         ));
     }
 
