@@ -16,10 +16,10 @@
 use anyhow::{Context, Result, anyhow};
 use markdown::{
     ParseOptions,
-    mdast::{List, ListItem, Node},
+    mdast::{Image, Link, List, ListItem, Node},
     to_mdast,
 };
-use std::{fs, path::Path, sync::OnceLock};
+use std::{collections::HashMap, fs, path::Path, sync::OnceLock};
 use syntect::{
     easy::HighlightLines,
     highlighting::{Theme, ThemeSet},
@@ -342,8 +342,64 @@ pub fn render_markdown_for_console(text: &str) -> String {
     }
 
     match to_mdast(text, &ParseOptions::default()) {
-        Ok(tree) => render_markdown_node(&tree),
+        Ok(mut tree) => {
+            resolve_reference_links(&mut tree);
+            render_markdown_node(&tree)
+        }
         Err(_) => text.to_string(),
+    }
+}
+
+/// Replace reference-style links and images (`[label][id]`, with a matching
+/// `[id]: url` definition elsewhere in the document) by their inline
+/// equivalents, so they render with their URLs instead of as bare labels.
+fn resolve_reference_links(tree: &mut Node) {
+    let mut definitions = HashMap::new();
+    collect_link_definitions(tree, &mut definitions);
+    if !definitions.is_empty() {
+        replace_reference_nodes(tree, &definitions);
+    }
+}
+
+fn collect_link_definitions(node: &Node, definitions: &mut HashMap<String, String>) {
+    if let Node::Definition(definition) = node {
+        definitions.insert(definition.identifier.clone(), definition.url.clone());
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_link_definitions(child, definitions);
+        }
+    }
+}
+
+fn replace_reference_nodes(node: &mut Node, definitions: &HashMap<String, String>) {
+    let Some(children) = node.children_mut() else {
+        return;
+    };
+    for child in children {
+        let replacement = match child {
+            Node::LinkReference(reference) => definitions.get(&reference.identifier).map(|url| {
+                Node::Link(Link {
+                    children: std::mem::take(&mut reference.children),
+                    position: None,
+                    url: url.clone(),
+                    title: None,
+                })
+            }),
+            Node::ImageReference(reference) => definitions.get(&reference.identifier).map(|url| {
+                Node::Image(Image {
+                    position: None,
+                    alt: std::mem::take(&mut reference.alt),
+                    url: url.clone(),
+                    title: None,
+                })
+            }),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            *child = replacement;
+        }
+        replace_reference_nodes(child, definitions);
     }
 }
 
@@ -640,6 +696,16 @@ mod tests {
         assert!(rendered.contains("\x1b[38;2;255;215;120m`code\x1b[39m`"));
         assert!(rendered.contains("docs"));
         assert!(rendered.contains("https://example.com"));
+    }
+
+    #[test]
+    fn resolves_reference_links_to_their_definitions() {
+        let rendered = render_markdown_for_console(
+            "See [the repo][repo].\n\n[repo]: https://example.com/repo",
+        );
+
+        assert!(rendered.contains("the repo"));
+        assert!(rendered.contains("https://example.com/repo"));
     }
 
     #[test]

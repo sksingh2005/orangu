@@ -208,17 +208,20 @@ pub fn help_text() -> &'static str {
 /squash                                       Squash all branch commits into one
 /stash [pop|list|drop]                        Save uncommitted changes (git stash push), restore, list or discard
 /status                                       Show working tree status with color highlighting
+/manual                                       Open the built-in manual in a full-screen viewer
 /usage                                        Show usage statistics for this session
 /clear                                        Clear the current conversation
 /quit                                         Exit the client
 
-Natural-language forms such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `status`, `rebase`, `squash`, `merge feature/foo`, `grep <pattern>`, `find <pattern>`, `branch`, `list branches`, `checkout main`, `switch to main`, `create branch feature/x`, `rename to new-name`, `delete feature/foo`, `restore README.md`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `amend "[#42] My feature"`, `push`, `force push`, `add comment on 51 "My comment"`, `get comments for issue 51`, `get comments for pull request 58`, `review`, `create pull request`, `stash`, `stash pop`, `stash list`, `stash drop`, `init repo`, `prune session <uuid>`, `prune all`, `prune sessions older than <days>`, `prune sessions in <path>`, `restart`, and `show help` are also handled locally.
+Natural-language forms such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `status`, `rebase`, `squash`, `merge feature/foo`, `grep <pattern>`, `find <pattern>`, `branch`, `list branches`, `checkout main`, `switch to main`, `create branch feature/x`, `rename to new-name`, `delete feature/foo`, `restore README.md`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `amend "[#42] My feature"`, `push`, `force push`, `add comment on 51 "My comment"`, `get comments for issue 51`, `get comments for pull request 58`, `review`, `create pull request`, `stash`, `stash pop`, `stash list`, `stash drop`, `init repo`, `prune session <uuid>`, `prune all`, `prune sessions older than <days>`, `prune sessions in <path>`, `restart`, `show manual`, and `show help` are also handled locally.
 
 The prompt uses standard Unix shell keys, including Ctrl+Left, Ctrl+Right, Ctrl+A, Ctrl+E, Ctrl+K, Ctrl+U, Ctrl+W, Alt+Backspace, Alt+D, and Tab completion.
 
 As you type, a grey inline hint previews the matching command (e.g. `q` suggests `quit`). Press Tab to accept it. When several commands match, Shift+Tab cycles the hint through them; Tab then accepts the one shown.
 
-Shift+PageUp / Shift+PageDown scrolls the output window by a full page. Alt+Up / Alt+Down scrolls one line at a time."#
+Shift+PageUp / Shift+PageDown scrolls the output window by a full page. Alt+Up / Alt+Down scrolls one line at a time.
+
+/manual opens the built-in manual in a full-screen viewer: the text on the left, the table of contents on the right. Alt+J/Alt+K switch sections, Up/Down move the highlighted line, Alt+S opens a search window over the entire manual (Enter jumps to the next match, Esc closes it), Alt+Up/Alt+Down scroll, PageUp/PageDown page, Left/Right pan, and Alt+X (or Esc Esc) exits."#
 }
 
 pub struct ScreenRenderArgs<'a> {
@@ -243,17 +246,19 @@ pub struct ScreenRenderArgs<'a> {
     pub x_offset: usize,
 }
 
-struct PromptFrameArgs<'a> {
-    header_height: usize,
-    current_model: &'a str,
-    left_status: Option<StatusFragment>,
-    pending_count: usize,
-    prompt_prefix: &'a str,
-    input: &'a str,
-    cursor: usize,
-    ghost: &'a str,
-    height: usize,
-    actual_width: usize,
+/// Inputs for the bottom prompt frame (separator, input window, status bar),
+/// shared by the normal screen, `/review` mode, and the manual viewer.
+pub struct PromptFrameArgs<'a> {
+    pub header_height: usize,
+    pub current_model: &'a str,
+    pub left_status: Option<StatusFragment>,
+    pub pending_count: usize,
+    pub prompt_prefix: &'a str,
+    pub input: &'a str,
+    pub cursor: usize,
+    pub ghost: &'a str,
+    pub height: usize,
+    pub actual_width: usize,
 }
 
 pub fn render_screen(args: ScreenRenderArgs<'_>) -> String {
@@ -477,7 +482,9 @@ fn status_indicator_line(text: &str, ok: bool) -> HeaderLine {
     }
 }
 
-fn render_prompt_frame(args: PromptFrameArgs<'_>) -> String {
+/// Render the bottom prompt frame with absolute cursor positioning: the top
+/// separator, the input window, the bottom separator, and the status line.
+pub fn render_prompt_frame(args: PromptFrameArgs<'_>) -> String {
     let input_lines = wrapped_input_lines(args.input, args.actual_width, args.prompt_prefix);
     let input_height = input_lines.len();
     let height = args.height.max(args.header_height + input_height + 3);
@@ -584,7 +591,8 @@ fn cursor_position(
     (prefix_chars / input_width, prefix_chars % input_width)
 }
 
-fn prompt_prefix(branch_name: Option<&str>) -> String {
+/// The input-window prompt prefix: `<branch>> ` on a branch, `> ` otherwise.
+pub fn prompt_prefix(branch_name: Option<&str>) -> String {
     match branch_name {
         Some(branch_name) if !branch_name.trim().is_empty() => format!("{branch_name}> "),
         _ => "> ".to_string(),
@@ -821,7 +829,8 @@ pub struct ReviewScreenArgs<'a> {
     pub actual_height: usize,
 }
 
-const REVIEW_SEPARATOR: &str = "\x1b[38;2;88;88;88m│\x1b[0m";
+/// The vertical pane separator used by `/review` and the manual viewer.
+pub const REVIEW_SEPARATOR: &str = "\x1b[38;2;88;88;88m│\x1b[0m";
 const REVIEW_LINE_CURSOR_BG: &str = "\x1b[48;2;60;60;90m";
 const REVIEW_COMMENT_BG: &str = "\x1b[48;2;38;48;38m";
 const REVIEW_COMMENT_MARKER: &str = "\x1b[38;2;230;200;120m●\x1b[0m";
@@ -872,7 +881,7 @@ fn review_status_box(status: ReviewStatus) -> String {
 /// Clip `content` to `width` visible columns (honoring a horizontal pan) and
 /// pad it with spaces so the cell occupies exactly `width` columns. This keeps
 /// the vertical separator aligned in a single straight column on every row.
-fn review_pane_cell(content: &str, x_offset: usize, width: usize) -> String {
+pub fn review_pane_cell(content: &str, x_offset: usize, width: usize) -> String {
     let mut cell = clip_line(content, x_offset, width);
     cell.push_str(ANSI_RESET);
     let visible = visible_line_width(&cell);
@@ -884,15 +893,15 @@ fn review_pane_cell(content: &str, x_offset: usize, width: usize) -> String {
 
 /// Re-apply reverse video after every reset so a highlighted row stays
 /// inverted across the embedded color codes (e.g. the status dot).
-fn review_highlight(cell: &str) -> String {
+pub fn review_highlight(cell: &str) -> String {
     let reactivated = cell.replace(ANSI_RESET, &format!("{ANSI_RESET}\x1b[7m"));
     format!("\x1b[7m{reactivated}{ANSI_RESET}")
 }
 
-/// Apply a background to the whole cell — the highlighted diff line under the
+/// Apply a background to the whole cell — the highlighted line under the
 /// Up/Down cursor — re-applying it after every reset so it spans the line's
 /// own color codes and the trailing padding.
-fn review_line_highlight(cell: &str) -> String {
+pub fn review_line_highlight(cell: &str) -> String {
     let reapplied = cell.replace(ANSI_RESET, &format!("{ANSI_RESET}{REVIEW_LINE_CURSOR_BG}"));
     format!("{REVIEW_LINE_CURSOR_BG}{reapplied}{ANSI_RESET}")
 }
@@ -1198,6 +1207,7 @@ impl OranguHelper {
             file_completer: FilenameCompleter::new(),
             commands: vec![
                 "/help".to_string(),
+                "/manual".to_string(),
                 "/disconnect".to_string(),
                 "/reload".to_string(),
                 "/restart".to_string(),

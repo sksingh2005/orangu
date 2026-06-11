@@ -19,6 +19,7 @@ mod completion;
 mod git;
 mod init;
 mod input;
+mod manual;
 mod quotes;
 mod render;
 mod shell;
@@ -814,6 +815,20 @@ async fn run() -> Result<()> {
                 output_state.reset_scroll();
                 continue;
             }
+            CommandOutcome::Manual => {
+                manual::run_manual_mode(
+                    &mut viewport,
+                    manual::ManualChrome {
+                        current_model: &active_model_id,
+                        prompt_branch: prompt_branch.as_deref(),
+                        pending_count: pending_commands.len(),
+                    },
+                )?;
+                // The modal view overwrote the screen; the next loop iteration
+                // redraws the normal interface from the top.
+                output_state.reset_scroll();
+                continue;
+            }
             CommandOutcome::Unhandled => {}
         }
 
@@ -1540,6 +1555,7 @@ fn handle_command(
                 Err(err) => Ok(local_command_error(err)),
             }
         }
+        LocalCommand::Manual => Ok(CommandOutcome::Manual),
         LocalCommand::Usage => Ok(CommandOutcome::Output(usage_stats.format())),
         LocalCommand::Build => {
             let ws = workspace.to_path_buf();

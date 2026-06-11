@@ -5,6 +5,7 @@
 ## Main components
 
 - `src/bin/orangu.rs` - terminal loop, command handling, history, connection state, and waiting state
+- `src/bin/orangu/manual.rs` - built-in manual viewer (`/manual`); embeds the `doc/manual/en` chapters at compile time, so a new chapter file must be added to its `MANUAL_SOURCES` list
 - `src/config.rs` - INI parsing and normalization
 - `src/llm/openai.rs` - OpenAI-compatible client for llama.cpp-style backends
 - `src/session.rs` - tool-calling conversation flow

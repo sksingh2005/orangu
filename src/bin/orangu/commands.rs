@@ -135,6 +135,8 @@ pub enum CommandOutcome {
     ),
     /// Enter the interactive `/review` mode with a collected branch diff.
     Review(ReviewLaunch),
+    /// Enter the built-in manual viewer.
+    Manual,
 }
 
 /// Data handed to the interactive review mode: the changed files, each with its
@@ -222,6 +224,7 @@ pub enum LocalCommand<'a> {
     Stash(StashSubcommand),
     OpenFile(&'a str),
     Session(Option<Cow<'a, str>>),
+    Manual,
     Usage,
     Build,
     Clear,
@@ -299,6 +302,7 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
         "/squash" => Some(LocalCommand::Squash),
         "/stash" => Some(LocalCommand::Stash(StashSubcommand::Push)),
         "/status" => Some(LocalCommand::Status),
+        "/manual" => Some(LocalCommand::Manual),
         "/usage" => Some(LocalCommand::Usage),
         "/clear" => Some(LocalCommand::Clear),
         "/quit" => Some(LocalCommand::Quit),
@@ -526,6 +530,10 @@ pub const NATURAL_LANGUAGE_BINDINGS: &[&str] = &[
     "show help",
     "show commands",
     "show available commands",
+    // --- manual ---
+    "manual",
+    "show manual",
+    "open manual",
     // --- disconnect ---
     "disconnect",
     // --- reload configuration ---
@@ -772,6 +780,11 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
         ],
     ) {
         return Some(LocalCommand::Help);
+    }
+    // Checked before the `open `/`show ` file prefixes below, so `open manual`
+    // and `show manual` open the manual rather than a file of that name.
+    if matches_ci(input, &["manual", "show manual", "open manual"]) {
+        return Some(LocalCommand::Manual);
     }
     if matches_ci(input, &["disconnect"]) {
         return Some(LocalCommand::Disconnect);
@@ -1588,6 +1601,16 @@ mod tests {
             parse_local_command("show workspace files"),
             Some(LocalCommand::ListFiles)
         ));
+    }
+
+    #[test]
+    fn parses_manual_command_and_aliases() {
+        for input in ["/manual", "manual", "show manual", "open manual"] {
+            assert!(
+                matches!(parse_local_command(input), Some(LocalCommand::Manual)),
+                "expected {input:?} to parse as Manual"
+            );
+        }
     }
 
     #[test]

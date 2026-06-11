@@ -243,6 +243,43 @@ LLM and tool output is always wrapped or clipped to the visible terminal width a
 - `Ctrl+C` again within 2 seconds exits the client
 - `Enter` submits the current input line
 
+## Built-in manual
+
+Type `/manual` at the prompt (or the natural-language forms `manual`, `show manual`, or `open manual`) to open this manual inside the client. The manual text is embedded into the binary at compile time, so no external files are read — the manual is always available, even offline.
+
+The viewer uses the same full-screen, two-pane layout as `/review`, with the status bar and an (inactive) input window kept at the bottom:
+
+- **Left pane** — the text of the selected section, rendered with the same Markdown styling as model output in the console (bold, italics, headings, lists, links, and tables). Fenced code blocks are shown syntax-highlighted according to their language tag, without the ``` fence lines, and links are shown as their underlined labels only. It is the larger pane and scrolls independently.
+- **Right pane** — the table of contents, one entry per section. The sections follow the page breaks of the printed manual (one entry per `\newpage`-delimited page): chapter entries are flush left and their sections are indented beneath them. The pane is kept as narrow as possible while still fitting the longest entry. The selected entry is highlighted, and selecting a different entry replaces the left pane with that section's text, shown from the top.
+
+```
+ # Core tools                           |Contents (56)
+                                        |Introduction
+ The core tools are the local slash     |Quickstart
+ commands that drive the client ...     |Core tools    <- selected
+ (only the selected section's text,     |  /help
+  scrollable)                           |  /server
+```
+
+### Searching
+
+Press `Alt+S` to open a search window at the top of the text pane. Type the text to find and press `Enter` to jump to its next occurrence: the search is case-insensitive, scans forward from the highlighted line through the **entire manual** — continuing past the end of the current section into the following ones and wrapping around to the beginning — and highlights the matching line. Press `Enter` again to jump to the next instance. If the text is not found anywhere, `No match for '<text>'` is shown on the status bar.
+
+Press `Esc` to close the search window; the highlighted line stays on the last match, so you can keep reading from there.
+
+### Key bindings
+
+| Key | Action |
+| --- | --- |
+| `Alt+J` | Select the next section (shows its text in the left pane) |
+| `Alt+K` | Select the previous section |
+| `Alt+S` | Open the search window (`Enter` next match, `Esc` close) |
+| `Up` / `Down` | Move the highlighted line through the text, view following |
+| `Alt+Up` / `Alt+Down` | Scroll the text one line at a time |
+| `PageUp` / `PageDown` | Scroll the text by a full page |
+| `Left` / `Right` | Pan long lines horizontally |
+| `Alt+X` or `Esc` `Esc` | Leave the manual and return to the prompt |
+
 ## Footer behavior
 
 - The left side of the footer shows `Thinking (<CLOCK>)` while waiting for a response to start, and `Working @ X.Y t/s (<CLOCK>)` while tokens are streaming
