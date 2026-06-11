@@ -2759,36 +2759,40 @@ fn build_auto_review_overall_prompt(state: &AutoReviewState) -> String {
 }
 
 /// Build the auto review exit report: the colorized lines for the output
-/// window, and the plain-text report copied to the clipboard. The report is
+/// window, and the Markdown report copied to the clipboard. The report is
 /// just the categories — `Overall` through `Documentation`, then the
 /// `Conclusion` with the patch verdict and any rejected or not-reviewed files;
 /// the per-file statuses live in the `Conclusion`, not in a header.
 fn auto_review_exit_output(state: &AutoReviewState) -> (Vec<String>, String) {
     // The two variants stay in lockstep: `lines` (with ANSI styling) goes to
-    // the output window, `plain` is what lands on the clipboard.
+    // the output window, `markdown` is what lands on the clipboard — each
+    // category as a `##` heading followed by its findings as a bullet list.
     let mut lines = Vec::new();
-    let mut plain = Vec::new();
+    let mut markdown = Vec::new();
     for (index, name) in AUTO_REVIEW_CATEGORIES.iter().enumerate() {
         lines.push(format!("\x1b[1m{name}\x1b[0m"));
-        plain.push(format!("{name}:"));
+        markdown.push(format!("## {name}"));
+        markdown.push(String::new());
         let section = &state.sections[index];
         if section.is_empty() {
             lines.push("  No issues found".to_string());
-            plain.push("  No issues found".to_string());
+            markdown.push("No issues found".to_string());
         } else {
             for finding in section {
                 lines.push(format!("  - {finding}"));
-                plain.push(format!("  - {finding}"));
+                markdown.push(format!("- {finding}"));
             }
         }
+        markdown.push(String::new());
     }
     lines.push(format!("\x1b[1m{AUTO_REVIEW_CONCLUSION}\x1b[0m"));
-    plain.push(format!("{AUTO_REVIEW_CONCLUSION}:"));
+    markdown.push(format!("## {AUTO_REVIEW_CONCLUSION}"));
+    markdown.push(String::new());
     for line in state.conclusion_lines() {
         lines.push(format!("  - {line}"));
-        plain.push(format!("  - {line}"));
+        markdown.push(format!("- {line}"));
     }
-    (lines, plain.join("\n"))
+    (lines, markdown.join("\n"))
 }
 
 fn print_auto_review_screen(
@@ -5209,25 +5213,40 @@ mod tests {
                 "  - orangu approves this patch".to_string(),
             ]
         );
-        // The clipboard copy is the same report without ANSI colors.
+        // The clipboard copy is the same report formatted as Markdown.
         assert_eq!(
             clipboard,
-            "Overall:\n\
-             \x20 - ready to merge\n\
-             Code:\n\
-             \x20 - a.rs: tighten error handling\n\
-             Security:\n\
-             \x20 No issues found\n\
-             Memory:\n\
-             \x20 No issues found\n\
-             Performance:\n\
-             \x20 No issues found\n\
-             Test Suite:\n\
-             \x20 No issues found\n\
-             Documentation:\n\
-             \x20 No issues found\n\
-             Conclusion:\n\
-             \x20 - orangu approves this patch"
+            "## Overall\n\
+             \n\
+             - ready to merge\n\
+             \n\
+             ## Code\n\
+             \n\
+             - a.rs: tighten error handling\n\
+             \n\
+             ## Security\n\
+             \n\
+             No issues found\n\
+             \n\
+             ## Memory\n\
+             \n\
+             No issues found\n\
+             \n\
+             ## Performance\n\
+             \n\
+             No issues found\n\
+             \n\
+             ## Test Suite\n\
+             \n\
+             No issues found\n\
+             \n\
+             ## Documentation\n\
+             \n\
+             No issues found\n\
+             \n\
+             ## Conclusion\n\
+             \n\
+             - orangu approves this patch"
         );
     }
 

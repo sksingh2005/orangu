@@ -585,7 +585,7 @@ While the model works, the status bar shows `Thinking (...)` until the first tok
 
 Press `Esc` `Esc` to **cancel** the auto review: the in-flight request is dropped, the run stops, and the report collected so far stays on screen for browsing. Press `Alt+x` (or `Esc` `Esc` again once the run is no longer in progress) to **exit**.
 
-On exit the report — every category with its findings (or `No issues found`), ending with the **Conclusion** and its patch verdict — is written to the output window and copied to the system clipboard. The per-file statuses are not listed separately: the rejected and not-reviewed files appear inside the Conclusion. If the clipboard cannot be reached (for example on a headless machine), a short note is shown instead.
+On exit the report — every category with its findings (or `No issues found`), ending with the **Conclusion** and its patch verdict — is written to the output window and copied to the system clipboard as Markdown: each category is a `##` heading and its findings a bullet list, ready to paste into an issue or pull request. The per-file statuses are not listed separately: the rejected and not-reviewed files appear inside the Conclusion. If the clipboard cannot be reached (for example on a headless machine), a short note is shown instead.
 
 ### Key bindings
 
