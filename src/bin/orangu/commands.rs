@@ -147,11 +147,25 @@ pub struct ReviewLaunch {
     pub files: Vec<ReviewEntry>,
 }
 
+/// The `/comment` keyword that submits the last `/review` summary as the
+/// comment body. Matched case-insensitively against the whole argument, so a
+/// `~/.orangu/comments/` template whose name merely starts with `w` is still
+/// a filename.
+pub const COMMENT_REVIEW_KEYWORD: &str = "with review";
+
+/// The `/comment` keyword that submits the last `/auto_review` report as the
+/// comment body.
+pub const COMMENT_AUTO_REVIEW_KEYWORD: &str = "with auto review";
+
 pub enum CommentBody<'a> {
     /// An inline comment body supplied directly in the command (`"..."` or bare text).
     Inline(Cow<'a, str>),
     /// A filename under `~/.orangu/comments/` whose content is the comment body.
     File(Cow<'a, str>),
+    /// The last `/review` summary (`with review`).
+    Review,
+    /// The last `/auto_review` report (`with auto review`).
+    AutoReview,
 }
 
 pub enum CloseTarget {
@@ -247,6 +261,9 @@ pub struct CommandContext<'a> {
     pub auto_squash: bool,
     pub terminal: &'a str,
     pub forge: crate::git::Forge,
+    /// The last `/review` and `/auto_review` reports, offered to `/comment`
+    /// as comment bodies (`with review`, `with auto review`).
+    pub review_reports: crate::git::ReviewReports<'a>,
 }
 
 pub struct CommandState<'a> {
@@ -1306,6 +1323,14 @@ pub fn parse_comment_args(input: &str) -> Option<(u64, CommentBody<'_>)> {
     if rest.is_empty() {
         return None;
     }
+    // The report keywords match the whole argument only; anything else stays
+    // an inline body or a `~/.orangu/comments/` template filename.
+    if rest.eq_ignore_ascii_case(COMMENT_AUTO_REVIEW_KEYWORD) {
+        return Some((number, CommentBody::AutoReview));
+    }
+    if rest.eq_ignore_ascii_case(COMMENT_REVIEW_KEYWORD) {
+        return Some((number, CommentBody::Review));
+    }
     if rest.starts_with('"') || rest.starts_with('\'') {
         let body = strip_matching_quotes(rest);
         if body.is_empty() {
@@ -1457,7 +1482,7 @@ pub fn get_comments_usage_message() -> &'static str {
 }
 
 pub fn comment_usage_message() -> &'static str {
-    "Usage: /comment <number> \"<comment>\" or /comment <number> <file>. Use /help to see available commands."
+    "Usage: /comment <number> \"<comment>\", /comment <number> <file>, or /comment <number> with [auto] review. Use /help to see available commands."
 }
 
 pub fn merge_usage_message() -> &'static str {
@@ -1761,6 +1786,38 @@ mod tests {
         assert!(matches!(
             parse_local_command("/comment notanumber \"My comment\""),
             Some(LocalCommand::Comment(None))
+        ));
+    }
+
+    #[test]
+    fn parses_comment_report_keywords() {
+        // `with review` / `with auto review` post the last report; the match
+        // is case-insensitive and covers the natural-language forms too.
+        assert!(matches!(
+            parse_local_command("/comment 48 with review"),
+            Some(LocalCommand::Comment(Some((48, CommentBody::Review))))
+        ));
+        assert!(matches!(
+            parse_local_command("/comment 48 with auto review"),
+            Some(LocalCommand::Comment(Some((48, CommentBody::AutoReview))))
+        ));
+        assert!(matches!(
+            parse_local_command("comment on 48 With Review"),
+            Some(LocalCommand::Comment(Some((48, CommentBody::Review))))
+        ));
+        assert!(matches!(
+            parse_local_command("Add comment on 48 with auto review"),
+            Some(LocalCommand::Comment(Some((48, CommentBody::AutoReview))))
+        ));
+        // Only the exact phrase is a keyword: anything else stays a template
+        // filename, so templates starting with `w` keep working.
+        assert!(matches!(
+            parse_local_command("/comment 48 with-review.md"),
+            Some(LocalCommand::Comment(Some((48, CommentBody::File(ref name))))) if name == "with-review.md"
+        ));
+        assert!(matches!(
+            parse_local_command("/comment 48 weekly.md"),
+            Some(LocalCommand::Comment(Some((48, CommentBody::File(ref name))))) if name == "weekly.md"
         ));
     }
 

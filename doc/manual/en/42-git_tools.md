@@ -545,9 +545,17 @@ Adds a comment to a GitHub issue or GitLab issue. Requires the `gh` or `glab` CL
 ```text
 /comment <number> "<comment>"
 /comment <number> <file>
+/comment <number> with review
+/comment <number> with auto review
 ```
 
 It runs `gh issue comment <number> --body <body>` (or the GitLab equivalent). Without the CLI installed it reports an error, since there is no plain Git equivalent. When the third argument is a quoted string it is used as the comment body directly. When it is a bare word it is treated as a filename relative to `~/.orangu/comments/` and the file contents become the body — Tab completion after `/comment <number> ` (without a leading `"`) lists files in that directory.
+
+### Submitting a review as the comment
+
+`with review` posts the last `/review` summary of this session as the comment body, and `with auto review` posts the last `/auto_review` report — the same Markdown that is copied to the clipboard on exit, ready for an issue or pull request. The keywords are matched case-insensitively against the whole argument, so a template file whose name merely starts with `w` (or even `with`) is still treated as a filename; only the exact phrases are keywords. When no matching review has been run yet, the command reports an error pointing at `/review` or `/auto_review`.
+
+Tab completion (and the inline grey ghost) after `/comment <number> ` offers the template files from `~/.orangu/comments/` first — an existing template keeps its priority — followed by the report keywords. Each keyword is only offered once the matching review has actually been run in the session: before any `/review`, `with review` is ignored by completion (and likewise `with auto review` before any `/auto_review`), so the hints never suggest a report that does not exist. Typing `with ` narrows the hint to the available keywords.
 
 ### Examples
 
@@ -563,12 +571,21 @@ Comment body from a Markdown file in `~/.orangu/comments/`:
 /comment 51 merged.md
 ```
 
+The last review or auto review report as the body:
+
+```text
+/comment 48 with review
+/comment 48 with auto review
+```
+
 Natural-language forms:
 
 ```text
 add comment on 51 "My comment"
 add comment to 51 "My comment"
 comment on 51 "My comment"
+comment on 48 with review
+comment on 48 with auto review
 ```
 
 \newpage

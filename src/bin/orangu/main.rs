@@ -267,6 +267,10 @@ async fn run() -> Result<()> {
     let mut usage_stats = UsageStats::new().with_session(&session_id);
     let mut history = load_history(&session_hist_path)?;
     let mut restart_requested = false;
+    // The last `/review` summary and `/auto_review` report (Markdown), kept
+    // so `/comment <number> with [auto] review` can post them.
+    let mut last_review_report: Option<String> = None;
+    let mut last_auto_review_report: Option<String> = None;
     // When set, the post-loop exec resumes this session instead of the current
     // one — used by `/session <UUID>` to switch sessions in place.
     let mut resume_override: Option<String> = None;
@@ -506,6 +510,10 @@ async fn run() -> Result<()> {
                 auto_squash: config.auto_squash,
                 terminal: &config.terminal,
                 forge,
+                review_reports: git::ReviewReports {
+                    review: last_review_report.as_deref(),
+                    auto_review: last_auto_review_report.as_deref(),
+                },
             },
         )?;
         // When `/server` (or `/reload`) selects a server, auto-detect an
@@ -798,7 +806,17 @@ async fn run() -> Result<()> {
                     }
                 }
                 // On exit, print the per-file status and comments to the output
-                // window, and copy the comments to the system clipboard.
+                // window, and copy the comments to the system clipboard. The
+                // Markdown summary is kept for `/comment <n> with review`.
+                last_review_report = Some(review_markdown_report(
+                    &review.files,
+                    &review.comments,
+                    &review.general_notes,
+                ));
+                completion::set_available_review_reports(
+                    last_review_report.is_some(),
+                    last_auto_review_report.is_some(),
+                );
                 let (lines, clipboard) =
                     review_exit_output(&review.files, &review.comments, &review.general_notes);
                 for line in &lines {
@@ -849,8 +867,14 @@ async fn run() -> Result<()> {
                 .await?;
 
                 // On exit, print the rendered report to the output window and
-                // copy its raw Markdown to the system clipboard.
+                // copy its raw Markdown to the system clipboard; the Markdown
+                // is also kept for `/comment <n> with auto review`.
                 let (lines, clipboard) = auto_review_exit_output(&state);
+                last_auto_review_report = Some(clipboard.clone());
+                completion::set_available_review_reports(
+                    last_review_report.is_some(),
+                    last_auto_review_report.is_some(),
+                );
                 for line in &lines {
                     output_state.push_text(line);
                 }
@@ -1278,6 +1302,7 @@ fn handle_command(
         auto_squash,
         terminal,
         forge,
+        review_reports,
     } = context;
 
     match command {
@@ -1406,7 +1431,7 @@ fn handle_command(
             comment_usage_message().to_string(),
         )),
         LocalCommand::Comment(Some((issue_number, body))) => {
-            match comment_output(workspace, issue_number, &body, forge) {
+            match comment_output(workspace, issue_number, &body, review_reports, forge) {
                 Ok(_) => Ok(CommandOutcome::Quiet),
                 Err(err) => Ok(local_command_error(err)),
             }
@@ -2029,6 +2054,47 @@ fn review_exit_output(
     lines.extend(general_notes.iter().cloned());
     lines.push("\x1b[1mPatch rejected\x1b[0m".to_string());
     (lines, clipboard)
+}
+
+/// The `/review` summary as Markdown, kept after leaving review mode so
+/// `/comment <number> with review` can post it. It mirrors
+/// `review_exit_output`: just `**Patch approved**` when every file is
+/// approved and there is nothing to report; otherwise each file's status as
+/// a bullet list, then the line comments and the general notes, ending with
+/// the bold `**Patch rejected**` verdict.
+fn review_markdown_report(
+    files: &[ReviewEntry],
+    comments: &[ReviewComment],
+    general_notes: &[String],
+) -> String {
+    let all_approved = !files.is_empty()
+        && files
+            .iter()
+            .all(|file| file.status == ReviewStatus::Approved);
+    if all_approved && comments.is_empty() && general_notes.is_empty() {
+        return "**Patch approved**".to_string();
+    }
+
+    let mut lines: Vec<String> = files
+        .iter()
+        .map(|file| format!("- **{}**: {}", file.path, review_status_label(file.status)))
+        .collect();
+    let comment_lines = format_review_comments(comments);
+    if !comment_lines.is_empty() {
+        lines.push(String::new());
+        for comment in comment_lines {
+            lines.push(format!("- {comment}"));
+        }
+    }
+    if !general_notes.is_empty() {
+        lines.push(String::new());
+        for note in general_notes {
+            lines.push(format!("- {note}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push("**Patch rejected**".to_string());
+    lines.join("\n")
 }
 
 fn print_review_screen(
@@ -5199,6 +5265,85 @@ mod tests {
     }
 
     #[test]
+    fn review_markdown_report_mirrors_the_exit_summary() {
+        use super::{ReviewComment, review_markdown_report};
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let entry = |path: &str, status| ReviewEntry {
+            path: path.to_string(),
+            status,
+            diff_lines: vec!["+x".to_string()],
+            patch: String::new(),
+        };
+
+        // All approved with nothing to report collapses to the verdict.
+        let files = vec![entry("a.txt", ReviewStatus::Approved)];
+        assert_eq!(
+            review_markdown_report(&files, &[], &[]),
+            "**Patch approved**"
+        );
+
+        // Otherwise: statuses, line comments, notes, then the verdict.
+        let files = vec![
+            entry("a.txt", ReviewStatus::Approved),
+            entry("b.rs", ReviewStatus::Rejected),
+        ];
+        let comments = vec![ReviewComment {
+            file: "b.rs".to_string(),
+            line: 4,
+            text: "tighten this".to_string(),
+        }];
+        let notes = vec!["overall solid".to_string()];
+        assert_eq!(
+            review_markdown_report(&files, &comments, &notes),
+            "- **a.txt**: Approved\n\
+             - **b.rs**: Rejected\n\
+             \n\
+             - b.rs:5: tighten this\n\
+             \n\
+             - overall solid\n\
+             \n\
+             **Patch rejected**"
+        );
+    }
+
+    #[test]
+    fn comment_report_keywords_error_without_a_stored_report() {
+        use crate::commands::CommentBody;
+        use crate::git::{ReviewReports, comment_output, git_init};
+
+        let workspace = tempdir().expect("workspace");
+        git_init(workspace.path()).expect("git init");
+
+        // `with review` / `with auto review` need a report from this session.
+        let err = comment_output(
+            workspace.path(),
+            48,
+            &CommentBody::Review,
+            ReviewReports::default(),
+            crate::git::Forge::GitHub,
+        )
+        .expect_err("no review report");
+        assert!(err.to_string().contains("run /review first"), "{err:#}");
+
+        let err = comment_output(
+            workspace.path(),
+            48,
+            &CommentBody::AutoReview,
+            ReviewReports {
+                review: Some("**Patch approved**"),
+                auto_review: None,
+            },
+            crate::git::Forge::GitHub,
+        )
+        .expect_err("no auto review report");
+        assert!(
+            err.to_string().contains("run /auto_review first"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
     fn parse_auto_review_category_response_reads_verdict_and_findings() {
         use super::parse_auto_review_category_response;
 
@@ -5931,6 +6076,7 @@ mod tests {
                 auto_squash: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
             },
         )
         .expect("handle command");
@@ -6114,6 +6260,7 @@ mod tests {
                     auto_squash: false,
                     terminal: "",
                     forge: crate::git::Forge::GitHub,
+                    review_reports: crate::git::ReviewReports::default(),
                 },
             )
             .expect("handle command");
@@ -6180,6 +6327,7 @@ mod tests {
                 auto_squash: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
             },
         )
         .expect("handle command");
@@ -6471,6 +6619,7 @@ mod tests {
                 auto_squash: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
             },
         )
         .expect("handle command");
@@ -6529,6 +6678,7 @@ mod tests {
                 auto_squash: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
             },
         )
         .expect("handle command");
@@ -6582,6 +6732,7 @@ mod tests {
                 auto_squash: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
             },
         )
         .expect("handle command");
@@ -6641,6 +6792,7 @@ mod tests {
                 auto_squash: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
             },
         )
         .expect("handle command");
@@ -6702,6 +6854,7 @@ mod tests {
                 auto_squash: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
             },
         )
         .expect("command outcome");

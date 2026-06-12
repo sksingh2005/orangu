@@ -489,6 +489,8 @@ When you leave review mode (`Alt+x`), a summary is written to the output window.
 
 The comments — both the line comments and the general (`#`) notes — are copied to the system clipboard; the per-file statuses and the verdict are not. If the clipboard cannot be reached (for example on a headless machine), a short note is shown instead and the output-window summary is unaffected.
 
+The full summary — statuses, comments, notes, and the verdict — is also kept as Markdown for the rest of the session, so `/comment <number> with review` can post it on a GitHub/GitLab issue (see the `/comment` tool in the Git tools chapter).
+
 ### Key bindings
 
 | Key | Action |
@@ -598,6 +600,8 @@ Rejection comments become part of the report: they are rendered in the matching 
 Press `Esc` `Esc` to **cancel** the auto review: the in-flight request is dropped, the run stops, and the report collected so far stays on screen for browsing. Press `Alt+x` (or `Esc` `Esc` again once the run is no longer in progress) to **exit**.
 
 On exit the report — every category with its findings (or `No issues found`), ending with the **Conclusion** and its patch verdict — is rendered into the output window exactly like the left pane (bold headings and file names, no Markdown syntax markers), while its raw Markdown is copied to the system clipboard: there each category is a `##` heading and its findings a bullet list with the file names in `**bold**`, ready to paste into an issue or pull request. The per-file statuses are not listed separately: the rejected and not-reviewed files appear inside the Conclusion (`Rejected: **file**`, `Not reviewed: **file**`). If the clipboard cannot be reached (for example on a headless machine), a short note is shown instead.
+
+The Markdown report is also kept for the rest of the session, so `/comment <number> with auto review` can post it on a GitHub/GitLab issue (see the `/comment` tool in the Git tools chapter).
 
 ### Key bindings
 

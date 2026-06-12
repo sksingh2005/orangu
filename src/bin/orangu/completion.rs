@@ -21,7 +21,10 @@ use std::{
 };
 use walkdir::WalkDir;
 
-use super::commands::{NATURAL_LANGUAGE_BINDINGS, shell_words, strip_ascii_prefix};
+use super::commands::{
+    COMMENT_AUTO_REVIEW_KEYWORD, COMMENT_REVIEW_KEYWORD, NATURAL_LANGUAGE_BINDINGS, shell_words,
+    strip_ascii_prefix,
+};
 use super::git::PullRequest;
 use super::git::{
     discover_git_root, git_branch_names, git_file_commit_hashes, git_local_branch_names,
@@ -1123,9 +1126,44 @@ pub fn natural_show_file_completion_prefix(prefix: &str) -> Option<(usize, &str)
     Some((prefix.len() - path_prefix.len(), path_prefix))
 }
 
-/// Returns `(start, candidates)` for a comment command's `<number> <file-prefix>` argument
-/// where the file argument is a bare word (no leading quote), completing against
-/// `~/.orangu/comments/`. Handles both `/comment` and the natural-language forms
+/// Whether the session currently holds a `/review` summary and an
+/// `/auto_review` report. Gates the `/comment` report keywords: `with review`
+/// and `with auto review` are only offered (completed and ghosted) once the
+/// matching report exists. Set by the main loop whenever a review mode exits.
+static AVAILABLE_REVIEW_REPORTS: RwLock<(bool, bool)> = RwLock::new((false, false));
+
+/// Record which review reports the session holds (see
+/// [`AVAILABLE_REVIEW_REPORTS`]). A poisoned lock is recovered rather than
+/// panicking, since stale availability only affects hints.
+pub fn set_available_review_reports(review: bool, auto_review: bool) {
+    let mut guard = AVAILABLE_REVIEW_REPORTS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = (review, auto_review);
+}
+
+/// The `/comment` report keywords whose report exists, in offer order.
+fn available_report_keywords() -> Vec<&'static str> {
+    let (review, auto_review) = *AVAILABLE_REVIEW_REPORTS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut keywords = Vec::new();
+    if review {
+        keywords.push(COMMENT_REVIEW_KEYWORD);
+    }
+    if auto_review {
+        keywords.push(COMMENT_AUTO_REVIEW_KEYWORD);
+    }
+    keywords
+}
+
+/// Returns `(start, candidates)` for a comment command's `<number> <body-prefix>` argument
+/// where the body argument is a bare word (no leading quote), completing against
+/// `~/.orangu/comments/` plus the report keywords (`with review`, `with auto review`).
+/// The template files come first so an existing template — even one starting with
+/// `w` — keeps its completion (and ghost) priority; the keywords follow, offered
+/// only once the matching report exists in the session (a missing directory does
+/// not suppress them). Handles both `/comment` and the natural-language forms
 /// (`add comment on`, `add comment to`, `comment on`).
 pub fn comment_file_completion_candidates(prefix: &str) -> Option<(usize, Vec<String>)> {
     let rest = if let Some(rest) = prefix.strip_prefix("/comment ") {
@@ -1148,23 +1186,29 @@ pub fn comment_file_completion_candidates(prefix: &str) -> Option<(usize, Vec<St
     if file_prefix.starts_with('"') || file_prefix.starts_with('\'') {
         return None;
     }
-    let comments_dir = home::home_dir()?.join(".orangu/comments");
-    let entries = fs::read_dir(comments_dir).ok()?;
-    let mut candidates: Vec<String> = entries
-        .flatten()
-        .filter_map(|entry| {
-            if !entry.file_type().ok()?.is_file() {
-                return None;
-            }
-            let name = entry.file_name().to_str()?.to_string();
-            if name.starts_with(file_prefix) {
-                Some(name)
-            } else {
-                None
-            }
+    let mut candidates: Vec<String> = home::home_dir()
+        .map(|home| home.join(".orangu/comments"))
+        .and_then(|comments_dir| fs::read_dir(comments_dir).ok())
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| {
+                    if !entry.file_type().ok()?.is_file() {
+                        return None;
+                    }
+                    let name = entry.file_name().to_str()?.to_string();
+                    name.starts_with(file_prefix).then_some(name)
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
     candidates.sort();
+    candidates.extend(
+        available_report_keywords()
+            .into_iter()
+            .filter(|keyword| keyword.starts_with(file_prefix))
+            .map(str::to_string),
+    );
     let start = prefix.len() - file_prefix.len();
     Some((start, candidates))
 }
@@ -1273,6 +1317,71 @@ mod tests {
             natural_language_ghost_candidates("get comments for p"),
             vec!["ull request "]
         );
+    }
+
+    #[test]
+    fn comment_completion_offers_report_keywords_after_templates() {
+        // Without a stored report the keywords are ignored: only the template
+        // files (if any) are offered.
+        set_available_review_reports(false, false);
+        let (_, candidates) =
+            comment_file_completion_candidates("/comment 48 ").expect("candidates");
+        assert!(
+            !candidates.contains(&"with review".to_string()),
+            "{candidates:?}"
+        );
+        assert!(
+            !candidates.contains(&"with auto review".to_string()),
+            "{candidates:?}"
+        );
+
+        // With both reports stored the keywords are offered — even when
+        // `~/.orangu/comments/` does not exist — after any template files, so
+        // a template (e.g. one starting with `w`) keeps its completion
+        // priority.
+        set_available_review_reports(true, true);
+        let (start, candidates) =
+            comment_file_completion_candidates("/comment 48 ").expect("candidates");
+        assert_eq!(start, "/comment 48 ".len());
+        let len = candidates.len();
+        assert!(len >= 2, "{candidates:?}");
+        assert_eq!(
+            &candidates[len - 2..],
+            &["with review".to_string(), "with auto review".to_string()],
+            "keywords must come last: {candidates:?}"
+        );
+
+        // Typing narrows: `with a` leaves only the auto review keyword (plus
+        // any template that genuinely shares the prefix).
+        let (_, narrowed) =
+            comment_file_completion_candidates("comment on 48 with a").expect("candidates");
+        assert!(
+            narrowed.contains(&"with auto review".to_string()),
+            "{narrowed:?}"
+        );
+        assert!(
+            !narrowed.contains(&"with review".to_string()),
+            "{narrowed:?}"
+        );
+
+        // The natural-language form keeps the token offset at the body.
+        let (start, _) =
+            comment_file_completion_candidates("comment on 48 with a").expect("candidates");
+        assert_eq!(start, "comment on 48 ".len());
+
+        // Each keyword is gated by its own report.
+        set_available_review_reports(false, true);
+        let (_, partial) =
+            comment_file_completion_candidates("/comment 48 with ").expect("candidates");
+        assert!(
+            partial.contains(&"with auto review".to_string()),
+            "{partial:?}"
+        );
+        assert!(!partial.contains(&"with review".to_string()), "{partial:?}");
+
+        // A quoted argument is an inline body — no candidates.
+        assert!(comment_file_completion_candidates("/comment 48 \"w").is_none());
+        set_available_review_reports(false, false);
     }
 
     #[test]

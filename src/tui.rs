@@ -190,7 +190,7 @@ pub fn help_text() -> &'static str {
 /amend <message>                              Rewrite the last commit message with git commit --amend
 /branch [<name>|-a|-b|-m|-d <name>]           List, switch, create, rename or delete a branch
 /cherry_pick <commit>                         Cherry-pick a commit onto the current branch
-/comment <number> "<comment>"|<file>          Add a comment to a GitHub/GitLab issue; inline body or file from ~/.orangu/comments/
+/comment <number> "<comment>"|<file>          Add a comment to a GitHub/GitLab issue; inline body, file from ~/.orangu/comments/, or `with [auto] review` to post the last /review or /auto_review report
 /close -i <number>|-p <number>                Close a GitHub/GitLab issue or pull request with gh/glab
 /commit <message>                             Commit all tracked changes with git commit -a -m
 /diff                                         Show a color unified diff against the current branch
@@ -215,7 +215,7 @@ pub fn help_text() -> &'static str {
 /clear                                        Clear the current conversation
 /quit                                         Exit the client
 
-Natural-language forms such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `status`, `rebase`, `squash`, `merge feature/foo`, `grep <pattern>`, `find <pattern>`, `branch`, `list branches`, `checkout main`, `switch to main`, `create branch feature/x`, `rename to new-name`, `delete feature/foo`, `restore README.md`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `amend "[#42] My feature"`, `push`, `force push`, `add comment on 51 "My comment"`, `get comments for issue 51`, `get comments for pull request 58`, `review`, `auto review`, `create pull request`, `stash`, `stash pop`, `stash list`, `stash drop`, `init repo`, `prune session <uuid>`, `prune all`, `prune sessions older than <days>`, `prune sessions in <path>`, `restart`, `show manual`, and `show help` are also handled locally.
+Natural-language forms such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `status`, `rebase`, `squash`, `merge feature/foo`, `grep <pattern>`, `find <pattern>`, `branch`, `list branches`, `checkout main`, `switch to main`, `create branch feature/x`, `rename to new-name`, `delete feature/foo`, `restore README.md`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `amend "[#42] My feature"`, `push`, `force push`, `add comment on 51 "My comment"`, `comment on 48 with review`, `comment on 48 with auto review`, `get comments for issue 51`, `get comments for pull request 58`, `review`, `auto review`, `create pull request`, `stash`, `stash pop`, `stash list`, `stash drop`, `init repo`, `prune session <uuid>`, `prune all`, `prune sessions older than <days>`, `prune sessions in <path>`, `restart`, `show manual`, and `show help` are also handled locally.
 
 The prompt uses standard Unix shell keys, including Ctrl+Left, Ctrl+Right, Ctrl+A, Ctrl+E, Ctrl+K, Ctrl+U, Ctrl+W, Alt+Backspace, Alt+D, and Tab completion.
 

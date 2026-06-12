@@ -1227,10 +1227,20 @@ pub fn git_pr_checkout(repo_root: &Path, pr_number: u64) -> Result<String> {
     })
 }
 
+/// The last `/review` summary and `/auto_review` report (Markdown), offered
+/// to `/comment` as comment bodies (`with review`, `with auto review`).
+/// `None` until the matching mode has been run in this session.
+#[derive(Clone, Copy, Default)]
+pub struct ReviewReports<'a> {
+    pub review: Option<&'a str>,
+    pub auto_review: Option<&'a str>,
+}
+
 pub fn comment_output(
     workspace: &Path,
     issue_number: u64,
     body: &CommentBody<'_>,
+    reports: ReviewReports<'_>,
     forge: Forge,
 ) -> Result<String> {
     let repo_root = discover_git_root(workspace)
@@ -1245,6 +1255,14 @@ pub fn comment_output(
             fs::read_to_string(&path)
                 .with_context(|| format!("failed to read comment file {}", path.display()))?
         }
+        CommentBody::Review => reports
+            .review
+            .ok_or_else(|| anyhow!("no review report available — run /review first"))?
+            .to_string(),
+        CommentBody::AutoReview => reports
+            .auto_review
+            .ok_or_else(|| anyhow!("no auto review report available — run /auto_review first"))?
+            .to_string(),
     };
     let cli = forge.cli();
     let number = issue_number.to_string();
