@@ -887,4 +887,25 @@ mod tests {
         assert!(output.contains("1 "));
         assert!(output.contains("2 "));
     }
+
+    use crate::commands::{LocalCommand, parse_local_command};
+
+    #[test]
+    fn parses_show_file_commands() {
+        match parse_local_command("/show_file README.md") {
+            Some(LocalCommand::ShowFile(args)) => assert_eq!(args.as_ref(), "README.md"),
+            _ => panic!("expected show file slash command"),
+        }
+
+        let (path, options, rev) =
+            parse_show_file_arguments("--hash --author \"docs/user guide.md\"")
+                .expect("show file args");
+        assert_eq!(path, "docs/user guide.md");
+        assert!(options.show_hash);
+        assert!(options.show_author);
+        assert!(rev.is_none());
+        let (path2, _, rev2) = parse_show_file_arguments("src/main.rs abc1234").expect("path+rev");
+        assert_eq!(path2, "src/main.rs");
+        assert_eq!(rev2.as_deref(), Some("abc1234"));
+    }
 }

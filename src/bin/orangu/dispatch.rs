@@ -1,0 +1,944 @@
+// Copyright (C) 2026 The orangu community
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+use crate::*;
+
+pub(crate) fn local_command_error(err: Error) -> CommandOutcome {
+    if err.is::<LocalError>() {
+        CommandOutcome::OutputError(format!("{err}"))
+    } else {
+        CommandOutcome::OutputError(format!("Error: {err:#}"))
+    }
+}
+
+/// Collect the launch data shared by `/review` and `/auto_review`, wrapped in
+/// the caller's `CommandOutcome` variant. A review only starts on an
+/// up-to-date branch: when the branch is behind main/master the review would
+/// run against stale code, so the command refuses and points at `/rebase`.
+pub(crate) fn review_outcome(
+    workspace: &Path,
+    launch_outcome: impl FnOnce(ReviewLaunch) -> CommandOutcome,
+) -> CommandOutcome {
+    match git::behind_default_branch(workspace) {
+        Ok((0, _)) => {}
+        Ok((behind, base_ref)) => {
+            return CommandOutcome::OutputError(format!(
+                "The branch is {behind} commit{} behind {base_ref}; run /rebase before reviewing.",
+                if behind == 1 { "" } else { "s" }
+            ));
+        }
+        Err(err) => return local_command_error(err),
+    }
+    match collect_review_diff(workspace) {
+        Ok(review) if review.files.is_empty() => CommandOutcome::Output(format!(
+            "No changes to review against {}.",
+            review.base_label
+        )),
+        Ok(review) => {
+            let files = review
+                .files
+                .into_iter()
+                .map(|file| ReviewEntry {
+                    path: file.path,
+                    status: ReviewStatus::Unreviewed,
+                    diff_lines: file.lines,
+                    patch: file.patch,
+                })
+                .collect();
+            launch_outcome(ReviewLaunch { files })
+        }
+        Err(err) => local_command_error(err),
+    }
+}
+
+pub(crate) fn handle_command(
+    input: &str,
+    state: CommandState<'_>,
+    context: CommandContext<'_>,
+) -> anyhow::Result<CommandOutcome> {
+    let Some(command) = parse_local_command(input) else {
+        if input.trim_start().starts_with('/') {
+            return Ok(CommandOutcome::OutputError(format!(
+                "Unknown command '{}'. Use /help to see available commands.",
+                input.trim()
+            )));
+        }
+        return Ok(CommandOutcome::Unhandled);
+    };
+
+    let CommandState {
+        active_model,
+        active_model_id,
+        current_endpoint,
+        session,
+        detect_model,
+    } = state;
+    let CommandContext {
+        startup_model,
+        startup_endpoint,
+        llms,
+        tools,
+        workspace,
+        usage_stats,
+        available_models,
+        virtual_width,
+        auto_rebase,
+        auto_squash,
+        terminal,
+        forge,
+        review_reports,
+    } = context;
+
+    match command {
+        LocalCommand::Help => Ok(CommandOutcome::Output(orangu::tui::help_text().to_string())),
+        LocalCommand::Disconnect => Ok({
+            *current_endpoint = None;
+            CommandOutcome::Quiet
+        }),
+        LocalCommand::Reload => {
+            *active_model = startup_model.to_string();
+            *current_endpoint = Some(startup_endpoint.to_string());
+            let profile = llms
+                .get(startup_model)
+                .ok_or_else(|| anyhow!("unknown server '{startup_model}'"))?;
+            *active_model_id = profile.model.clone();
+            session.clear(system_prompt(profile));
+            *detect_model = true;
+            Ok(CommandOutcome::Quiet)
+        }
+        LocalCommand::Restart => Ok(CommandOutcome::Restart),
+        LocalCommand::ListFiles => match list_workspace_files_tree(workspace) {
+            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::ShowFile(args) => {
+            match show_file_output(workspace, args.as_ref(), virtual_width) {
+                Ok(output) => Ok(CommandOutcome::WideOutput(output)),
+                Err(err) => Ok(local_command_error(err)),
+            }
+        }
+        LocalCommand::Tools => Ok(CommandOutcome::Output(format_tools(tools))),
+        LocalCommand::ModelInfo => {
+            // The active model is marked active (green dot); every other model
+            // the server advertises is listed as inactive (red dot).
+            let mut lines = vec![format!("{FEEDBACK_OK} {active_model_id}")];
+            for model in available_models {
+                if model != active_model_id {
+                    lines.push(format!("{FEEDBACK_ERR} {model}"));
+                }
+            }
+            Ok(CommandOutcome::Output(lines.join("\n")))
+        }
+        LocalCommand::SetModelId(name) => {
+            if name.is_empty() {
+                return Ok(CommandOutcome::OutputError(
+                    model_usage_message().to_string(),
+                ));
+            }
+            *active_model_id = name.to_string();
+            Ok(CommandOutcome::Quiet)
+        }
+        LocalCommand::ServerInfo => {
+            // The active server is marked active (green dot); every other
+            // configured server is listed as inactive (red dot).
+            let lines: Vec<String> = sorted_model_names(llms)
+                .into_iter()
+                .map(|name| {
+                    if name == *active_model {
+                        format!("{FEEDBACK_OK} {name}")
+                    } else {
+                        format!("{FEEDBACK_ERR} {name}")
+                    }
+                })
+                .collect();
+            Ok(CommandOutcome::Output(lines.join("\n")))
+        }
+        LocalCommand::SetServer(name) => {
+            if name.is_empty() {
+                return Ok(CommandOutcome::OutputError(
+                    server_usage_message().to_string(),
+                ));
+            }
+            if !llms.contains_key(name) {
+                return Ok(CommandOutcome::OutputError(format!(
+                    "Unknown server '{name}'. Available: {}",
+                    sorted_model_names(llms).join(", ")
+                )));
+            }
+            let profile = &llms[name];
+            let endpoint = orangu::llm::normalized_openai_endpoint(&profile.endpoint);
+            *active_model = name.to_string();
+            *active_model_id = profile.model.clone();
+            *current_endpoint = Some(endpoint);
+            session.set_system_prompt(system_prompt(profile));
+            // Re-run the startup-style model detection against the selected
+            // server, even when it is the server we were already on.
+            *detect_model = true;
+            Ok(CommandOutcome::Quiet)
+        }
+        LocalCommand::Diff(None) => match git_workspace_diff(workspace) {
+            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Diff(Some(branch)) => match git_diff_against_branch(workspace, &branch) {
+            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Review => Ok(review_outcome(workspace, CommandOutcome::Review)),
+        LocalCommand::AutoReview => Ok(review_outcome(workspace, CommandOutcome::AutoReview)),
+        LocalCommand::Status => match status_output(workspace) {
+            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Grep(None) => Ok(CommandOutcome::OutputError(
+            grep_usage_message().to_string(),
+        )),
+        LocalCommand::Grep(Some(pattern)) => match grep_output(workspace, &pattern) {
+            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Log(count) => match log_output(workspace, count) {
+            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Pull(None) => Ok(CommandOutcome::OutputError(
+            pull_usage_message().to_string(),
+        )),
+        LocalCommand::Pull(Some(pr_number)) => {
+            match pull_request_output(workspace, pr_number, forge) {
+                Ok(Some(advice)) => Ok(CommandOutcome::Output(advice)),
+                Ok(None) => Ok(CommandOutcome::Quiet),
+                Err(err) => Ok(local_command_error(err)),
+            }
+        }
+        LocalCommand::Comment(None) => Ok(CommandOutcome::OutputError(
+            comment_usage_message().to_string(),
+        )),
+        LocalCommand::Comment(Some((issue_number, body))) => {
+            match comment_output(workspace, issue_number, &body, review_reports, forge) {
+                Ok(_) => Ok(CommandOutcome::Quiet),
+                Err(err) => Ok(local_command_error(err)),
+            }
+        }
+        LocalCommand::Close(None) => Ok(CommandOutcome::OutputError(
+            close_usage_message().to_string(),
+        )),
+        LocalCommand::Close(Some(target)) => match close_output(workspace, &target, forge) {
+            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::GetComments(None) => Ok(CommandOutcome::OutputError(
+            get_comments_usage_message().to_string(),
+        )),
+        LocalCommand::GetComments(Some(target)) => {
+            match get_comments_output(workspace, &target, forge) {
+                Ok(output) => Ok(CommandOutcome::Output(output)),
+                Err(err) => Ok(local_command_error(err)),
+            }
+        }
+        LocalCommand::CreatePullRequest => {
+            let ws = workspace.to_path_buf();
+            Ok(CommandOutcome::Blocking(Box::new(move || {
+                create_pull_request_output(&ws, auto_rebase, auto_squash, forge)
+            })))
+        }
+        LocalCommand::Rebase => match rebase_output(workspace, forge) {
+            Ok(_) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Merge(None) => Ok(CommandOutcome::OutputError(
+            merge_usage_message().to_string(),
+        )),
+        LocalCommand::Merge(Some(branch)) => match merge_output(workspace, &branch, forge) {
+            Ok(_) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Branch(sub) => match sub {
+            BranchSubcommand::List => match branch_list_output(workspace) {
+                Ok(output) => Ok(CommandOutcome::Output(output)),
+                Err(err) => Ok(local_command_error(err)),
+            },
+            BranchSubcommand::ListAll => match branch_list_all_output(workspace) {
+                Ok(output) => Ok(CommandOutcome::Output(output)),
+                Err(err) => Ok(local_command_error(err)),
+            },
+            BranchSubcommand::Switch(name) => {
+                let root = match discover_git_root(workspace) {
+                    Some(r) => r,
+                    None => {
+                        return Ok(local_command_error(anyhow::anyhow!(
+                            "branch is only available inside a Git repository"
+                        )));
+                    }
+                };
+                match git_checkout(&root, &name) {
+                    Ok(_) => Ok(CommandOutcome::Quiet),
+                    Err(err) => Ok(local_command_error(err)),
+                }
+            }
+            BranchSubcommand::Create(name) => match branch_create_output(workspace, &name) {
+                Ok(_) => Ok(CommandOutcome::Quiet),
+                Err(err) => Ok(local_command_error(err)),
+            },
+            BranchSubcommand::Rename(name) => match branch_rename_output(workspace, &name) {
+                Ok(output) => Ok(CommandOutcome::Output(output)),
+                Err(err) => Ok(local_command_error(err)),
+            },
+            BranchSubcommand::Delete(name) => match branch_delete_output(workspace, &name) {
+                Ok(_) => Ok(CommandOutcome::Quiet),
+                Err(err) => Ok(local_command_error(err)),
+            },
+        },
+        LocalCommand::Restore(None) => Ok(CommandOutcome::OutputError(
+            restore_usage_message().to_string(),
+        )),
+        LocalCommand::Restore(Some(arg)) => {
+            let staged = arg.starts_with("--staged ");
+            let path = if staged {
+                arg.split_once(' ')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            } else {
+                arg.to_string()
+            };
+            match restore_output(workspace, &path, staged) {
+                Ok(_) => Ok(CommandOutcome::Quiet),
+                Err(err) => Ok(local_command_error(err)),
+            }
+        }
+        LocalCommand::AddFile(None) => Ok(CommandOutcome::OutputError(
+            add_file_usage_message().to_string(),
+        )),
+        LocalCommand::AddFile(Some(path)) => match add_file_output(workspace, &path) {
+            Ok(_) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::RemoveFile(None) => Ok(CommandOutcome::OutputError(
+            remove_file_usage_message().to_string(),
+        )),
+        LocalCommand::RemoveFile(Some(path)) => match remove_file_output(workspace, &path) {
+            Ok(_) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::MoveFile(None) => Ok(CommandOutcome::OutputError(
+            move_file_usage_message().to_string(),
+        )),
+        LocalCommand::MoveFile(Some((src, dst))) => match move_file_output(workspace, &src, &dst) {
+            Ok(_) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::CherryPick(None) => Ok(CommandOutcome::OutputError(
+            cherry_pick_usage_message().to_string(),
+        )),
+        LocalCommand::CherryPick(Some(commit)) => match cherry_pick_output(workspace, &commit) {
+            Ok(_) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Commit(None) => Ok(CommandOutcome::OutputError(
+            commit_usage_message().to_string(),
+        )),
+        LocalCommand::Commit(Some(message)) => match commit_output(workspace, &message) {
+            Ok(_) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Amend(None) => Ok(CommandOutcome::OutputError(
+            amend_usage_message().to_string(),
+        )),
+        LocalCommand::Amend(Some(message)) => match amend_output(workspace, &message) {
+            Ok(_) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Push(force) => match push_output(workspace, force) {
+            Ok(Some(advice)) => Ok(CommandOutcome::Output(advice)),
+            Ok(None) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::InitRepo => match init_repo_output(workspace) {
+            Ok(_) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Squash => match squash_output(workspace) {
+            Ok(_) => Ok(CommandOutcome::Quiet),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Stash(sub) => {
+            let ws = workspace.to_path_buf();
+            Ok(CommandOutcome::Blocking(Box::new(move || match sub {
+                StashSubcommand::Push => stash_output(&ws),
+                StashSubcommand::Pop => stash_pop_output(&ws),
+                StashSubcommand::List => stash_list_output(&ws),
+                StashSubcommand::Drop => stash_drop_output(&ws),
+            })))
+        }
+        LocalCommand::OpenFile(path) => {
+            if path.is_empty() {
+                return Ok(CommandOutcome::OutputError(
+                    open_file_usage_message().to_string(),
+                ));
+            }
+            match open_in_editor(workspace, path, terminal) {
+                Ok(()) => Ok(CommandOutcome::Quiet),
+                Err(err) => Ok(CommandOutcome::OutputError(format!("Error: {err:#}"))),
+            }
+        }
+        LocalCommand::Session(None) => match list_sessions_output(None, &usage_stats.session_id) {
+            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Err(err) => Ok(local_command_error(err)),
+        },
+        LocalCommand::Session(Some(arg)) => {
+            if arg == usage_stats.session_id {
+                return Ok(CommandOutcome::Output(format!("Already in session {arg}")));
+            }
+            // A bare name (no path separators) matching an existing session
+            // directory is a session UUID: switch to it.
+            let is_session_id = !arg.contains('/')
+                && !arg.contains('\\')
+                && matches!(session_dir_path(&arg), Ok(path) if path.is_dir());
+            if is_session_id {
+                return Ok(CommandOutcome::SwitchSession(arg.into_owned()));
+            }
+            // Otherwise treat the argument as a workspace.
+            let matches = sessions_matching_workspace(arg.as_ref())?;
+            match matches.as_slice() {
+                // A workspace that uniquely identifies one session switches to it.
+                [uuid] => {
+                    if *uuid == usage_stats.session_id {
+                        return Ok(CommandOutcome::Output(format!("Already in session {uuid}")));
+                    }
+                    return Ok(CommandOutcome::SwitchSession(uuid.clone()));
+                }
+                // No session uses this workspace yet: if the argument resolves to
+                // a real directory on disk (with `~` expanded), open it as a new
+                // workspace; otherwise fall through to the empty listing.
+                [] => {
+                    if let Some(dir) = resolve_existing_dir_arg(arg.as_ref()) {
+                        return Ok(CommandOutcome::SwitchWorkspace(dir));
+                    }
+                }
+                // Several sessions share the workspace: list them so the user can
+                // pick a UUID.
+                _ => {}
+            }
+            match list_sessions_output(Some(arg.as_ref()), &usage_stats.session_id) {
+                Ok(output) => Ok(CommandOutcome::Output(output)),
+                Err(err) => Ok(local_command_error(err)),
+            }
+        }
+        LocalCommand::Prune(None) => Ok(CommandOutcome::OutputError(
+            prune_usage_message().to_string(),
+        )),
+        LocalCommand::Prune(Some(target)) => {
+            match prune_sessions_output(&target, &usage_stats.session_id) {
+                Ok(output) => Ok(CommandOutcome::Output(output)),
+                Err(err) => Ok(local_command_error(err)),
+            }
+        }
+        LocalCommand::Manual => Ok(CommandOutcome::Manual),
+        LocalCommand::Usage => Ok(CommandOutcome::Output(usage_stats.format())),
+        LocalCommand::Build => {
+            let ws = workspace.to_path_buf();
+            Ok(CommandOutcome::Streaming(Box::new(move |sink| {
+                build::build_output(&ws, &sink)
+            })))
+        }
+        LocalCommand::Clear => {
+            let prompt = system_prompt(
+                llms.get(active_model)
+                    .ok_or_else(|| anyhow!("unknown server '{active_model}'"))?,
+            );
+            session.clear(prompt);
+            Ok(CommandOutcome::Cleared)
+        }
+        LocalCommand::Quit => Ok(CommandOutcome::Quit),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::*;
+    use std::collections::HashMap;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn open_file_failure_returns_output_instead_of_error() {
+        let llms = HashMap::from([(
+            "llama".to_string(),
+            test_profile("llama.cpp", "http://localhost:8100/v1", "gemma"),
+        )]);
+        let workspace = tempdir().expect("workspace");
+        let tools = ToolExecutor::new(workspace.path());
+        let mut active_model = "llama".to_string();
+        let mut active_model_id = "gemma".to_string();
+        let mut current_endpoint = Some(normalized_openai_endpoint("http://localhost:8100/v1"));
+        let mut session = ChatSession::new("system");
+
+        let outcome = handle_command(
+            "/open_file /etc/hosts",
+            CommandState {
+                active_model: &mut active_model,
+                active_model_id: &mut active_model_id,
+                current_endpoint: &mut current_endpoint,
+                session: &mut session,
+                detect_model: &mut false,
+            },
+            CommandContext {
+                startup_model: "llama",
+                startup_endpoint: "http://localhost:8100/v1",
+                llms: &llms,
+                tools: &tools,
+                workspace: workspace.path(),
+                usage_stats: &super::UsageStats::new(),
+                available_models: &[],
+                virtual_width: 512,
+                auto_rebase: false,
+                auto_squash: false,
+                terminal: "",
+                forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
+            },
+        )
+        .expect("handle command");
+
+        assert!(matches!(
+            outcome,
+            CommandOutcome::OutputError(message) if message.starts_with("Error: ")
+        ));
+    }
+
+    #[test]
+    fn missing_required_command_arguments_return_usage_output() {
+        let llms = HashMap::from([(
+            "llama".to_string(),
+            test_profile("llama.cpp", "http://localhost:8100/v1", "gemma"),
+        )]);
+        let workspace = tempdir().expect("workspace");
+        let tools = ToolExecutor::new(workspace.path());
+
+        for (input, expected) in [
+            (
+                "/show_file",
+                "Usage: /show_file [--hash] [--author] <path> [<ref>]. Use /help to see available commands.",
+            ),
+            (
+                "/show_file --hash",
+                "Usage: /show_file [--hash] [--author] <path> [<ref>]. Use /help to see available commands.",
+            ),
+            (
+                "/open_file",
+                "Usage: /open_file <path>. Use /help to see available commands.",
+            ),
+        ] {
+            let mut active_model = "llama".to_string();
+            let mut active_model_id = "gemma".to_string();
+            let mut current_endpoint = Some(normalized_openai_endpoint("http://localhost:8100/v1"));
+            let mut session = ChatSession::new("system");
+
+            let outcome = handle_command(
+                input,
+                CommandState {
+                    active_model: &mut active_model,
+                    active_model_id: &mut active_model_id,
+                    current_endpoint: &mut current_endpoint,
+                    session: &mut session,
+                    detect_model: &mut false,
+                },
+                CommandContext {
+                    startup_model: "llama",
+                    startup_endpoint: "http://localhost:8100/v1",
+                    llms: &llms,
+                    tools: &tools,
+                    workspace: workspace.path(),
+                    usage_stats: &super::UsageStats::new(),
+                    available_models: &[],
+                    virtual_width: 512,
+                    auto_rebase: false,
+                    auto_squash: false,
+                    terminal: "",
+                    forge: crate::git::Forge::GitHub,
+                    review_reports: crate::git::ReviewReports::default(),
+                },
+            )
+            .expect("handle command");
+
+            assert!(
+                matches!(outcome, CommandOutcome::OutputError(message) if message == expected),
+                "unexpected outcome for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_files_outputs_filtered_workspace_tree() {
+        let llms = HashMap::from([(
+            "llama".to_string(),
+            test_profile("llama.cpp", "http://localhost:8100/v1", "gemma"),
+        )]);
+        let workspace = tempdir().expect("workspace");
+        fs::write(workspace.path().join("README.md"), "readme").expect("root file");
+        fs::create_dir(workspace.path().join("doc")).expect("doc dir");
+        fs::write(workspace.path().join("doc/guide.txt"), "guide").expect("doc file");
+        fs::create_dir(workspace.path().join("src")).expect("src dir");
+        fs::write(workspace.path().join("src/lib.rs"), "pub fn lib() {}").expect("src file");
+        fs::create_dir(workspace.path().join(".git")).expect("git dir");
+        fs::write(workspace.path().join(".git/config"), "[core]").expect("git config");
+        fs::create_dir(workspace.path().join("build")).expect("build dir");
+        fs::write(workspace.path().join("build/output.txt"), "artifact").expect("build file");
+        fs::create_dir(workspace.path().join("target")).expect("target dir");
+        fs::write(workspace.path().join("target/app"), "binary").expect("target file");
+
+        let tree = list_workspace_files_tree(workspace.path()).expect("tree");
+        assert_eq!(
+            tree,
+            format!(
+                "{}\n├── doc\n│   └── guide.txt\n├── src\n│   └── lib.rs\n└── README.md",
+                workspace.path().display()
+            )
+        );
+
+        let tools = ToolExecutor::new(workspace.path());
+        let mut active_model = "llama".to_string();
+        let mut active_model_id = "gemma".to_string();
+        let mut current_endpoint = Some(normalized_openai_endpoint("http://localhost:8100/v1"));
+        let mut session = ChatSession::new("system");
+        let outcome = handle_command(
+            "/list_files",
+            CommandState {
+                active_model: &mut active_model,
+                active_model_id: &mut active_model_id,
+                current_endpoint: &mut current_endpoint,
+                session: &mut session,
+                detect_model: &mut false,
+            },
+            CommandContext {
+                startup_model: "llama",
+                startup_endpoint: "http://localhost:8100/v1",
+                llms: &llms,
+                tools: &tools,
+                workspace: workspace.path(),
+                usage_stats: &super::UsageStats::new(),
+                available_models: &[],
+                virtual_width: 512,
+                auto_rebase: false,
+                auto_squash: false,
+                terminal: "",
+                forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
+            },
+        )
+        .expect("handle command");
+
+        assert!(matches!(outcome, CommandOutcome::Output(output) if output == tree));
+    }
+
+    #[test]
+    fn set_server_switches_active_endpoint() {
+        const GEMMA: &str = "gemma-4-E4B-it-GGUF";
+        const OPENAI: &str = "gpt-4.1";
+
+        let llms = HashMap::from([
+            (
+                GEMMA.to_string(),
+                test_profile(
+                    "llama.cpp",
+                    "http://localhost:8100/v1",
+                    "ggml-org/gemma-4-E4B-it-GGUF",
+                ),
+            ),
+            (
+                OPENAI.to_string(),
+                test_profile("openai", "https://api.openai.com/v1", "gpt-4.1"),
+            ),
+        ]);
+        let workspace = tempdir().expect("workspace");
+        let tools = ToolExecutor::new(workspace.path());
+        let mut active_model = GEMMA.to_string();
+        let mut active_model_id = GEMMA.to_string();
+        let mut current_endpoint = Some(normalized_openai_endpoint("http://localhost:8100/v1"));
+        let mut session = ChatSession::new("system");
+        let mut detect_model = false;
+
+        let outcome = handle_command(
+            "/server gpt-4.1",
+            CommandState {
+                active_model: &mut active_model,
+                active_model_id: &mut active_model_id,
+                current_endpoint: &mut current_endpoint,
+                session: &mut session,
+                detect_model: &mut detect_model,
+            },
+            CommandContext {
+                startup_model: GEMMA,
+                startup_endpoint: "http://localhost:8100/v1",
+                llms: &llms,
+                tools: &tools,
+                workspace: workspace.path(),
+                usage_stats: &super::UsageStats::new(),
+                available_models: &[],
+                virtual_width: 512,
+                auto_rebase: false,
+                auto_squash: false,
+                terminal: "",
+                forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
+            },
+        )
+        .expect("handle command");
+
+        assert!(matches!(outcome, CommandOutcome::Quiet));
+        assert_eq!(active_model, OPENAI);
+        // Switching server resets the wire model id to the server's model.
+        assert_eq!(active_model_id, "gpt-4.1");
+        assert_eq!(
+            current_endpoint,
+            Some(normalized_openai_endpoint("https://api.openai.com/v1"))
+        );
+        // Selecting a server requests model auto-detection against it.
+        assert!(detect_model);
+    }
+
+    #[test]
+    fn set_model_changes_wire_model_only() {
+        const GEMMA: &str = "gemma-4-E4B-it-GGUF";
+
+        let llms = HashMap::from([(
+            GEMMA.to_string(),
+            test_profile(
+                "llama.cpp",
+                "http://localhost:8100/v1",
+                "ggml-org/gemma-4-E4B-it-GGUF",
+            ),
+        )]);
+        let workspace = tempdir().expect("workspace");
+        let tools = ToolExecutor::new(workspace.path());
+        let mut active_model = GEMMA.to_string();
+        let mut active_model_id = "ggml-org/gemma-4-E4B-it-GGUF".to_string();
+        let endpoint = normalized_openai_endpoint("http://localhost:8100/v1");
+        let mut current_endpoint = Some(endpoint.clone());
+        let mut session = ChatSession::new("system");
+
+        let outcome = handle_command(
+            "/model some-other-model",
+            CommandState {
+                active_model: &mut active_model,
+                active_model_id: &mut active_model_id,
+                current_endpoint: &mut current_endpoint,
+                session: &mut session,
+                detect_model: &mut false,
+            },
+            CommandContext {
+                startup_model: GEMMA,
+                startup_endpoint: "http://localhost:8100/v1",
+                llms: &llms,
+                tools: &tools,
+                workspace: workspace.path(),
+                usage_stats: &super::UsageStats::new(),
+                available_models: &[],
+                virtual_width: 512,
+                auto_rebase: false,
+                auto_squash: false,
+                terminal: "",
+                forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
+            },
+        )
+        .expect("handle command");
+
+        assert!(matches!(outcome, CommandOutcome::Quiet));
+        // The wire model id changes; the server and endpoint stay put.
+        assert_eq!(active_model_id, "some-other-model");
+        assert_eq!(active_model, GEMMA);
+        assert_eq!(current_endpoint, Some(endpoint));
+    }
+
+    #[test]
+    fn model_info_marks_active_green_and_others_red() {
+        const SERVER: &str = "local";
+
+        let llms = HashMap::from([(
+            SERVER.to_string(),
+            test_profile("llama.cpp", "http://localhost:8100/v1", "model-a"),
+        )]);
+        let workspace = tempdir().expect("workspace");
+        let tools = ToolExecutor::new(workspace.path());
+        let mut active_model = SERVER.to_string();
+        let mut active_model_id = "model-a".to_string();
+        let mut current_endpoint = Some(normalized_openai_endpoint("http://localhost:8100/v1"));
+        let mut session = ChatSession::new("system");
+        let available = vec![
+            "model-a".to_string(),
+            "model-b".to_string(),
+            "model-c".to_string(),
+        ];
+
+        let outcome = handle_command(
+            "/model",
+            CommandState {
+                active_model: &mut active_model,
+                active_model_id: &mut active_model_id,
+                current_endpoint: &mut current_endpoint,
+                session: &mut session,
+                detect_model: &mut false,
+            },
+            CommandContext {
+                startup_model: SERVER,
+                startup_endpoint: "http://localhost:8100/v1",
+                llms: &llms,
+                tools: &tools,
+                workspace: workspace.path(),
+                usage_stats: &super::UsageStats::new(),
+                available_models: &available,
+                virtual_width: 512,
+                auto_rebase: false,
+                auto_squash: false,
+                terminal: "",
+                forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
+            },
+        )
+        .expect("handle command");
+
+        match outcome {
+            CommandOutcome::Output(text) => {
+                let ok = super::FEEDBACK_OK;
+                let err = super::FEEDBACK_ERR;
+                assert_eq!(text, format!("{ok} model-a\n{err} model-b\n{err} model-c"));
+            }
+            _ => panic!("expected output from /model"),
+        }
+    }
+
+    #[test]
+    fn server_info_marks_active_green_and_others_red() {
+        let llms = HashMap::from([
+            (
+                "alpha".to_string(),
+                test_profile("llama.cpp", "http://localhost:8100/v1", "model-a"),
+            ),
+            (
+                "bravo".to_string(),
+                test_profile("llama.cpp", "http://localhost:8200/v1", "model-b"),
+            ),
+            (
+                "charlie".to_string(),
+                test_profile("llama.cpp", "http://localhost:8300/v1", "model-c"),
+            ),
+        ]);
+        let workspace = tempdir().expect("workspace");
+        let tools = ToolExecutor::new(workspace.path());
+        let mut active_model = "bravo".to_string();
+        let mut active_model_id = "model-b".to_string();
+        let mut current_endpoint = Some(normalized_openai_endpoint("http://localhost:8200/v1"));
+        let mut session = ChatSession::new("system");
+
+        let outcome = handle_command(
+            "/server",
+            CommandState {
+                active_model: &mut active_model,
+                active_model_id: &mut active_model_id,
+                current_endpoint: &mut current_endpoint,
+                session: &mut session,
+                detect_model: &mut false,
+            },
+            CommandContext {
+                startup_model: "bravo",
+                startup_endpoint: "http://localhost:8200/v1",
+                llms: &llms,
+                tools: &tools,
+                workspace: workspace.path(),
+                usage_stats: &super::UsageStats::new(),
+                available_models: &[],
+                virtual_width: 512,
+                auto_rebase: false,
+                auto_squash: false,
+                terminal: "",
+                forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
+            },
+        )
+        .expect("handle command");
+
+        match outcome {
+            CommandOutcome::Output(text) => {
+                let ok = super::FEEDBACK_OK;
+                let err = super::FEEDBACK_ERR;
+                // Servers are listed in sorted order; only the active one is green.
+                assert_eq!(text, format!("{err} alpha\n{ok} bravo\n{err} charlie"));
+            }
+            _ => panic!("expected output from /server"),
+        }
+    }
+
+    #[test]
+    fn unknown_slash_commands_error_locally() {
+        let workspace = tempdir().expect("workspace");
+        let tools = ToolExecutor::new(workspace.path());
+        let mut llms = HashMap::new();
+        llms.insert(
+            "default".to_string(),
+            LlmConfiguration {
+                provider: "openai".to_string(),
+                model: "gpt-4.1".to_string(),
+                endpoint: "http://localhost:11434/v1".to_string(),
+                api_key: None,
+                request_timeout_seconds: 30,
+                max_tool_rounds: 10,
+                review_max_tokens: 512,
+                code_max_tokens: 0,
+                system_prompt: String::new(),
+            },
+        );
+        let mut session = ChatSession::new(system_prompt(&llms["default"]));
+        let mut active_model = "default".to_string();
+        let mut active_model_id = "default".to_string();
+        let mut current_endpoint = Some("http://localhost:11434/v1".to_string());
+
+        let outcome = handle_command(
+            "/unknown",
+            CommandState {
+                active_model: &mut active_model,
+                active_model_id: &mut active_model_id,
+                current_endpoint: &mut current_endpoint,
+                session: &mut session,
+                detect_model: &mut false,
+            },
+            CommandContext {
+                startup_model: "default",
+                startup_endpoint: "http://localhost:11434/v1",
+                llms: &llms,
+                tools: &tools,
+                workspace: workspace.path(),
+                usage_stats: &super::UsageStats::new(),
+                available_models: &[],
+                virtual_width: 512,
+                auto_rebase: false,
+                auto_squash: false,
+                terminal: "",
+                forge: crate::git::Forge::GitHub,
+                review_reports: crate::git::ReviewReports::default(),
+            },
+        )
+        .expect("command outcome");
+
+        assert!(matches!(
+            outcome,
+            CommandOutcome::OutputError(ref message)
+                if message == "Unknown command '/unknown'. Use /help to see available commands."
+        ));
+    }
+}

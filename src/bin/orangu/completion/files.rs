@@ -1,0 +1,235 @@
+// Copyright (C) 2026 The orangu community
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+use std::{fs, path::Path};
+use walkdir::WalkDir;
+
+use super::*;
+use crate::commands::{shell_words, strip_ascii_prefix};
+use crate::git::{discover_git_root, git_file_commit_hashes};
+
+pub fn file_completion_candidates(token: &str, workspace: &Path) -> Vec<String> {
+    let (directory, prefix) = match token.rsplit_once('/') {
+        Some((directory, prefix)) => (directory, prefix),
+        None => ("", token),
+    };
+    let gitignore = workspace_gitignore(workspace);
+    let search_dir = if directory.is_empty() {
+        workspace.to_path_buf()
+    } else {
+        workspace.join(directory)
+    };
+
+    let Ok(entries) = fs::read_dir(search_dir) else {
+        return Vec::new();
+    };
+
+    let mut matches = entries
+        .flatten()
+        .filter_map(|entry| {
+            let entry_type = entry.file_type().ok()?;
+            if !should_include_completion_path(
+                workspace,
+                &entry.path(),
+                entry_type.is_dir(),
+                gitignore.as_ref(),
+            ) {
+                return None;
+            }
+
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if !file_name.starts_with(prefix) {
+                return None;
+            }
+
+            let suffix = if entry_type.is_dir() { "/" } else { "" };
+            Some(if directory.is_empty() {
+                format!("{file_name}{suffix}")
+            } else {
+                format!("{directory}/{file_name}{suffix}")
+            })
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches
+}
+
+pub fn show_file_completion_candidates(
+    prefix: &str,
+    workspace: &Path,
+) -> Option<(usize, Vec<String>)> {
+    let remainder = prefix.strip_prefix("/show_file ")?;
+    let (token_start, token) = last_shell_token(remainder);
+    let previous = remainder[..token_start].trim_end();
+    let previous_tokens = if previous.is_empty() {
+        Vec::new()
+    } else {
+        shell_words(previous).unwrap_or_default()
+    };
+    let has_path = previous_tokens.iter().any(|value| !value.starts_with('-'));
+
+    let mut candidates = if token.starts_with('-') {
+        show_file_flag_candidates(token)
+    } else if has_path {
+        let path_str = previous_tokens
+            .iter()
+            .find(|t| !t.starts_with('-'))
+            .map(String::as_str)
+            .unwrap_or("");
+        discover_git_root(workspace)
+            .map(|root| {
+                let resolved = if std::path::Path::new(path_str).is_absolute() {
+                    std::path::PathBuf::from(path_str)
+                } else {
+                    workspace.join(path_str)
+                };
+                let relative = resolved
+                    .strip_prefix(&root)
+                    .unwrap_or(resolved.as_path())
+                    .to_path_buf();
+                git_file_commit_hashes(&root, &relative)
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|h| h.starts_with(token))
+            .collect()
+    } else {
+        open_file_completion_candidates(token, workspace)
+    };
+    candidates.sort();
+    candidates.dedup();
+    Some(("/show_file ".len() + token_start, candidates))
+}
+
+pub fn open_file_completion_candidates(token: &str, workspace: &Path) -> Vec<String> {
+    let (quoted, token) = match token.chars().next() {
+        Some(quote @ '"') | Some(quote @ '\'') => (Some(quote), &token[quote.len_utf8()..]),
+        _ => (None, token),
+    };
+    let gitignore = workspace_gitignore(workspace);
+
+    let mut matches = WalkDir::new(workspace)
+        .into_iter()
+        .filter_entry(|entry| {
+            should_include_completion_path(
+                workspace,
+                entry.path(),
+                entry.file_type().is_dir(),
+                gitignore.as_ref(),
+            )
+        })
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| {
+            let relative = entry.path().strip_prefix(workspace).ok()?;
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let file_name = entry.file_name().to_string_lossy();
+            if !open_file_completion_matches(&relative, &file_name, token) {
+                return None;
+            }
+
+            Some(match quoted {
+                Some(quote) => format!("{quote}{relative}"),
+                None => relative,
+            })
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches
+}
+
+pub fn open_file_completion_matches(relative: &str, file_name: &str, token: &str) -> bool {
+    token.is_empty()
+        || relative.starts_with(token)
+        || (!token.contains('/') && file_name.starts_with(token))
+}
+
+pub fn last_shell_token(input: &str) -> (usize, &str) {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut token_start = 0;
+    let mut in_token = false;
+
+    for (index, ch) in input.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            } else if active_quote == '"' && ch == '\\' {
+                escaped = true;
+            }
+            continue;
+        }
+
+        if ch.is_whitespace() {
+            in_token = false;
+            token_start = index + ch.len_utf8();
+            continue;
+        }
+
+        if !in_token {
+            token_start = index;
+            in_token = true;
+        }
+
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+        } else if ch == '\\' {
+            escaped = true;
+        }
+    }
+
+    (token_start, &input[token_start..])
+}
+
+pub fn show_file_flag_candidates(token: &str) -> Vec<String> {
+    ["--hash", "--author"]
+        .into_iter()
+        .filter(|flag| flag.starts_with(token))
+        .map(str::to_string)
+        .collect()
+}
+
+pub fn open_file_completion_prefix(prefix: &str) -> Option<(usize, &str)> {
+    if let Some(path_prefix) = prefix.strip_prefix("/open_file ") {
+        return Some(("/open_file ".len(), path_prefix));
+    }
+
+    for command_prefix in ["open file ", "open ", "edit file ", "edit "] {
+        if let Some(path_prefix) = strip_ascii_prefix(prefix, command_prefix) {
+            return Some((prefix.len() - path_prefix.len(), path_prefix));
+        }
+    }
+
+    None
+}
+
+pub fn natural_show_file_completion_prefix(prefix: &str) -> Option<(usize, &str)> {
+    if let Some(path_prefix) = strip_ascii_prefix(prefix, "show file ") {
+        return Some((prefix.len() - path_prefix.len(), path_prefix));
+    }
+
+    let path_prefix = strip_ascii_prefix(prefix, "show ")?;
+    let (token_start, _) = last_shell_token(path_prefix);
+    if token_start != 0 {
+        return None;
+    }
+
+    Some((prefix.len() - path_prefix.len(), path_prefix))
+}

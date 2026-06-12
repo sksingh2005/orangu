@@ -1,0 +1,482 @@
+// Copyright (C) 2026 The orangu community
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+use crate::*;
+
+pub(crate) const SESSIONS_DIRECTORY: &str = ".orangu/sessions";
+/// Scratch directory used by `/restart` to stage a runnable copy of the binary
+/// when the original on-disk path has been replaced (e.g. rebuilt while
+/// running). Cleared on every startup.
+pub(crate) const RESTART_DIRECTORY: &str = ".orangu/last";
+
+pub(crate) fn session_dir_path(session_id: &str) -> Result<PathBuf> {
+    let home = home::home_dir().ok_or_else(|| anyhow!("failed to resolve home directory"))?;
+    Ok(home.join(SESSIONS_DIRECTORY).join(session_id))
+}
+
+/// The `~/.orangu/last` scratch directory used across a `/restart` handoff.
+pub(crate) fn restart_dir_path() -> Option<PathBuf> {
+    Some(home::home_dir()?.join(RESTART_DIRECTORY))
+}
+
+/// Remove the `/restart` scratch directory. Errors are ignored: a missing or
+/// unremovable directory must never block startup.
+pub(crate) fn clear_restart_dir() {
+    if let Some(dir) = restart_dir_path() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Resolve the path to exec when restarting.
+///
+/// `std::env::current_exe()` reads `/proc/self/exe`, which keeps pointing at the
+/// original inode. When the binary is rebuilt while running, that inode is
+/// unlinked and the path is reported with a trailing ` (deleted)` marker, so
+/// exec'ing it fails with `ENOENT`. We first retry the real on-disk path with
+/// the marker stripped — after a rebuild that path holds the fresh binary, which
+/// is exactly what a restart should pick up. If that path is gone entirely
+/// (e.g. the build directory was cleaned), we fall back to copying the still-open
+/// running binary into `~/.orangu/last` and exec'ing that copy, which always
+/// succeeds even though it relaunches the previous build.
+pub(crate) fn restart_executable_path() -> Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+
+    // Fast path: the binary on disk is intact.
+    if exe.exists() {
+        return Ok(exe);
+    }
+
+    // The reported path may carry the kernel's " (deleted)" suffix; the real
+    // path without it usually holds the rebuilt binary.
+    let display = exe.to_string_lossy();
+    if let Some(stripped) = display.strip_suffix(" (deleted)") {
+        let real = PathBuf::from(stripped);
+        if real.exists() {
+            return Ok(real);
+        }
+    }
+
+    // Last resort: stage a copy of the running binary somewhere stable and exec
+    // that. `/proc/self/exe` can still be read while the inode is open, even
+    // after the original path is gone.
+    let dir = restart_dir_path().ok_or_else(|| anyhow!("failed to resolve home directory"))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let staged = dir.join("orangu");
+    std::fs::copy("/proc/self/exe", &staged)
+        .with_context(|| format!("failed to stage restart binary at {}", staged.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("failed to mark {} executable", staged.display()))?;
+    }
+    Ok(staged)
+}
+
+pub(crate) fn load_session_messages(path: &Path) -> Result<Vec<ChatMessage>> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse session messages {}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) => {
+            Err(err).with_context(|| format!("failed to read session messages {}", path.display()))
+        }
+    }
+}
+
+pub(crate) fn save_session_messages(path: &Path, messages: &[ChatMessage]) -> Result<()> {
+    let json = serde_json::to_string(messages).context("failed to serialize session messages")?;
+    std::fs::write(path, json)
+        .with_context(|| format!("failed to write session messages {}", path.display()))
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SessionMetadata {
+    pub(crate) started_at: u64,
+    pub(crate) last_updated_at: u64,
+    pub(crate) workspace: String,
+    #[serde(default)]
+    pub(crate) branch: String,
+}
+
+pub(crate) fn current_unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+pub(crate) fn format_unix_timestamp(secs: u64) -> String {
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let (y, m, d) = days_to_ymd(days);
+    format!("{y:04}{m:02}{d:02}{hour:02}{min:02}")
+}
+
+pub(crate) fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
+    let mut year = 1970u32;
+    loop {
+        let in_year: u64 = if is_leap_year(year) { 366 } else { 365 };
+        if days < in_year {
+            break;
+        }
+        days -= in_year;
+        year += 1;
+    }
+    let months: [u64; 12] = [
+        31,
+        if is_leap_year(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1u32;
+    for dim in months {
+        if days < dim {
+            break;
+        }
+        days -= dim;
+        month += 1;
+    }
+    (year, month, days as u32 + 1)
+}
+
+pub(crate) fn is_leap_year(y: u32) -> bool {
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+}
+
+pub(crate) fn save_session_metadata(path: &Path, metadata: &SessionMetadata) -> Result<()> {
+    let json = serde_json::to_string(metadata).context("failed to serialize session metadata")?;
+    std::fs::write(path, json)
+        .with_context(|| format!("failed to write session metadata {}", path.display()))
+}
+
+pub(crate) fn load_session_metadata(path: &Path) -> Result<Option<SessionMetadata>> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse session metadata {}", path.display()))
+            .map(Some),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => {
+            Err(err).with_context(|| format!("failed to read session metadata {}", path.display()))
+        }
+    }
+}
+
+pub(crate) fn update_session_metadata_timestamp(path: &Path) -> Result<()> {
+    if let Ok(Some(mut meta)) = load_session_metadata(path) {
+        meta.last_updated_at = current_unix_timestamp();
+        save_session_metadata(path, &meta)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn find_session_for_workspace_branch(workspace: &str, branch: &str) -> Option<String> {
+    let sessions_dir = home::home_dir()?.join(SESSIONS_DIRECTORY);
+    if !sessions_dir.exists() {
+        return None;
+    }
+    let mut candidates: Vec<(String, u64)> = Vec::new();
+    for entry in std::fs::read_dir(&sessions_dir).ok()?.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(uuid) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(meta) = load_session_metadata(&path.join("metadata")).ok().flatten() else {
+            continue;
+        };
+        if meta.workspace != workspace {
+            continue;
+        }
+        if meta.branch != branch {
+            continue;
+        }
+        let has_messages = path
+            .join("messages")
+            .metadata()
+            .map(|m| m.len() > 2)
+            .unwrap_or(false);
+        if !has_messages {
+            continue;
+        }
+        candidates.push((uuid, meta.last_updated_at));
+    }
+    if candidates.len() == 1 {
+        Some(candidates.remove(0).0)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn is_ephemeral_branch(branch: &str) -> bool {
+    matches!(branch, "" | "main" | "master")
+}
+
+pub(crate) fn delete_session_dir(session_dir: &Path) {
+    let _ = std::fs::remove_dir_all(session_dir);
+}
+
+/// UUIDs of sessions whose recorded workspace path contains `filter`. Used to
+/// decide whether a `/session <workspace>` argument uniquely identifies a
+/// session (switch to it) or matches several (list them).
+pub(crate) fn sessions_matching_workspace(filter: &str) -> Result<Vec<String>> {
+    let sessions_dir = {
+        let home = home::home_dir().ok_or_else(|| anyhow!("failed to resolve home directory"))?;
+        home.join(SESSIONS_DIRECTORY)
+    };
+    if !sessions_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut matches: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&sessions_dir).with_context(|| {
+        format!(
+            "failed to read sessions directory {}",
+            sessions_dir.display()
+        )
+    })? {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(uuid) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(meta) = load_session_metadata(&path.join("metadata")).ok().flatten() else {
+            continue;
+        };
+        if meta.workspace.contains(filter) {
+            matches.push(uuid);
+        }
+    }
+    Ok(matches)
+}
+
+pub(crate) fn list_sessions_output(
+    workspace_filter: Option<&str>,
+    active_session: &str,
+) -> Result<String> {
+    let sessions_dir = {
+        let home = home::home_dir().ok_or_else(|| anyhow!("failed to resolve home directory"))?;
+        home.join(SESSIONS_DIRECTORY)
+    };
+
+    if !sessions_dir.exists() {
+        return Ok("No sessions found.".to_string());
+    }
+
+    let mut entries: Vec<(String, Option<SessionMetadata>, usize)> = Vec::new();
+
+    for entry in std::fs::read_dir(&sessions_dir).with_context(|| {
+        format!(
+            "failed to read sessions directory {}",
+            sessions_dir.display()
+        )
+    })? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let uuid = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+        let meta = load_session_metadata(&path.join("metadata")).ok().flatten();
+        if let Some(filter) = workspace_filter
+            && !meta
+                .as_ref()
+                .map(|m| m.workspace.contains(filter))
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        let cmd_count = load_history(&path.join("history"))
+            .unwrap_or_default()
+            .len();
+        entries.push((uuid, meta, cmd_count));
+    }
+
+    if entries.is_empty() {
+        return Ok("No sessions found.".to_string());
+    }
+
+    entries.sort_by_key(|e| std::cmp::Reverse(e.1.as_ref().map(|m| m.started_at).unwrap_or(0)));
+
+    // Build every cell first so column widths can be sized to the widest value
+    // across all sessions, keeping the columns aligned regardless of content.
+    struct Row {
+        is_active: bool,
+        uuid: String,
+        started: String,
+        last: String,
+        cmds: String,
+        branch: String,
+        workspace: String,
+    }
+    let rows: Vec<Row> = entries
+        .iter()
+        .map(|(uuid, meta, cmd_count)| Row {
+            is_active: *uuid == active_session,
+            uuid: uuid.clone(),
+            started: meta
+                .as_ref()
+                .map(|m| format_unix_timestamp(m.started_at))
+                .unwrap_or_else(|| "-".to_string()),
+            last: meta
+                .as_ref()
+                .map(|m| format_unix_timestamp(m.last_updated_at))
+                .unwrap_or_else(|| "-".to_string()),
+            cmds: cmd_count.to_string(),
+            branch: meta
+                .as_ref()
+                .filter(|m| !m.branch.is_empty())
+                .map(|m| m.branch.clone())
+                .unwrap_or_else(|| "-".to_string()),
+            workspace: meta
+                .as_ref()
+                .filter(|m| !m.workspace.is_empty())
+                .map(|m| m.workspace.clone())
+                .unwrap_or_else(|| "-".to_string()),
+        })
+        .collect();
+
+    let col_width = |header: &str, value: &dyn Fn(&Row) -> &str| {
+        rows.iter()
+            .map(|r| value(r).chars().count())
+            .chain(std::iter::once(header.chars().count()))
+            .max()
+            .unwrap_or(0)
+    };
+    let w_uuid = col_width("UUID", &|r| &r.uuid);
+    let w_started = col_width("STARTED", &|r| &r.started);
+    let w_last = col_width("LAST", &|r| &r.last);
+    let w_cmds = col_width("CMDS", &|r| &r.cmds);
+    let w_branch = col_width("BRANCH", &|r| &r.branch);
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "{:<6}  {:<w_uuid$}  {:<w_started$}  {:<w_last$}  {:>w_cmds$}  {:<w_branch$}  {}",
+        "ACTIVE", "UUID", "STARTED", "LAST", "CMDS", "BRANCH", "WORKSPACE"
+    ));
+    for row in &rows {
+        // The dot is a single visible glyph; pad manually to the 6-char ACTIVE
+        // header width so the surrounding ANSI codes don't skew alignment.
+        let dot = if row.is_active {
+            FEEDBACK_OK
+        } else {
+            FEEDBACK_ERR
+        };
+        lines.push(format!(
+            "{dot}       {:<w_uuid$}  {:<w_started$}  {:<w_last$}  {:>w_cmds$}  {:<w_branch$}  {}",
+            row.uuid, row.started, row.last, row.cmds, row.branch, row.workspace
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn prune_sessions_output(target: &PruneTarget, active_session: &str) -> Result<String> {
+    let sessions_dir = {
+        let home = home::home_dir().ok_or_else(|| anyhow!("failed to resolve home directory"))?;
+        home.join(SESSIONS_DIRECTORY)
+    };
+
+    if !sessions_dir.exists() {
+        return Ok("No sessions found.".to_string());
+    }
+
+    let now = current_unix_timestamp();
+
+    let mut removed: Vec<String> = Vec::new();
+    let mut skipped_active = false;
+
+    for entry in std::fs::read_dir(&sessions_dir).with_context(|| {
+        format!(
+            "failed to read sessions directory {}",
+            sessions_dir.display()
+        )
+    })? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let uuid = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+
+        let should_remove = match target {
+            PruneTarget::All => true,
+            PruneTarget::Uuid(id) => uuid == *id,
+            PruneTarget::Workspace(filter) => {
+                let meta = load_session_metadata(&path.join("metadata")).ok().flatten();
+                meta.map(|m| m.workspace.contains(filter.as_str()))
+                    .unwrap_or(false)
+            }
+            PruneTarget::OlderThan(days) => {
+                let threshold = days * 86400;
+                let meta = load_session_metadata(&path.join("metadata")).ok().flatten();
+                meta.map(|m| now.saturating_sub(m.last_updated_at) >= threshold)
+                    .unwrap_or(false)
+            }
+        };
+
+        if !should_remove {
+            continue;
+        }
+
+        if uuid == active_session {
+            skipped_active = true;
+            continue;
+        }
+
+        std::fs::remove_dir_all(&path)
+            .with_context(|| format!("failed to remove session directory {}", path.display()))?;
+        removed.push(uuid);
+    }
+
+    if removed.is_empty() && !skipped_active {
+        return Ok("No matching sessions found.".to_string());
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for uuid in &removed {
+        lines.push(format!("Removed: {uuid}"));
+    }
+    if skipped_active {
+        lines.push(format!("Skipped active session: {active_session}"));
+    }
+    Ok(lines.join("\n"))
+}

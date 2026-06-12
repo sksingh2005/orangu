@@ -79,6 +79,9 @@ pub struct RenderContext<'a> {
     pub actual_height: usize,
     pub x_offset: usize,
     pub banner: Banner,
+    /// Currently unread: carried from `config.feedback` for future use by the
+    /// screen renderer.
+    #[allow(dead_code)]
     pub feedback: bool,
     /// Configured server names, used to hint `/server` argument completions in
     /// the inline ghost.
@@ -1001,4 +1004,197 @@ fn readline_word_end(buffer: &str, cursor: usize) -> usize {
         }
     }
     pos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::*;
+    use std::time::{Duration, Instant};
+    use tempfile::tempdir;
+
+    #[test]
+    fn output_state_keeps_last_ten_thousand_lines() {
+        let mut output_state = OutputState::default();
+        for index in 0..10_005 {
+            output_state.push_text(&format!("line {index}"));
+        }
+
+        assert_eq!(output_state.lines().len(), 10_000);
+        assert_eq!(
+            output_state.lines().first().map(TranscriptLine::as_str),
+            Some("line 5")
+        );
+        assert_eq!(
+            output_state.lines().last().map(TranscriptLine::as_str),
+            Some("line 10004")
+        );
+    }
+
+    #[test]
+    fn output_state_styles_echoed_user_input() {
+        let mut output_state = OutputState::default();
+
+        output_state.push_input("> show README.md");
+        output_state.push_text("plain output");
+
+        assert!(
+            matches!(output_state.lines().first(), Some(TranscriptLine::UserInput(s)) if s == "> show README.md")
+        );
+        assert!(
+            matches!(output_state.lines().get(1), Some(TranscriptLine::Plain(s)) if s == "plain output")
+        );
+    }
+
+    #[test]
+    fn alt_backspace_deletes_previous_bash_word() {
+        let workspace = tempdir().expect("workspace");
+        let mut input_state = InputState::default();
+        input_state.set_buffer("src/tui.rs".to_string());
+        let mut interrupt_state = InterruptState::default();
+        let mut output_state = OutputState::default();
+        let mut viewport = ViewportState::new(80, 80, 24);
+
+        let result = handle_input_event(
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Backspace,
+                KeyModifiers::ALT,
+                KeyEventKind::Press,
+            )),
+            &mut input_state,
+            &mut interrupt_state,
+            &mut output_state,
+            &mut viewport,
+            test_input_context(workspace.path()),
+        );
+
+        assert!(result.redraw);
+        assert!(result.outcome.is_none());
+        assert_eq!(input_state.as_str(), "src/tui.");
+        assert_eq!(input_state.cursor(), "src/tui.".len());
+    }
+
+    #[test]
+    fn alt_d_deletes_next_bash_word() {
+        let workspace = tempdir().expect("workspace");
+        let mut input_state = InputState::default();
+        input_state.set_buffer("src/tui.rs".to_string());
+        input_state.move_home();
+        let mut interrupt_state = InterruptState::default();
+        let mut output_state = OutputState::default();
+        let mut viewport = ViewportState::new(80, 80, 24);
+
+        let result = handle_input_event(
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('d'),
+                KeyModifiers::ALT,
+                KeyEventKind::Press,
+            )),
+            &mut input_state,
+            &mut interrupt_state,
+            &mut output_state,
+            &mut viewport,
+            test_input_context(workspace.path()),
+        );
+
+        assert!(result.redraw);
+        assert!(result.outcome.is_none());
+        assert_eq!(input_state.as_str(), "/tui.rs");
+        assert_eq!(input_state.cursor(), 0);
+    }
+
+    #[test]
+    fn ctrl_left_moves_to_previous_bash_word() {
+        let workspace = tempdir().expect("workspace");
+        let mut input_state = InputState::default();
+        input_state.set_buffer("src/tui.rs".to_string());
+        let mut interrupt_state = InterruptState::default();
+        let mut output_state = OutputState::default();
+        let mut viewport = ViewportState::new(80, 80, 24);
+
+        let result = handle_input_event(
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Left,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )),
+            &mut input_state,
+            &mut interrupt_state,
+            &mut output_state,
+            &mut viewport,
+            test_input_context(workspace.path()),
+        );
+
+        assert!(result.redraw);
+        assert!(result.outcome.is_none());
+        assert_eq!(input_state.cursor(), "src/tui.".len());
+    }
+
+    #[test]
+    fn ctrl_right_moves_to_next_bash_word() {
+        let workspace = tempdir().expect("workspace");
+        let mut input_state = InputState::default();
+        input_state.set_buffer("src/tui.rs".to_string());
+        input_state.move_home();
+        let mut interrupt_state = InterruptState::default();
+        let mut output_state = OutputState::default();
+        let mut viewport = ViewportState::new(80, 80, 24);
+
+        let result = handle_input_event(
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Right,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )),
+            &mut input_state,
+            &mut interrupt_state,
+            &mut output_state,
+            &mut viewport,
+            test_input_context(workspace.path()),
+        );
+
+        assert!(result.redraw);
+        assert!(result.outcome.is_none());
+        assert_eq!(input_state.cursor(), 3);
+    }
+
+    #[test]
+    fn ctrl_w_keeps_whitespace_based_word_deletion() {
+        let mut input_state = InputState::default();
+        input_state.set_buffer("src/tui.rs".to_string());
+
+        input_state.delete_prev_word();
+
+        assert_eq!(input_state.as_str(), "");
+        assert_eq!(input_state.cursor(), 0);
+    }
+
+    #[test]
+    fn idle_refresh_timeout_hits_zero_at_deadline() {
+        let start = Instant::now();
+
+        assert_eq!(
+            idle_status_refresh_timeout(start + Duration::from_secs(60), start),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            idle_status_refresh_timeout(
+                start + Duration::from_secs(60),
+                start + Duration::from_secs(61)
+            ),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn escape_cancel_requires_two_presses_within_timeout() {
+        let mut cancel_state = EscapeCancelState::default();
+        let start = Instant::now();
+
+        assert!(!cancel_state.handle_escape(start));
+        assert!(cancel_state.handle_escape(start + Duration::from_millis(500)));
+
+        assert!(!cancel_state.handle_escape(start + Duration::from_secs(5)));
+        assert!(!cancel_state.handle_escape(start + Duration::from_secs(8)));
+    }
 }

@@ -1,0 +1,398 @@
+// Copyright (C) 2026 The orangu community
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+use super::*;
+
+/// The Alt+r reject window of `/auto_review`, drawn over the panes: a category
+/// selector and a multi-line Markdown comment editor; Tab moves the focus
+/// between them.
+pub struct AutoReviewRejectView<'a> {
+    /// The file being rejected, shown in the title bar.
+    pub path: &'a str,
+    /// The report categories offered by the selector, in display order.
+    pub categories: &'a [&'a str],
+    /// Index of the chosen category.
+    pub category: usize,
+    /// `true` while the focus is on the category selector; `false` while it is
+    /// on the comment editor (where the caret is then drawn).
+    pub selector_focused: bool,
+    /// The comment text, with embedded newlines.
+    pub text: &'a str,
+    /// Byte cursor within `text`.
+    pub cursor: usize,
+}
+
+/// Inputs for the `/auto_review` screen: the categorized report in the left
+/// pane — topped by the status area — and the file checklist (with auto-set
+/// status dots) in the right pane.
+pub struct AutoReviewScreenArgs<'a> {
+    pub files: &'a [ReviewEntry],
+    /// Index of the file highlighted in the right pane: the one being reviewed
+    /// while the run is in progress, or the one picked with Alt+j/Alt+k while
+    /// browsing afterwards. `None` shows no highlight (the run has ended and
+    /// nothing has been picked).
+    pub selected: Option<usize>,
+    /// The rendered report lines shown in the left pane.
+    pub report_lines: &'a [String],
+    pub scroll: usize,
+    pub x_offset: usize,
+    /// The status area's text: the file and category being worked on, e.g.
+    /// `File: src/main.rs (2/5)  Category: Security`.
+    pub status: &'a str,
+    /// Index of the file whose status box shows the white "being reviewed"
+    /// dot. The caller pulses this between `Some` and `None` on its render
+    /// tick, which makes the dot blink.
+    pub reviewing: Option<usize>,
+    /// The run has ended and the report is being browsed: the header shows the
+    /// browse keys (Alt+j/k, Alt+a, Alt+r, Alt+e) instead of the run keys.
+    pub browsing: bool,
+    /// When set, the Alt+r reject window is drawn over the panes.
+    pub reject: Option<AutoReviewRejectView<'a>>,
+    pub current_model: &'a str,
+    pub prompt_branch: Option<&'a str>,
+    pub left_status: Option<StatusFragment>,
+    pub pending_count: usize,
+    pub actual_width: usize,
+    pub actual_height: usize,
+}
+
+/// Number of scrollable body rows in the auto review report pane: one less
+/// than the `/review` panes, since the status area takes the left pane's first
+/// body row (the input window is always empty in auto review mode).
+pub fn auto_review_pane_body_height(
+    actual_height: usize,
+    prompt_branch: Option<&str>,
+    actual_width: usize,
+) -> usize {
+    review_pane_body_height(actual_height, "", prompt_branch, actual_width)
+        .saturating_sub(1)
+        .max(1)
+}
+
+pub fn render_auto_review_screen(args: AutoReviewScreenArgs<'_>) -> String {
+    let width = args.actual_width.max(1);
+    let height = args.actual_height.max(1);
+
+    // Reserve the bottom prompt frame exactly like `/review`. Auto review takes
+    // no typed request, so the input window stays empty.
+    let prompt_prefix = prompt_prefix(args.prompt_branch);
+    let input_lines = wrapped_input_lines("", width, &prompt_prefix);
+    let prompt_frame_height = input_lines.len() + 3;
+    let pane_rows = height.saturating_sub(prompt_frame_height).max(2);
+
+    let content = if let Some(reject) = &args.reject {
+        render_auto_review_reject_panel(reject, width, pane_rows)
+    } else {
+        render_auto_review_panes(&args, width, pane_rows)
+    };
+    let mut screen = content.join("\r\n");
+    screen.push_str("\r\n");
+    screen.push_str(&render_prompt_frame(PromptFrameArgs {
+        header_height: pane_rows,
+        current_model: args.current_model,
+        left_status: args.left_status,
+        pending_count: args.pending_count,
+        prompt_prefix: &prompt_prefix,
+        input: "",
+        cursor: 0,
+        ghost: "",
+        height,
+        actual_width: width,
+    }));
+    screen
+}
+
+/// Render the two auto review panes (report + file checklist) as exactly
+/// `pane_rows` rows: one header row plus `pane_rows - 1` body rows. The first
+/// body row of the left pane is the status area — it stays inside the left
+/// pane, so the file checklist keeps every body row on the right.
+fn render_auto_review_panes(
+    args: &AutoReviewScreenArgs<'_>,
+    width: usize,
+    pane_rows: usize,
+) -> Vec<String> {
+    let right_width = review_right_width(args.files, width);
+    let left_width = width.saturating_sub(right_width + 1).max(1);
+    let body_height = pane_rows.saturating_sub(1);
+
+    // Keep the highlighted file (if any) visible in the right pane.
+    let anchor = args.selected.unwrap_or(0);
+    let list_start = if anchor >= body_height {
+        anchor - body_height + 1
+    } else {
+        0
+    };
+
+    // While the run is in progress the header offers the run keys; once the
+    // report is being browsed it offers the per-file browse keys instead.
+    let keys = if args.browsing {
+        "Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  Alt+x Exit"
+    } else {
+        "Esc Esc Cancel  Alt+x Exit"
+    };
+    let title = format!(
+        "Auto review: {}  {keys}",
+        args.prompt_branch.unwrap_or("(detached HEAD)"),
+    );
+    let right_header = format!("Files ({})", args.files.len());
+
+    let mut rows: Vec<String> = Vec::with_capacity(pane_rows);
+    rows.push(format!(
+        "{}{}{}",
+        review_pane_cell(&title, 0, left_width),
+        REVIEW_SEPARATOR,
+        review_pane_cell(&right_header, 0, right_width),
+    ));
+
+    for row in 0..body_height {
+        let left = if row == 0 {
+            // The status area: a highlighted bar across the left pane showing
+            // which file and category is being worked on.
+            review_highlight(&review_pane_cell(args.status, 0, left_width))
+        } else {
+            match args.report_lines.get(args.scroll + row - 1) {
+                Some(line) => review_pane_cell(line, args.x_offset, left_width),
+                None => review_pane_cell("", 0, left_width),
+            }
+        };
+        let file_index = list_start + row;
+        let right = match args.files.get(file_index) {
+            Some(file) => {
+                // The file under review blinks a white dot in its status box.
+                let status_box = if args.reviewing == Some(file_index) {
+                    format!("[{STATUS_WHITE}●{ANSI_RESET}]")
+                } else {
+                    review_status_box(file.status)
+                };
+                let entry = format!("{status_box} {}", file.path);
+                let cell = review_pane_cell(&entry, 0, right_width);
+                if args.selected == Some(file_index) {
+                    review_highlight(&cell)
+                } else {
+                    cell
+                }
+            }
+            None => review_pane_cell("", 0, right_width),
+        };
+        rows.push(format!("{left}{REVIEW_SEPARATOR}{right}"));
+    }
+
+    rows
+}
+
+/// Push a reject-window section label — inverted while its section has the
+/// focus — and the grey underline fitted to the label's width.
+fn push_reject_section_label(rows: &mut Vec<String>, label: &str, focused: bool, width: usize) {
+    let text = if focused {
+        review_highlight(label)
+    } else {
+        label.to_string()
+    };
+    rows.push(review_pane_cell(&text, 0, width));
+    let underline = format!(
+        "\x1b[38;2;88;88;88m{}{ANSI_RESET}",
+        "─".repeat(label.chars().count())
+    );
+    rows.push(review_pane_cell(&underline, 0, width));
+}
+
+/// Render the `/auto_review` reject window filling the pane region: a title
+/// bar, the `Category:` selector, and the `Comment:` editor (multi-line
+/// Markdown) taking the remaining rows. Each section label sits over a grey
+/// underline of its own width and is inverted while its section has the
+/// focus; the chosen category carries a dot in its box (and the selection
+/// highlight while the selector has the focus), and the editor draws its
+/// caret only while it has the focus.
+fn render_auto_review_reject_panel(
+    reject: &AutoReviewRejectView<'_>,
+    width: usize,
+    pane_rows: usize,
+) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::with_capacity(pane_rows);
+
+    let header = format!(
+        "Reject: {}  (Tab Switch focus · ↑/↓ Category · Alt+Enter Save · Esc Cancel)",
+        reject.path
+    );
+    rows.push(review_highlight(&review_pane_cell(&header, 0, width)));
+    rows.push(review_pane_cell("", 0, width));
+
+    push_reject_section_label(&mut rows, "Category:", reject.selector_focused, width);
+    for (index, name) in reject.categories.iter().enumerate() {
+        let chosen = index == reject.category;
+        let marker = if chosen {
+            format!("[{REVIEW_COMMENT_MARKER}]")
+        } else {
+            "[ ]".to_string()
+        };
+        let cell = review_pane_cell(&format!("{marker} {name}"), 0, width);
+        if chosen && reject.selector_focused {
+            rows.push(review_highlight(&cell));
+        } else {
+            rows.push(cell);
+        }
+    }
+
+    rows.push(review_pane_cell("", 0, width));
+    push_reject_section_label(&mut rows, "Comment:", !reject.selector_focused, width);
+
+    // The editor takes every remaining row, scrolled to keep the caret
+    // visible.
+    let editor_rows = pane_rows.saturating_sub(rows.len()).max(1);
+    let inner_width = width.max(1);
+    let wrapped = wrapped_multiline_lines(reject.text, inner_width);
+    let (cursor_row, cursor_col) =
+        multiline_cursor_position(reject.text, reject.cursor, inner_width);
+    let start = cursor_row.saturating_sub(editor_rows - 1);
+    for row in 0..editor_rows {
+        let index = start + row;
+        let mut content = wrapped.get(index).cloned().unwrap_or_default();
+        if index == cursor_row && !reject.selector_focused {
+            content = comment_caret(&content, cursor_col, inner_width);
+        }
+        rows.push(review_pane_cell(&content, 0, width));
+    }
+
+    rows.truncate(pane_rows);
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::test_fixtures::*;
+
+    #[test]
+    fn auto_review_screen_places_the_status_area_below_the_header() {
+        // The path is longer than the `Files (1)` header, so the right pane is
+        // wide enough to show the header unclipped.
+        let files = vec![review_entry("src/main.rs", ReviewStatus::Approved, &[])];
+        let report: Vec<String> = vec!["Overall".to_string(), "  - ready".to_string()];
+        let screen = render_auto_review_screen(auto_review_args(&files, &report, 80, 12));
+        let rows: Vec<&str> = screen.split("\r\n").collect();
+
+        // The header row comes first (tool title + file-list header); the
+        // status area sits below it, inside the left pane, with the file
+        // checklist continuing alongside on the right.
+        assert!(rows[0].contains("Auto review: feature/x"), "{:?}", rows[0]);
+        assert!(rows[0].contains("Files (1)"), "{:?}", rows[0]);
+        assert!(rows[1].contains("Category: Code"), "{:?}", rows[1]);
+        assert!(rows[1].contains("Time: 5s"), "{:?}", rows[1]);
+        assert!(rows[1].contains("src/main.rs"), "{:?}", rows[1]);
+
+        // The report fills the left pane below the status area.
+        assert!(rows[2].contains("Overall"), "{:?}", rows[2]);
+        assert!(!rows[2].contains("src/main.rs"), "{:?}", rows[2]);
+        assert!(rows[3].contains("  - ready"), "{:?}", rows[3]);
+    }
+
+    #[test]
+    fn auto_review_reviewing_file_shows_a_white_dot() {
+        // Match the box opening and the colored dot; the trailing reset is
+        // rewritten when the row carries the selection highlight.
+        let white_dot = format!("[{}●", super::STATUS_WHITE);
+        let files = vec![review_entry("src/main.rs", ReviewStatus::Unreviewed, &[])];
+        let report: Vec<String> = Vec::new();
+
+        // The blink-off phase (or no file under review) keeps the empty box.
+        let screen = render_auto_review_screen(auto_review_args(&files, &report, 80, 12));
+        assert!(screen.contains("[ ] src/main.rs"), "{screen:?}");
+        assert!(!screen.contains(&white_dot), "{screen:?}");
+
+        // The blink-on phase paints the white "being reviewed" dot.
+        let mut args = auto_review_args(&files, &report, 80, 12);
+        args.reviewing = Some(0);
+        let screen = render_auto_review_screen(args);
+        assert!(screen.contains(&white_dot), "{screen:?}");
+    }
+
+    #[test]
+    fn auto_review_header_offers_browse_keys_once_the_run_ends() {
+        let files = vec![review_entry("src/main.rs", ReviewStatus::Approved, &[])];
+        let report: Vec<String> = Vec::new();
+
+        // During the run only the run keys are offered.
+        let screen = render_auto_review_screen(auto_review_args(&files, &report, 120, 12));
+        assert!(screen.contains("Esc Esc Cancel"), "{screen:?}");
+        assert!(!screen.contains("Alt+a Approve"), "{screen:?}");
+
+        // Browsing swaps in the per-file keys.
+        let mut args = auto_review_args(&files, &report, 120, 12);
+        args.browsing = true;
+        let screen = render_auto_review_screen(args);
+        assert!(screen.contains("Alt+j/k Switch file"), "{screen:?}");
+        assert!(screen.contains("Alt+a Approve"), "{screen:?}");
+        assert!(screen.contains("Alt+r Reject"), "{screen:?}");
+        assert!(screen.contains("Alt+e Open"), "{screen:?}");
+    }
+
+    #[test]
+    fn auto_review_reject_window_covers_the_panes() {
+        let files = vec![review_entry("src/main.rs", ReviewStatus::Rejected, &[])];
+        let report: Vec<String> = vec!["Overall".to_string()];
+        let categories = ["Overall", "Code", "Security"];
+        let mut args = auto_review_args(&files, &report, 80, 16);
+        args.browsing = true;
+        args.reject = Some(super::AutoReviewRejectView {
+            path: "src/main.rs",
+            categories: &categories,
+            category: 1,
+            selector_focused: true,
+            text: "first line\nsecond line",
+            cursor: 0,
+        });
+        let screen = render_auto_review_screen(args);
+
+        // Title bar, the section labels, the category selector with the
+        // chosen category marked, and the editor showing both logical lines.
+        assert!(screen.contains("Reject: src/main.rs"), "{screen:?}");
+        assert!(screen.contains("Category:"), "{screen:?}");
+        assert!(screen.contains("[ ] Overall"), "{screen:?}");
+        assert!(
+            screen.contains("\u{1b}[38;2;230;200;120m●"),
+            "chosen category not marked: {screen:?}"
+        );
+        assert!(screen.contains("Comment:"), "{screen:?}");
+        assert!(screen.contains("first line"), "{screen:?}");
+        assert!(screen.contains("second line"), "{screen:?}");
+        // Each label sits over a grey underline of exactly its own width.
+        let underline = |label: &str| {
+            format!(
+                "\u{1b}[38;2;88;88;88m{}{ANSI_RESET}",
+                "─".repeat(label.chars().count())
+            )
+        };
+        assert!(screen.contains(&underline("Category:")), "{screen:?}");
+        assert!(screen.contains(&underline("Comment:")), "{screen:?}");
+        // The editor keeps the window's default background — no comment-box
+        // green and no gutter bar in front of the comment part.
+        assert!(!screen.contains("\u{1b}[48;2;38;48;38m"), "{screen:?}");
+        assert!(!screen.contains('▕'), "{screen:?}");
+        // The panes are hidden while the window is open.
+        assert!(!screen.contains("Files (1)"), "{screen:?}");
+    }
+
+    #[test]
+    fn auto_review_pane_body_height_reserves_the_status_row() {
+        // One row less than the `/review` panes (the status area takes it),
+        // never less than one.
+        let review = review_pane_body_height(24, "", Some("main"), 80);
+        assert_eq!(
+            auto_review_pane_body_height(24, Some("main"), 80),
+            review - 1
+        );
+        assert_eq!(auto_review_pane_body_height(1, Some("main"), 80), 1);
+    }
+}
