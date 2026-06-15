@@ -281,6 +281,10 @@ async fn run() -> Result<()> {
     // so `/comment <number> with [auto] review` can post them.
     let mut last_review_report: Option<String> = None;
     let mut last_auto_review_report: Option<String> = None;
+    // Whether the most recently produced report was the `/auto_review` one, so
+    // `/export review` exports the last review the user ran rather than always
+    // preferring one kind over the other.
+    let mut last_review_was_auto = false;
     // When set, the post-loop exec resumes this session instead of the current
     // one — used by `/session <UUID>` to switch sessions in place.
     let mut resume_override: Option<String> = None;
@@ -832,6 +836,7 @@ async fn run() -> Result<()> {
                 let (lines, markdown) =
                     review_exit_output(&review.files, &review.comments, &review.general_notes);
                 last_review_report = Some(markdown.clone());
+                last_review_was_auto = false;
                 completion::set_available_review_reports(
                     last_review_report.is_some(),
                     last_auto_review_report.is_some(),
@@ -886,6 +891,7 @@ async fn run() -> Result<()> {
                 // is also kept for `/comment <n> with auto review`.
                 let (lines, clipboard) = auto_review_exit_output(&state);
                 last_auto_review_report = Some(clipboard.clone());
+                last_review_was_auto = true;
                 completion::set_available_review_reports(
                     last_review_report.is_some(),
                     last_auto_review_report.is_some(),
@@ -909,10 +915,14 @@ async fn run() -> Result<()> {
                         export::export_console(&workspace, output_state.lines(), &active_model_id)
                     }
                     ExportTarget::Review => {
-                        match last_review_report
-                            .as_deref()
-                            .or(last_auto_review_report.as_deref())
-                        {
+                        // Export whichever review ran most recently, falling
+                        // back to the other when only one has run.
+                        let (first, second) = if last_review_was_auto {
+                            (&last_auto_review_report, &last_review_report)
+                        } else {
+                            (&last_review_report, &last_auto_review_report)
+                        };
+                        match first.as_deref().or(second.as_deref()) {
                             Some(report) => {
                                 export::export_review(&workspace, report, &active_model_id)
                             }
