@@ -46,6 +46,11 @@ pub struct AutoReviewScreenArgs<'a> {
     pub selected: Option<usize>,
     /// The rendered report lines shown in the left pane.
     pub report_lines: &'a [String],
+    /// The line range (start inclusive, end exclusive, into `report_lines`) of
+    /// the report item highlighted with the Up/Down item cursor while browsing.
+    /// Those lines are drawn with the line-cursor background. `None` while the
+    /// run is in progress or when no item is highlighted.
+    pub selected_lines: Option<(usize, usize)>,
     pub scroll: usize,
     pub x_offset: usize,
     /// The status area's text: the file and category being worked on, e.g.
@@ -138,7 +143,7 @@ fn render_auto_review_panes(
     // While the run is in progress the header offers the run keys; once the
     // report is being browsed it offers the per-file browse keys instead.
     let keys = if args.browsing {
-        "Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  Alt+x Exit"
+        "Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  - Remove  Alt+x Exit"
     } else {
         "Esc Esc Cancel  Alt+x Exit"
     };
@@ -162,8 +167,19 @@ fn render_auto_review_panes(
             // which file and category is being worked on.
             review_highlight(&review_pane_cell(args.status, 0, left_width))
         } else {
-            match args.report_lines.get(args.scroll + row - 1) {
-                Some(line) => review_pane_cell(line, args.x_offset, left_width),
+            let line_index = args.scroll + row - 1;
+            match args.report_lines.get(line_index) {
+                Some(line) => {
+                    let cell = review_pane_cell(line, args.x_offset, left_width);
+                    // Lines of the item under the Up/Down cursor get the
+                    // line-cursor background, like the `/review` line cursor.
+                    match args.selected_lines {
+                        Some((start, end)) if line_index >= start && line_index < end => {
+                            review_line_highlight(&cell)
+                        }
+                        _ => cell,
+                    }
+                }
                 None => review_pane_cell("", 0, left_width),
             }
         };
@@ -382,6 +398,52 @@ mod tests {
         assert!(!screen.contains('▕'), "{screen:?}");
         // The panes are hidden while the window is open.
         assert!(!screen.contains("Files (1)"), "{screen:?}");
+    }
+
+    #[test]
+    fn auto_review_browse_header_documents_item_keys() {
+        // The Up/Down item cursor and `-` removal are documented in the browse
+        // key help, before Alt+x.
+        let files = vec![review_entry("src/main.rs", ReviewStatus::Rejected, &[])];
+        let report: Vec<String> = Vec::new();
+        let mut args = auto_review_args(&files, &report, 200, 12);
+        args.browsing = true;
+        let screen = render_auto_review_screen(args);
+        let header = screen.split("\r\n").next().unwrap_or_default();
+        let item = header.find("↑/↓ Item").expect("item key documented");
+        let remove = header.find("- Remove").expect("remove key documented");
+        let exit = header.find("Alt+x").expect("exit key documented");
+        assert!(item < exit && remove < exit, "{header:?}");
+    }
+
+    #[test]
+    fn auto_review_selected_item_lines_get_the_cursor_background() {
+        // The line-cursor background marks the highlighted item's lines and
+        // nothing else.
+        let files = vec![review_entry("src/main.rs", ReviewStatus::Rejected, &[])];
+        let report: Vec<String> = vec![
+            "Code".to_string(),
+            String::new(),
+            "- finding one".to_string(),
+            "- finding two".to_string(),
+        ];
+        let cursor_bg = "\u{1b}[48;2;60;60;90m";
+
+        // No selection: no line carries the cursor background.
+        let screen = render_auto_review_screen(auto_review_args(&files, &report, 80, 12));
+        assert!(!screen.contains(cursor_bg), "{screen:?}");
+
+        // Selecting the second finding's line highlights only it.
+        let mut args = auto_review_args(&files, &report, 80, 12);
+        args.browsing = true;
+        args.selected_lines = Some((3, 4));
+        let screen = render_auto_review_screen(args);
+        let highlighted: Vec<&str> = screen
+            .split("\r\n")
+            .filter(|row| row.contains(cursor_bg))
+            .collect();
+        assert_eq!(highlighted.len(), 1, "{screen:?}");
+        assert!(highlighted[0].contains("finding two"), "{highlighted:?}");
     }
 
     #[test]

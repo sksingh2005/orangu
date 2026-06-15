@@ -562,7 +562,7 @@ The view opens with the tool header row at the top and under it the two panes, e
 - **Left pane** — below the status area, the **report**, rendered from Markdown with the syntax markers consumed: one bold heading per category (Overall, Code, Security, Memory, Performance, Test Suite, Documentation), each listing the findings collected so far as a bullet list with the file names in bold, ending with the **Conclusion**. A category that has produced nothing yet shows `(pending)` while the run is in progress, and `No issues found` once it is done. The pane scrolls and pans independently.
 - **Right pane** — the checklist of changed files, one per row, as in `/review`. The file currently being reviewed is highlighted and its status box blinks a white dot until its review resolves to green or red. Once the run ends (or the whole-change pass starts) the highlight is cleared — nothing is being reviewed anymore; `Alt+j`/`Alt+k` bring it back to move through the list while browsing.
 
-While the run is in progress the header row offers the run keys (`Esc Esc Cancel  Alt+x Exit`); once the run has ended it switches to the browse keys (`Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  Alt+x Exit`).
+While the run is in progress the header row offers the run keys (`Esc Esc Cancel  Alt+x Exit`); once the run has ended it switches to the browse keys (`Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  - Remove  Alt+x Exit`).
 
 ```
  Auto review: feature/x ...                          |Files (3)
@@ -599,6 +599,9 @@ While the model works, the status bar shows `Thinking (...)` until the first tok
 
 Once the run has ended (done or cancelled), the report stays on screen and you can override the model's verdicts file by file. `Alt+j`/`Alt+k` move the highlight through the file list — from no highlight, `Alt+j` starts at the first file and `Alt+k` at the last.
 
+You can also work through the report **item by item** in the left pane. `Up`/`Down` move a highlight between the individual report items — the findings and the Conclusion entries, never the category headings — scrolling the pane as needed to keep the highlighted item in view (from no highlight, `Down` starts at the first item and `Up` at the last). Moving the highlight also points the file list on the right at the item's file, so `Alt+a`/`Alt+r` act on it.
+
+- **`-` — remove the highlighted item.** A **finding** is dropped from its category; if that was the **last** finding recorded against its file, the file is approved (its dot turns green) and it drops out of the Conclusion. Removing a **Conclusion** item approves the whole file it stands for, clearing every finding recorded against it across the report — the same as approving that file. So you can approve the patch outright by removing all the flagged items: once nothing is left, every file is approved and the verdict reads `orangu approves this patch`.
 - **`Alt+a` — approve the highlighted file.** Its dot turns green and **every finding recorded against it is removed from the report** — the model's findings and your own rejection comments alike — so an approved file no longer appears in any category, in the exit report, or on the clipboard. The Conclusion follows the file statuses, so approving the last rejected file flips the verdict to `orangu approves this patch`.
 - **`Alt+r` — reject the highlighted file.** A reject window opens over the panes with a **category selector** (Overall, Code, Security, Memory, Performance, Test Suite, Documentation) and a **multi-line Markdown comment editor**. `Tab` moves the focus between the two; in the selector `Up`/`Down` pick the category (`Enter` moves on to the editor), and in the editor `Enter` inserts a newline while `Up`/`Down`, `Home`/`End`, and the usual editing keys move and edit. Press `Alt+Enter` to save — the file's dot turns red and the comment is appended to the chosen category, prefixed with the file path in bold — or `Esc` to discard the window. Saving with an empty comment still rejects the file without adding a finding. `Alt+r` can be repeated on the same file; each saved comment is kept.
 - **`Alt+e` — open the highlighted file** in your `$EDITOR`, exactly like `Alt+e` in `/review`: terminal editors open in a new window and GUI editors open their own, leaving the report on screen.
@@ -624,7 +627,8 @@ The Markdown report is also kept for the rest of the session, so `/comment <numb
 | `Alt+a` | Approve the highlighted file and drop its findings from the report |
 | `Alt+r` | Reject the highlighted file: pick a category, write a Markdown comment |
 | `Alt+e` | Open the highlighted file in your configured editor |
-| `Up` / `Down` | Scroll the report one line at a time |
+| `Up` / `Down` | Move the item highlight through the report's findings and Conclusion entries (after the run) |
+| `-` | Remove the highlighted item; clearing a file's last item approves it (after the run) |
 | `PageUp` / `PageDown` | Scroll the report by a full page |
 | `Left` / `Right` | Pan the report horizontally for long lines |
 

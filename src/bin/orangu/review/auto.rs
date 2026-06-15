@@ -177,6 +177,28 @@ pub(crate) struct AutoReviewReject {
     pub(crate) editor: InputState,
 }
 
+/// One navigable item in the rendered report: which finding it is (so it can
+/// be removed) and the report line range it occupies (so it can be highlighted
+/// and scrolled to). Built by `AutoReviewState::build_report`, in the order the
+/// items appear down the left pane.
+pub(crate) struct AutoReviewItem {
+    /// First report line of the item (inclusive).
+    pub(crate) start: usize,
+    /// One past the last report line of the item (exclusive).
+    pub(crate) end: usize,
+    pub(crate) kind: AutoReviewItemKind,
+}
+
+/// What a navigable report item refers to: a per-category finding, or a
+/// `Conclusion` entry standing in for a whole file.
+pub(crate) enum AutoReviewItemKind {
+    /// A finding in `sections[section]` at the given index.
+    Finding { section: usize, index: usize },
+    /// A `Conclusion` entry (a rejected or not-reviewed file), carrying the
+    /// file path it stands for. Removing it approves that whole file.
+    Conclusion { path: String },
+}
+
 /// Interactive state for `/auto_review` mode.
 pub(crate) struct AutoReviewState {
     pub(crate) files: Vec<ReviewEntry>,
@@ -185,6 +207,10 @@ pub(crate) struct AutoReviewState {
     /// browsing afterwards. `None` once the run ends, until the user
     /// navigates.
     pub(crate) selected: Option<usize>,
+    /// The report item highlighted in the left pane while browsing: an index
+    /// into `build_report`'s item list, moved by Up/Down and acted on by `-`.
+    /// `None` until the user navigates (or once the report has no items left).
+    pub(crate) selected_item: Option<usize>,
     /// The file whose categories are currently being reviewed; its status box
     /// blinks a white dot. `None` during the whole-change pass and after the
     /// run.
@@ -223,6 +249,7 @@ impl AutoReviewState {
         Self {
             files: launch.files,
             selected: None,
+            selected_item: None,
             reviewing: None,
             scroll: 0,
             x_offset: 0,
@@ -328,21 +355,35 @@ impl AutoReviewState {
     }
 
     /// The rejected and not-reviewed files listed under the `Conclusion`
-    /// verdict (in Markdown bold), grouped by their status, rejected first.
-    /// Empty when every file is approved.
-    pub(crate) fn conclusion_findings(&self) -> Vec<String> {
-        let mut lines = Vec::new();
+    /// verdict, each as its source file path and the rendered line (in Markdown
+    /// bold), grouped by their status, rejected first. Empty when every file is
+    /// approved.
+    pub(crate) fn conclusion_entries(&self) -> Vec<(String, String)> {
+        let mut entries = Vec::new();
         for file in &self.files {
             if file.status == ReviewStatus::Rejected {
-                lines.push(format!("Rejected: **{}**", file.path));
+                entries.push((file.path.clone(), format!("Rejected: **{}**", file.path)));
             }
         }
         for file in &self.files {
             if file.status == ReviewStatus::Unreviewed {
-                lines.push(format!("Not reviewed: **{}**", file.path));
+                entries.push((
+                    file.path.clone(),
+                    format!("Not reviewed: **{}**", file.path),
+                ));
             }
         }
-        lines
+        entries
+    }
+
+    /// The rejected and not-reviewed files listed under the `Conclusion`
+    /// verdict (in Markdown bold), grouped by their status, rejected first.
+    /// Empty when every file is approved.
+    pub(crate) fn conclusion_findings(&self) -> Vec<String> {
+        self.conclusion_entries()
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect()
     }
 
     /// The left-pane report, rendered for the console: each category as a
@@ -351,8 +392,25 @@ impl AutoReviewState {
     /// `**file**` names resolved to bold, with a dimmed placeholder while the
     /// run is still in progress, ending with the synthesized `Conclusion`.
     pub(crate) fn report_lines(&self) -> Vec<String> {
+        self.build_report().0
+    }
+
+    /// The navigable items of the report — the per-category findings and the
+    /// `Conclusion` entries — in the order they appear down the left pane, each
+    /// with the report line range it occupies. Empty while the run is still in
+    /// progress (only placeholders are shown then).
+    pub(crate) fn report_items(&self) -> Vec<AutoReviewItem> {
+        self.build_report().1
+    }
+
+    /// Render the report lines and, alongside them, the navigable items (each
+    /// with its line range). Up/Down move between these items and `-` removes
+    /// the highlighted one, so the renderer and the browse loop agree on what a
+    /// "line" the user is pointing at maps back to.
+    pub(crate) fn build_report(&self) -> (Vec<String>, Vec<AutoReviewItem>) {
         let pending = !(self.done || self.cancelled);
         let mut lines = Vec::new();
+        let mut items = Vec::new();
         for (index, name) in AUTO_REVIEW_CATEGORIES.iter().enumerate() {
             lines.push(format!("\x1b[1m{name}\x1b[0m"));
             lines.push(String::new());
@@ -364,9 +422,18 @@ impl AutoReviewState {
                     lines.push("No issues found".to_string());
                 }
             } else {
-                for finding in section {
+                for (finding_index, finding) in section.iter().enumerate() {
+                    let start = lines.len();
                     let bullet = render_markdown_for_console(&auto_review_finding_bullet(finding));
                     lines.extend(bullet.lines().map(str::to_string));
+                    items.push(AutoReviewItem {
+                        start,
+                        end: lines.len(),
+                        kind: AutoReviewItemKind::Finding {
+                            section: index,
+                            index: finding_index,
+                        },
+                    });
                 }
             }
             lines.push(String::new());
@@ -379,18 +446,33 @@ impl AutoReviewState {
             // The verdict stands alone in bold; the affected files follow as a
             // bullet list.
             lines.push(self.conclusion_verdict_line());
-            let findings = self.conclusion_findings();
-            if !findings.is_empty() {
+            let entries = self.conclusion_entries();
+            if !entries.is_empty() {
                 lines.push(String::new());
-                for line in findings {
+                for (path, line) in entries {
+                    let start = lines.len();
                     lines.push(render_markdown_for_console(&format!("- {line}")));
+                    items.push(AutoReviewItem {
+                        start,
+                        end: lines.len(),
+                        kind: AutoReviewItemKind::Conclusion { path },
+                    });
                 }
             }
         }
         // The report closes with the orangu version and reviewing model.
         lines.push(String::new());
         lines.push(render_markdown_for_console(&self.generated_by_markdown()));
-        lines
+        (lines, items)
+    }
+
+    /// The report line range of the highlighted item, for the renderer to
+    /// invert. `None` when no item is highlighted or the index is stale.
+    pub(crate) fn selected_item_span(&self) -> Option<(usize, usize)> {
+        let index = self.selected_item?;
+        self.report_items()
+            .get(index)
+            .map(|item| (item.start, item.end))
     }
 
     /// Clamp scroll/pan offsets to the report's size.
@@ -447,15 +529,158 @@ impl AutoReviewState {
         let Some(path) = self.files.get(index).map(|file| file.path.clone()) else {
             return;
         };
-        self.set_file_status(index, ReviewStatus::Approved);
-        // A finding for the file is bold-prefixed with either `**path**:` (no
-        // line) or `**path:line**:`, so match both forms.
-        let without_line = format!("**{path}**:");
-        let with_line = format!("**{path}:");
+        self.approve_path(&path);
+        self.clamp_selected_item();
+    }
+
+    /// The two finding prefixes that bind a finding to `path`: `**path**:` (no
+    /// line, e.g. an Alt+r comment) and `**path:` (a `**path:line**:`
+    /// location), as written by `apply_category_result`, `commit_reject`, and
+    /// the failure records.
+    fn finding_prefixes(path: &str) -> (String, String) {
+        (format!("**{path}**:"), format!("**{path}:"))
+    }
+
+    /// Approve `path`: turn its dot green and drop every finding recorded
+    /// against it from all report categories. Shared by Alt+a and by removing
+    /// the file's `Conclusion` item.
+    fn approve_path(&mut self, path: &str) {
+        if let Some(file) = self.files.iter_mut().find(|file| file.path == path) {
+            file.status = ReviewStatus::Approved;
+        }
+        let (without_line, with_line) = Self::finding_prefixes(path);
         for section in &mut self.sections {
             section.retain(|finding| {
                 !finding.starts_with(&without_line) && !finding.starts_with(&with_line)
             });
+        }
+    }
+
+    /// Whether any report category still holds a finding bound to `path`.
+    fn file_has_findings(&self, path: &str) -> bool {
+        let (without_line, with_line) = Self::finding_prefixes(path);
+        self.sections.iter().any(|section| {
+            section.iter().any(|finding| {
+                finding.starts_with(&without_line) || finding.starts_with(&with_line)
+            })
+        })
+    }
+
+    /// The file path a finding is bound to — the `path` inside its leading
+    /// `**path**` or `**path:line**` location — or `None` for a finding with no
+    /// file location (e.g. a whole-change `Overall` bullet).
+    fn finding_path(finding: &str) -> Option<&str> {
+        let rest = finding.strip_prefix("**")?;
+        let inner = &rest[..rest.find("**")?];
+        Some(inner.split_once(':').map_or(inner, |(path, _)| path))
+    }
+
+    /// Up/Down while browsing: move the highlight to the next report item,
+    /// starting at the first item from no highlight. Also moves the file
+    /// highlight to the item's file so Alt+a/Alt+r act on it.
+    pub(crate) fn select_next_item(&mut self) {
+        let items = self.report_items();
+        if items.is_empty() {
+            self.selected_item = None;
+            return;
+        }
+        let next = match self.selected_item {
+            Some(index) => (index + 1).min(items.len() - 1),
+            None => 0,
+        };
+        self.selected_item = Some(next);
+        self.sync_selected_to_item(&items);
+    }
+
+    /// Up/Down while browsing: move the highlight to the previous report item,
+    /// starting at the last item from no highlight.
+    pub(crate) fn select_prev_item(&mut self) {
+        let items = self.report_items();
+        if items.is_empty() {
+            self.selected_item = None;
+            return;
+        }
+        let prev = match self.selected_item {
+            Some(index) => index.saturating_sub(1),
+            None => items.len() - 1,
+        };
+        self.selected_item = Some(prev);
+        self.sync_selected_to_item(&items);
+    }
+
+    /// Point the right-pane file highlight at the file owning the highlighted
+    /// item, so the panes agree and Alt+a/Alt+r act on the right file. Items
+    /// without a file location (whole-change `Overall` bullets) leave it put.
+    fn sync_selected_to_item(&mut self, items: &[AutoReviewItem]) {
+        let Some(item) = self.selected_item.and_then(|index| items.get(index)) else {
+            return;
+        };
+        let path = match &item.kind {
+            AutoReviewItemKind::Conclusion { path } => Some(path.as_str()),
+            AutoReviewItemKind::Finding { section, index } => self.sections[*section]
+                .get(*index)
+                .and_then(|finding| Self::finding_path(finding)),
+        };
+        if let Some(path) = path
+            && let Some(file_index) = self.files.iter().position(|file| file.path == path)
+        {
+            self.selected = Some(file_index);
+        }
+    }
+
+    /// `-` while browsing: remove the highlighted item from its list. Removing
+    /// a finding that leaves its file with no other findings approves that file
+    /// (and so drops it from the Conclusion); removing a `Conclusion` item
+    /// approves the whole file it stands for, clearing all of its findings.
+    pub(crate) fn remove_selected_item(&mut self) {
+        let items = self.report_items();
+        let Some(item) = self.selected_item.and_then(|index| items.get(index)) else {
+            return;
+        };
+        match &item.kind {
+            AutoReviewItemKind::Finding { section, index } => {
+                let (section, index) = (*section, *index);
+                let path = self.sections[section]
+                    .get(index)
+                    .and_then(|finding| Self::finding_path(finding).map(str::to_string));
+                self.sections[section].remove(index);
+                // Approving the file once its last finding is gone drops it from
+                // the Conclusion; a finding with no file location just leaves.
+                if let Some(path) = path
+                    && !self.file_has_findings(&path)
+                {
+                    self.approve_path(&path);
+                }
+            }
+            AutoReviewItemKind::Conclusion { path } => {
+                let path = path.clone();
+                self.approve_path(&path);
+            }
+        }
+        self.clamp_selected_item();
+    }
+
+    /// Keep `selected_item` pointing at a real item after the report shrinks:
+    /// clamp it to the last item, or clear it when nothing is left.
+    fn clamp_selected_item(&mut self) {
+        let count = self.report_items().len();
+        self.selected_item = match self.selected_item {
+            _ if count == 0 => None,
+            Some(index) => Some(index.min(count - 1)),
+            None => None,
+        };
+    }
+
+    /// Scroll so the highlighted item's lines sit within the visible body,
+    /// nudging the report up or down only as far as needed.
+    pub(crate) fn ensure_item_visible(&mut self, body_height: usize) {
+        let Some((start, end)) = self.selected_item_span() else {
+            return;
+        };
+        if start < self.scroll {
+            self.scroll = start;
+        } else if end > self.scroll + body_height {
+            self.scroll = end.saturating_sub(body_height);
         }
     }
 
@@ -882,6 +1107,12 @@ pub(crate) fn print_auto_review_screen(
             browsing: state.done || state.cancelled,
             reject,
             report_lines: &report_lines,
+            // Highlight the Up/Down item cursor only while browsing the report.
+            selected_lines: if state.done || state.cancelled {
+                state.selected_item_span()
+            } else {
+                None
+            },
             scroll: state.scroll,
             x_offset: state.x_offset,
             status: &status_text,
@@ -1262,6 +1493,7 @@ pub(crate) fn run_auto_review_browse(
         let right_width = orangu::tui::review_right_width(&state.files, viewport.actual_width);
         let left_width = viewport.actual_width.saturating_sub(right_width + 1).max(1);
         state.clamp(body_height, left_width);
+        state.ensure_item_visible(body_height);
         print_auto_review_screen(state, viewport, chrome, None, false);
         std::io::stdout().flush()?;
 
@@ -1366,8 +1598,11 @@ pub(crate) fn run_auto_review_browse(
                     state.status = format!("Open {path} failed: {err:#}");
                 }
             }
-            (KeyCode::Up, _) => state.scroll = state.scroll.saturating_sub(1),
-            (KeyCode::Down, _) => state.scroll = state.scroll.saturating_add(1),
+            // Once the run is done Up/Down move between report items (not
+            // headings) and `-` removes the highlighted one.
+            (KeyCode::Up, _) => state.select_prev_item(),
+            (KeyCode::Down, _) => state.select_next_item(),
+            (KeyCode::Char('-'), false) => state.remove_selected_item(),
             (KeyCode::Left, _) => state.x_offset = state.x_offset.saturating_sub(1),
             (KeyCode::Right, _) => state.x_offset = state.x_offset.saturating_add(1),
             (KeyCode::PageUp, _) => state.scroll = state.scroll.saturating_sub(body_height),
@@ -1542,6 +1777,142 @@ mod tests {
             vec!["**b.rs:7**: another issue".to_string()]
         );
         assert!(state.sections[2].is_empty());
+    }
+
+    #[test]
+    fn auto_review_item_navigation_walks_findings_then_conclusion() {
+        use crate::commands::ReviewLaunch;
+        use crate::review::{AutoReviewItemKind, AutoReviewState};
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let entry = |path: &str| ReviewEntry {
+            path: path.to_string(),
+            status: ReviewStatus::Rejected,
+            diff_lines: vec!["+x".to_string()],
+            patch: String::new(),
+        };
+        let mut state = AutoReviewState::new(ReviewLaunch {
+            files: vec![entry("a.rs"), entry("b.rs")],
+        });
+        state.sections[1].push("**a.rs:42**: broken loop".to_string());
+        state.sections[1].push("**b.rs:7**: another issue".to_string());
+        state.sections[2].push("**a.rs**: unsafe input".to_string());
+        state.finish();
+
+        // The items are the findings in display order, then one Conclusion
+        // entry per unapproved file — never the category headings.
+        let kinds: Vec<_> = state
+            .report_items()
+            .into_iter()
+            .map(|item| item.kind)
+            .collect();
+        assert!(matches!(
+            kinds[0],
+            AutoReviewItemKind::Finding {
+                section: 1,
+                index: 0
+            }
+        ));
+        assert!(matches!(
+            kinds[2],
+            AutoReviewItemKind::Finding {
+                section: 2,
+                index: 0
+            }
+        ));
+        assert!(matches!(&kinds[3], AutoReviewItemKind::Conclusion { path } if path == "a.rs"));
+        assert_eq!(kinds.len(), 5);
+
+        // Down from no highlight starts at the first item and moves the file
+        // highlight to that item's file; Up from no highlight starts at the
+        // last. Both clamp at the ends.
+        state.select_next_item();
+        assert_eq!(state.selected_item, Some(0));
+        assert_eq!(state.selected, Some(0));
+        state.select_next_item(); // b.rs:7 finding
+        assert_eq!(state.selected, Some(1));
+        state.selected_item = None;
+        state.select_prev_item();
+        assert_eq!(state.selected_item, Some(4));
+    }
+
+    #[test]
+    fn auto_review_removing_items_can_approve_the_whole_patch() {
+        use crate::commands::ReviewLaunch;
+        use crate::review::AutoReviewState;
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let entry = |path: &str| ReviewEntry {
+            path: path.to_string(),
+            status: ReviewStatus::Rejected,
+            diff_lines: vec!["+x".to_string()],
+            patch: String::new(),
+        };
+        let mut state = AutoReviewState::new(ReviewLaunch {
+            files: vec![entry("a.rs"), entry("b.rs")],
+        });
+        state.sections[1].push("**a.rs:42**: broken loop".to_string());
+        state.sections[1].push("**b.rs:7**: another issue".to_string());
+        state.sections[2].push("**a.rs**: unsafe input".to_string());
+        state.finish();
+
+        // Removing a.rs's first finding leaves it with another (in Security),
+        // so a.rs stays rejected and still appears in the Conclusion.
+        state.selected_item = Some(0);
+        state.remove_selected_item();
+        assert_eq!(state.sections[1], vec!["**b.rs:7**: another issue"]);
+        assert_eq!(state.files[0].status, ReviewStatus::Rejected);
+        assert!(
+            state
+                .conclusion_findings()
+                .iter()
+                .any(|line| line.contains("a.rs"))
+        );
+
+        // Removing a.rs's last finding approves it and drops it from the
+        // Conclusion — without touching b.rs.
+        let security = state
+            .report_items()
+            .iter()
+            .position(|item| {
+                matches!(
+                    item.kind,
+                    crate::review::AutoReviewItemKind::Finding { section: 2, .. }
+                )
+            })
+            .expect("a.rs security finding");
+        state.selected_item = Some(security);
+        state.remove_selected_item();
+        assert_eq!(state.files[0].status, ReviewStatus::Approved);
+        assert!(state.sections[2].is_empty());
+        assert!(
+            !state
+                .conclusion_findings()
+                .iter()
+                .any(|line| line.contains("a.rs"))
+        );
+        assert_eq!(state.conclusion_verdict(), "orangu rejects this patch");
+
+        // Removing b.rs's Conclusion item approves the whole file (clearing its
+        // finding too); with every file approved the patch verdict flips and no
+        // items remain, so the highlight clears.
+        let conclusion = state
+            .report_items()
+            .iter()
+            .position(|item| {
+                matches!(
+                    item.kind,
+                    crate::review::AutoReviewItemKind::Conclusion { .. }
+                )
+            })
+            .expect("b.rs conclusion item");
+        state.selected_item = Some(conclusion);
+        state.remove_selected_item();
+        assert_eq!(state.files[1].status, ReviewStatus::Approved);
+        assert!(state.sections.iter().all(|section| section.is_empty()));
+        assert_eq!(state.conclusion_verdict(), "orangu approves this patch");
+        assert!(state.report_items().is_empty());
+        assert_eq!(state.selected_item, None);
     }
 
     #[test]

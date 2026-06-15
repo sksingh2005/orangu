@@ -106,6 +106,7 @@ pub(crate) mod test_fixtures {
             browsing: false,
             reject: None,
             report_lines,
+            selected_lines: None,
             scroll: 0,
             x_offset: 0,
             status: "File: a.rs (1/1)  Category: Code  Progress: 0/7 (0%)  Time: 5s",
