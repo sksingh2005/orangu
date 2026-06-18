@@ -10,12 +10,16 @@
 
 ## Features
 
-* OpenAI-compatible chat completions
+* OpenAI-compatible chat completions, tuned for llama.cpp — fully local, no Internet connection required after setup
+* Interactive code review (`/review`) and LLM-driven auto review (`/auto_review`) of the changes on your branch, with a category-grouped report you can export or post to an issue
 * Local file reading and editing
+* Workspace-aware Git and forge tools (commit, rebase, push, pull requests, comments) for the whole change-and-review loop
 * URL fetching for external knowledge
 * Shell command execution inside the workspace
 * Model switching and runtime server target control
+* PDF export of the console or a review report (`/export`)
 * Persistent history, shell-style editing, and a terminal status banner
+* Built-in offline manual (`/manual`) with full-text search
 
 ## Community
 
