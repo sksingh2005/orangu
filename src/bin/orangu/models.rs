@@ -104,6 +104,23 @@ pub(crate) async fn probe_header_status(
     )
 }
 
+/// Decide whether an idle refresh should switch the pinned model. When the
+/// server is up and advertising models but no longer serves the one we are
+/// pinned to (e.g. a llama.cpp server swapped the loaded model while we sat
+/// idle), return the model id to switch to so the header banner can reflect the
+/// change; otherwise `None`. Reuses the model list the header probe already
+/// fetched, so no extra request is made.
+pub(crate) fn idle_model_switch_target(
+    status: orangu::tui::HeaderStatus,
+    available_models: &[String],
+) -> Option<&str> {
+    if status.server_ok && !status.model_ok {
+        available_models.first().map(String::as_str)
+    } else {
+        None
+    }
+}
+
 /// If the active server is not serving the configured model at startup, switch
 /// to a model the server actually advertises. Returns `(old, new)` model ids
 /// when a switch happened. The server (endpoint, provider, system prompt) is
@@ -154,6 +171,51 @@ pub(crate) async fn try_startup_model_switch(
 
 #[cfg(test)]
 mod tests {
+    use orangu::tui::HeaderStatus;
+
+    fn status(server_ok: bool, model_ok: bool) -> HeaderStatus {
+        HeaderStatus {
+            workspace_ok: true,
+            server_ok,
+            model_ok,
+        }
+    }
+
+    #[test]
+    fn idle_switch_targets_first_model_when_pinned_model_unserved() {
+        let available = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            super::idle_model_switch_target(status(true, false), &available),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn idle_switch_skips_when_model_still_served() {
+        let available = vec!["a".to_string()];
+        assert_eq!(
+            super::idle_model_switch_target(status(true, true), &available),
+            None
+        );
+    }
+
+    #[test]
+    fn idle_switch_skips_when_server_down() {
+        // Server down: no advertised models to switch to, so leave the banner
+        // showing the pinned model with its red indicator.
+        assert_eq!(
+            super::idle_model_switch_target(status(false, false), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn idle_switch_skips_when_server_up_but_advertises_nothing() {
+        assert_eq!(
+            super::idle_model_switch_target(status(true, false), &[]),
+            None
+        );
+    }
 
     #[test]
     fn models_request_attaches_optional_bearer_token() {

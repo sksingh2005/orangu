@@ -339,7 +339,7 @@ async fn run() -> Result<()> {
             .llms
             .get(&active_model)
             .ok_or_else(|| anyhow!("missing configured server {}", active_model))?;
-        let (header_status, server_models) = probe_header_status(
+        let (mut header_status, server_models) = probe_header_status(
             &status_http_client,
             tools.workspace(),
             &active_model_id,
@@ -349,6 +349,17 @@ async fn run() -> Result<()> {
         .await;
         // Models advertised by the selected server, used for `/model` completion.
         let available_models = server_models;
+        // The idle status refresh also re-checks the model: if the server is up
+        // but no longer serves the model we are pinned to (e.g. it swapped the
+        // loaded model while we sat idle), switch to one it advertises so the
+        // header banner reflects the change instead of showing a stale model
+        // with a red indicator.
+        if let Some(new_model) = idle_model_switch_target(header_status, &available_models) {
+            let new_model = new_model.to_string();
+            let old_model = std::mem::replace(&mut active_model_id, new_model.clone());
+            output_state.push_text(&format!("Switched model from {old_model} to {new_model}"));
+            header_status.model_ok = true;
+        }
         let render = RenderContext {
             current_model: &active_model_id,
             endpoint: current_endpoint.as_deref().unwrap_or("(disconnected)"),
