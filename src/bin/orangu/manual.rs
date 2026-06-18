@@ -44,6 +44,7 @@ const MANUAL_SOURCES: &[&str] = &[
     include_str!("../../../doc/manual/en/03-quickstart.md"),
     include_str!("../../../doc/manual/en/20-configuration.md"),
     include_str!("../../../doc/manual/en/30-tools.md"),
+    include_str!("../../../doc/manual/en/31-workspaces.md"),
     include_str!("../../../doc/manual/en/40-terminal.md"),
     include_str!("../../../doc/manual/en/41-core_tools.md"),
     include_str!("../../../doc/manual/en/42-git_tools.md"),
