@@ -608,6 +608,91 @@ impl AutoReviewState {
         self.sync_selected_to_item(&items);
     }
 
+    /// The item index at which each category begins in `items`, in display
+    /// order: a per-category section's first finding, then the `Conclusion`
+    /// group's first entry. PageUp/PageDown jump the highlight between these so
+    /// a long report can be walked category by category. Categories with no
+    /// findings have no item and so contribute no start.
+    fn category_starts(items: &[AutoReviewItem]) -> Vec<usize> {
+        let mut starts = Vec::new();
+        let mut last_key: Option<usize> = None;
+        for (index, item) in items.iter().enumerate() {
+            // The Conclusion entries share a single key, distinct from every
+            // per-category section index, so they form one trailing category.
+            let key = match &item.kind {
+                AutoReviewItemKind::Finding { section, .. } => *section,
+                AutoReviewItemKind::Conclusion { .. } => usize::MAX,
+            };
+            if last_key != Some(key) {
+                starts.push(index);
+                last_key = Some(key);
+            }
+        }
+        starts
+    }
+
+    /// Move the item highlight to `target`, scrolling the category heading (two
+    /// lines above the first finding) to the top so the whole category — not
+    /// just the finding — comes into view, and pointing the file highlight at
+    /// the item's file.
+    fn jump_to_item(&mut self, target: usize, items: &[AutoReviewItem]) {
+        self.selected_item = Some(target);
+        if let Some(item) = items.get(target) {
+            self.scroll = item.start.saturating_sub(2);
+        }
+        self.sync_selected_to_item(items);
+    }
+
+    /// PageDown while browsing: jump the highlight to the first item of the next
+    /// category that has findings (the `Conclusion` entries count as the final
+    /// category). From no highlight it starts at the first such category. A
+    /// no-op once the highlight is already in the last category, so PageDown
+    /// never jumps backward.
+    pub(crate) fn select_next_category(&mut self) {
+        let items = self.report_items();
+        let starts = Self::category_starts(&items);
+        if starts.is_empty() {
+            self.selected_item = None;
+            return;
+        }
+        let target = match self.selected_item {
+            Some(current) => starts.iter().copied().find(|&start| start > current),
+            None => Some(starts[0]),
+        };
+        if let Some(target) = target {
+            self.jump_to_item(target, &items);
+        }
+    }
+
+    /// PageUp while browsing: jump the highlight to the first item of the
+    /// previous category that has findings. From no highlight it starts at the
+    /// last such category. A no-op once the highlight is already in the first
+    /// category.
+    pub(crate) fn select_prev_category(&mut self) {
+        let items = self.report_items();
+        let starts = Self::category_starts(&items);
+        if starts.is_empty() {
+            self.selected_item = None;
+            return;
+        }
+        let target = match self.selected_item {
+            Some(current) => {
+                // The start of the highlight's own category, then the start of
+                // the category before it.
+                let current_start = starts
+                    .iter()
+                    .copied()
+                    .rfind(|&start| start <= current)
+                    .unwrap_or(starts[0]);
+                starts.iter().copied().rfind(|&start| start < current_start)
+            }
+            None => starts.last().copied(),
+        };
+        if let Some(target) = target {
+            self.jump_to_item(target, &items);
+        }
+    }
+
     /// Point the right-pane file highlight at the file owning the highlighted
     /// item, so the panes agree and Alt+a/Alt+r act on the right file. Items
     /// without a file location (whole-change `Overall` bullets) leave it put.
@@ -1061,12 +1146,16 @@ pub(crate) fn auto_review_exit_output(state: &AutoReviewState) -> (Vec<String>, 
     (lines, markdown.join("\n"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn print_auto_review_screen(
     state: &AutoReviewState,
     viewport: &ViewportState,
     chrome: ReviewChrome<'_>,
     left_status: Option<StatusFragment>,
     blink_on: bool,
+    input: &str,
+    cursor: usize,
+    ghost: &str,
 ) {
     let report_lines = state.report_lines();
     let status_text = state.status_text();
@@ -1103,6 +1192,9 @@ pub(crate) fn print_auto_review_screen(
             scroll: state.scroll,
             x_offset: state.x_offset,
             status: &status_text,
+            input,
+            cursor,
+            ghost,
             current_model: chrome.current_model,
             prompt_branch: chrome.prompt_branch,
             left_status,
@@ -1321,6 +1413,7 @@ pub(crate) async fn run_auto_review_request(
             _ = interval.tick() => {
                 let body_height = auto_review_pane_body_height(
                     viewport.actual_height,
+                    "",
                     chrome.prompt_branch,
                     viewport.actual_width,
                 );
@@ -1389,7 +1482,7 @@ pub(crate) async fn run_auto_review_request(
                 // The reviewed file's white dot blinks at ~1Hz on the 120ms
                 // frame clock: four frames on, four frames off.
                 let blink_on = (frame / 4).is_multiple_of(2);
-                print_auto_review_screen(state, viewport, chrome, status, blink_on);
+                print_auto_review_screen(state, viewport, chrome, status, blink_on, "", 0, "");
                 std::io::stdout().flush()?;
             }
         }
@@ -1466,9 +1559,14 @@ pub(crate) fn run_auto_review_browse(
     terminal: &str,
 ) -> Result<()> {
     let mut escape_cancel = EscapeCancelState::default();
+    // The browse-phase input window: `/open_file <path>` or `open <path>` here
+    // opens any project file in `$EDITOR`. Empty by default, so the report keeps
+    // its full height and bare `-` still removes the highlighted item.
+    let mut input_state = InputState::default();
     loop {
         let body_height = auto_review_pane_body_height(
             viewport.actual_height,
+            input_state.as_str(),
             chrome.prompt_branch,
             viewport.actual_width,
         );
@@ -1476,7 +1574,26 @@ pub(crate) fn run_auto_review_browse(
         let left_width = viewport.actual_width.saturating_sub(right_width + 1).max(1);
         state.clamp(body_height, left_width);
         state.ensure_item_visible(body_height);
-        print_auto_review_screen(state, viewport, chrome, None, false);
+        // Preview the file/command Tab would fill in, exactly like `/review`.
+        let ghost = crate::completion::input_ghost_suffix(
+            input_state.as_str(),
+            input_state.cursor(),
+            input_state.ghost_index,
+            workspace,
+            &[],
+            &[],
+        )
+        .unwrap_or_default();
+        print_auto_review_screen(
+            state,
+            viewport,
+            chrome,
+            None,
+            false,
+            input_state.as_str(),
+            input_state.cursor(),
+            &ghost,
+        );
         std::io::stdout().flush()?;
 
         let (code, modifiers) = match event::read()? {
@@ -1565,13 +1682,13 @@ pub(crate) fn run_auto_review_browse(
         }
         escape_cancel.reset();
 
-        match (code, alt) {
-            (KeyCode::Char('x'), true) => return Ok(()),
-            (KeyCode::Char('j'), true) => state.select_next(),
-            (KeyCode::Char('k'), true) => state.select_prev(),
-            (KeyCode::Char('a'), true) => state.approve_selected(),
-            (KeyCode::Char('r'), true) => state.open_reject(),
-            (KeyCode::Char('e'), true) => {
+        match (code, alt, ctrl) {
+            (KeyCode::Char('x'), true, _) => return Ok(()),
+            (KeyCode::Char('j'), true, _) => state.select_next(),
+            (KeyCode::Char('k'), true, _) => state.select_prev(),
+            (KeyCode::Char('a'), true, _) => state.approve_selected(),
+            (KeyCode::Char('r'), true, _) => state.open_reject(),
+            (KeyCode::Char('e'), true, _) => {
                 if let Some(path) = state.selected_path()
                     && let Err(err) = open_in_editor(workspace, &path, terminal)
                 {
@@ -1580,15 +1697,56 @@ pub(crate) fn run_auto_review_browse(
                     state.status = format!("Open {path} failed: {err:#}");
                 }
             }
+            // Submitting `/open_file <path>` or `open <path>` opens any project
+            // file in `$EDITOR`; anything else is ignored (auto review has no
+            // chat to send it to).
+            (KeyCode::Enter, _, _) => {
+                if let Some(path) = crate::commands::parse_open_command_target(input_state.as_str())
+                {
+                    let path = path.to_string();
+                    input_state.clear();
+                    if let Err(err) = open_in_editor(workspace, &path, terminal) {
+                        state.status = format!("Open {path} failed: {err:#}");
+                    }
+                }
+            }
+            // Tab completes the input window over every project file, like the
+            // main prompt; Shift+Tab cycles the ghost preview.
+            (KeyCode::Tab, _, _) => {
+                crate::input::apply_completion(&mut input_state, workspace, &[], &[]);
+            }
+            (KeyCode::BackTab, _, _) => crate::input::cycle_ghost_suggestion(&mut input_state),
             // Once the run is done Up/Down move between report items (not
-            // headings) and `-` removes the highlighted one.
-            (KeyCode::Up, _) => state.select_prev_item(),
-            (KeyCode::Down, _) => state.select_next_item(),
-            (KeyCode::Char('-'), false) => state.remove_selected_item(),
-            (KeyCode::Left, _) => state.x_offset = state.x_offset.saturating_sub(1),
-            (KeyCode::Right, _) => state.x_offset = state.x_offset.saturating_add(1),
-            (KeyCode::PageUp, _) => state.scroll = state.scroll.saturating_sub(body_height),
-            (KeyCode::PageDown, _) => state.scroll = state.scroll.saturating_add(body_height),
+            // headings); `-` removes the highlighted one only while the input
+            // window is empty, so a `-` in a typed path is still editable.
+            (KeyCode::Up, false, _) => state.select_prev_item(),
+            (KeyCode::Down, false, _) => state.select_next_item(),
+            (KeyCode::Char('-'), false, false) if input_state.as_str().is_empty() => {
+                state.remove_selected_item();
+            }
+            // Horizontal report pan moves to Alt+Left/Right, leaving bare
+            // Left/Right to the input cursor (like `/review`).
+            (KeyCode::Left, true, _) => state.x_offset = state.x_offset.saturating_sub(1),
+            (KeyCode::Right, true, _) => state.x_offset = state.x_offset.saturating_add(1),
+            // PageUp/PageDown jump the item highlight to the previous/next
+            // category that has findings, so a long report is walked category
+            // by category.
+            (KeyCode::PageUp, _, _) => state.select_prev_category(),
+            (KeyCode::PageDown, _, _) => state.select_next_category(),
+            // Input window editing, mirroring `/review`.
+            (KeyCode::Backspace, true, _) => input_state.delete_backward_readline_word(),
+            (KeyCode::Backspace, _, _) => input_state.backspace(),
+            (KeyCode::Delete, _, _) => input_state.delete(),
+            (KeyCode::Left, _, true) => input_state.move_backward_readline_word(),
+            (KeyCode::Right, _, true) => input_state.move_forward_readline_word(),
+            (KeyCode::Left, _, _) => input_state.move_left(),
+            (KeyCode::Right, _, _) => input_state.move_right(),
+            (KeyCode::Home, _, _) | (KeyCode::Char('a'), _, true) => input_state.move_home(),
+            (KeyCode::End, _, _) | (KeyCode::Char('e'), _, true) => input_state.move_end(),
+            (KeyCode::Char('k'), _, true) => input_state.kill_to_end(),
+            (KeyCode::Char('u'), _, true) => input_state.kill_to_start(),
+            (KeyCode::Char('w'), _, true) => input_state.delete_prev_word(),
+            (KeyCode::Char(ch), false, false) => input_state.insert_char(ch),
             _ => {}
         }
     }
@@ -1816,6 +1974,61 @@ mod tests {
         state.selected_item = None;
         state.select_prev_item();
         assert_eq!(state.selected_item, Some(4));
+    }
+
+    #[test]
+    fn auto_review_page_keys_jump_between_categories_with_findings() {
+        use crate::commands::ReviewLaunch;
+        use crate::review::AutoReviewState;
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let entry = |path: &str| ReviewEntry {
+            path: path.to_string(),
+            status: ReviewStatus::Rejected,
+            diff_lines: vec!["+x".to_string()],
+            patch: String::new(),
+        };
+        let mut state = AutoReviewState::new(ReviewLaunch {
+            files: vec![entry("a.rs"), entry("b.rs")],
+        });
+        // Code (two findings), Security (one), and the Conclusion (two rejected
+        // files) carry items; the other categories stay empty and are skipped.
+        state.sections[1].push("**a.rs:42**: broken loop".to_string());
+        state.sections[1].push("**b.rs:7**: another issue".to_string());
+        state.sections[2].push("**a.rs**: unsafe input".to_string());
+        state.finish();
+        // Items: 0,1 = Code findings, 2 = Security, 3,4 = Conclusion entries.
+
+        // PageDown from no highlight lands on the first category's first finding,
+        // then jumps category by category — skipping the second Code finding —
+        // and lands on the Conclusion last.
+        state.select_next_category();
+        assert_eq!(state.selected_item, Some(0));
+        state.select_next_category();
+        assert_eq!(state.selected_item, Some(2)); // Security, not the 2nd Code item
+        state.select_next_category();
+        assert_eq!(state.selected_item, Some(3)); // Conclusion
+        // Already in the last category: PageDown is a no-op (never wraps back).
+        state.select_next_category();
+        assert_eq!(state.selected_item, Some(3));
+
+        // PageUp walks back to each category's first item.
+        state.select_prev_category();
+        assert_eq!(state.selected_item, Some(2)); // Security
+        state.select_prev_category();
+        assert_eq!(state.selected_item, Some(0)); // Code's first finding
+        // Already in the first category: PageUp is a no-op.
+        state.select_prev_category();
+        assert_eq!(state.selected_item, Some(0));
+
+        // From a finding in the middle of a category, PageDown still leaves to
+        // the next category; PageUp from no highlight starts at the last.
+        state.selected_item = Some(1); // second Code finding
+        state.select_next_category();
+        assert_eq!(state.selected_item, Some(2));
+        state.selected_item = None;
+        state.select_prev_category();
+        assert_eq!(state.selected_item, Some(3)); // last category (Conclusion)
     }
 
     #[test]

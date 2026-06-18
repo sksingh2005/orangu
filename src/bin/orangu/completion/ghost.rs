@@ -13,8 +13,36 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+use std::path::Path;
+
 use super::*;
 use crate::commands::NATURAL_LANGUAGE_BINDINGS;
+
+/// The grey inline ghost suffix to draw after the cursor for `input`, or `None`
+/// when there is nothing to hint. Slash commands take priority over
+/// natural-language bindings (with `ghost_index` picking which cycled candidate
+/// to preview), and structured argument completions — branches, tags, files,
+/// models, servers — fall last. Only hinted while the cursor sits at the end of
+/// the typed text. Shared by the main prompt and the `/review` / `/auto_review`
+/// input windows so all three preview completions the same way.
+pub fn input_ghost_suffix(
+    input: &str,
+    cursor: usize,
+    ghost_index: usize,
+    workspace: &Path,
+    server_names: &[String],
+    available_models: &[String],
+) -> Option<String> {
+    if cursor != input.len() {
+        return None;
+    }
+    command_ghost_suffix(input)
+        .or_else(|| natural_language_ghost_suffix_at(input, ghost_index))
+        .map(str::to_string)
+        .or_else(|| {
+            completion_ghost_suffix(input, cursor, workspace, server_names, available_models)
+        })
+}
 
 /// Returns the trailing characters needed to finish the slash command the user
 /// is part-way through typing, e.g. `/q` -> `uit` (completing `/quit`). This is

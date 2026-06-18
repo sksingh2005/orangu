@@ -734,7 +734,13 @@ async fn run() -> Result<()> {
                         prompt_branch: prompt_branch.as_deref(),
                         pending_count: pending_commands.len(),
                     };
-                    match run_review_mode(&mut review, &mut viewport, &mut input_state, chrome)? {
+                    match run_review_mode(
+                        &mut review,
+                        &mut viewport,
+                        &mut input_state,
+                        chrome,
+                        &workspace,
+                    )? {
                         ReviewSignal::Exit => break,
                         ReviewSignal::OpenFile { path } => {
                             if let Err(err) = open_in_editor(&workspace, &path, &config.terminal) {

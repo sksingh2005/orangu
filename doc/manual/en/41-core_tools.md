@@ -333,6 +333,8 @@ The command is workspace-scoped — paths outside the workspace are rejected. It
 
 Tab completion after `/open_file ` searches the workspace recursively for file paths, and quoted paths such as `/open_file "..."` are supported.
 
+The same `/open_file <path>` (and `open <path>`) form also works inside the `/review` and `/auto_review` split views, where it opens any project file — not only the changed ones — in your editor, with the same whole-workspace `Tab` completion. In `/review` it is available the whole time; in `/auto_review` it works once the run has finished. See the `/review` and `/auto_review` tools for the details.
+
 ### Examples
 
 ```text
@@ -473,9 +475,11 @@ When the response arrives it opens in a **feedback window** over the panes. If y
 
 The request and the model's reply are added to your chat session, so after leaving review mode you can keep discussing it with full context.
 
-### Opening the file
+### Opening a file
 
 Press `Alt+e` to open the currently selected file in your `$EDITOR` — the same way as the `/open_file` command. Terminal editors open in a new window (the configured `terminal` command, or an auto-detected emulator) and GUI editors open their own window; either way the editor is detached, leaving review mode on screen so you can keep working through the diff. If the file cannot be opened, the error is shown in a feedback window.
+
+To open **any file in the project — not only the changed files** — type `/open_file <path>` (or just `open <path>`) into the input window and press `Enter`. `Tab` completes the path against every file in the workspace, exactly like `/open_file` at the main prompt: typing a bare name matches files anywhere in the tree, and the grey ghost previews the first match. This open form is available the whole time you are in `/review`. Anything you type that is **not** an `open <path>` (or `edit <path>`) line is still sent to the model as a review request, so an ordinary request such as `focus on error handling` is unaffected.
 
 ### Commenting on a line
 
@@ -501,7 +505,8 @@ The same Markdown is also kept for the rest of the session, so `/comment <number
 | `Alt+r` | Mark the selected file rejected (red dot) |
 | `Alt+c` | Comment on the highlighted line — pick a category (`Tab` to focus it, `Up`/`Down` to move), `Enter` saves, `Esc` discards |
 | `Alt+e` | Open the selected file in your configured editor |
-| `Alt+o` / `Enter` | Ask the model to review the selected file using the typed request |
+| `/open_file <path>` / `open <path>` + `Enter` | Open any project file in your configured editor (`Tab` completes every workspace file) |
+| `Alt+o` / `Enter` | Ask the model to review the selected file using the typed request (when the line is not an `open <path>`) |
 | `Esc` `Esc` | Cancel an in-progress review request (while the model is thinking) |
 | `Alt+x` or `Esc` `Esc` | Exit review mode and return to the prompt |
 
@@ -513,6 +518,7 @@ Otherwise you can type into the input window normally, and move through the sele
 - `Alt+Up` / `Alt+Down` scroll the diff one line at a time without moving the cursor
 - `PageUp` / `PageDown` scroll the diff by a full page
 - `Alt+Left` / `Alt+Right` pan horizontally for long lines
+- `Tab` completes an `/open_file <path>` / `open <path>` line against the workspace files (`Shift+Tab` cycles the ghost preview)
 
 The review status marks and line comments are kept for the duration of the review session and are not persisted after exit.
 
@@ -562,7 +568,7 @@ The view opens with the tool header row at the top and under it the two panes, e
 - **Left pane** — below the status area, the **report**, rendered from Markdown with the syntax markers consumed: one bold heading per category (Overall, Code, Security, Memory, Performance, Test Suite, Documentation), each listing the findings collected so far as a bullet list with the file names in bold, ending with the **Conclusion**. A category that has produced nothing yet shows `(pending)` while the run is in progress, and `No issues found` once it is done. The pane scrolls and pans independently.
 - **Right pane** — the checklist of changed files, one per row, as in `/review`. The file currently being reviewed is highlighted and its status box blinks a white dot until its review resolves to green or red. Once the run ends (or the whole-change pass starts) the highlight is cleared — nothing is being reviewed anymore; `Alt+j`/`Alt+k` bring it back to move through the list while browsing.
 
-While the run is in progress the header row offers the run keys (`Esc Esc Cancel  Alt+x Exit`); once the run has ended it switches to the browse keys (`Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  - Remove  Alt+x Exit`).
+While the run is in progress the header row offers the run keys (`Esc Esc Cancel  Alt+x Exit`); once the run has ended it switches to the browse keys (`Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  PgUp/PgDn Category  - Remove  Alt+x Exit`).
 
 ```
  Auto review: feature/x ...                          |Files (3)
@@ -601,10 +607,13 @@ Once the run has ended (done or cancelled), the report stays on screen and you c
 
 You can also work through the report **item by item** in the left pane. `Up`/`Down` move a highlight between the individual report items — the findings and the Conclusion entries, never the category headings — scrolling the pane as needed to keep the highlighted item in view (from no highlight, `Down` starts at the first item and `Up` at the last). Moving the highlight also points the file list on the right at the item's file, so `Alt+a`/`Alt+r` act on it.
 
+To skip across a long report **category by category**, use `PageDown`/`PageUp`: they jump the highlight straight to the first item of the next or previous category that **has findings**, scrolling that category's heading to the top so the whole section comes into view. Empty categories (those reading `No issues found`) are skipped, and the Conclusion entries count as the final category. From no highlight, `PageDown` lands on the first category with findings and `PageUp` on the last; once the highlight is already in the last (or first) such category the key is a no-op, so it never jumps backward past the report. Use `Up`/`Down` to walk the individual findings within a category.
+
 - **`-` — remove the highlighted item.** A **finding** is dropped from its category; if that was the **last** finding recorded against its file, the file is approved (its dot turns green) and it drops out of the Conclusion. Removing a **Conclusion** item approves the whole file it stands for, clearing every finding recorded against it across the report — the same as approving that file. So you can approve the patch outright by removing all the flagged items: once nothing is left, every file is approved and the verdict reads `orangu approves this patch`.
 - **`Alt+a` — approve the highlighted file.** Its dot turns green and **every finding recorded against it is removed from the report** — the model's findings and your own rejection comments alike — so an approved file no longer appears in any category, in the exit report, or on the clipboard. The Conclusion follows the file statuses, so approving the last rejected file flips the verdict to `orangu approves this patch`.
 - **`Alt+r` — reject the highlighted file.** A reject window opens over the panes with a **category selector** (Overall, Code, Security, Memory, Performance, Test Suite, Documentation) and a **multi-line Markdown comment editor**. `Tab` moves the focus between the two; in the selector `Up`/`Down` pick the category (`Enter` moves on to the editor), and in the editor `Enter` inserts a newline while `Up`/`Down`, `Home`/`End`, and the usual editing keys move and edit. Press `Alt+Enter` to save — the file's dot turns red and the comment is appended to the chosen category, prefixed with the file path in bold — or `Esc` to discard the window. Saving with an empty comment still rejects the file without adding a finding. `Alt+r` can be repeated on the same file; each saved comment is kept.
 - **`Alt+e` — open the highlighted file** in your `$EDITOR`, exactly like `Alt+e` in `/review`: terminal editors open in a new window and GUI editors open their own, leaving the report on screen.
+- **`/open_file <path>` / `open <path>` + `Enter` — open any project file**, not only the changed ones. Once the run is done the input window at the bottom accepts an open command: type `/open_file <path>` (or `open <path>`), with `Tab` completing every workspace file just like `/open_file` at the main prompt, and press `Enter` to open it in your `$EDITOR`. This works **only after the run has finished** — during the run the input window stays empty. While the input is empty, `-` still removes the highlighted item; a `-` typed into a path is left for editing.
 
 Rejection comments become part of the report: they are rendered in the matching category of the left pane (and the exit report), and land on the clipboard as Markdown bullets — a multi-line comment keeps its lines inside one bullet, indented under the first line.
 
@@ -627,12 +636,13 @@ The Markdown report is also kept for the rest of the session, so `/comment <numb
 | `Alt+a` | Approve the highlighted file and drop its findings from the report |
 | `Alt+r` | Reject the highlighted file: pick a category, write a Markdown comment |
 | `Alt+e` | Open the highlighted file in your configured editor |
+| `/open_file <path>` / `open <path>` + `Enter` | Open any project file in your editor (after the run; `Tab` completes every workspace file) |
 | `Up` / `Down` | Move the item highlight through the report's findings and Conclusion entries (after the run) |
-| `-` | Remove the highlighted item; clearing a file's last item approves it (after the run) |
-| `PageUp` / `PageDown` | Scroll the report by a full page |
-| `Left` / `Right` | Pan the report horizontally for long lines |
+| `PageUp` / `PageDown` | Jump the item highlight to the previous / next category that has findings (after the run) |
+| `-` | Remove the highlighted item; clearing a file's last item approves it (after the run, while the input window is empty) |
+| `Alt+Left` / `Alt+Right` | Pan the report horizontally for long lines |
 
-The report can be scrolled while the run is still in progress; `Alt+a`, `Alt+r`, and `Alt+e` act once the run has ended.
+The report can be scrolled while the run is still in progress; `Alt+a`, `Alt+r`, `Alt+e`, and the `/open_file` input act once the run has ended.
 
 When the reject window is open it is modal:
 

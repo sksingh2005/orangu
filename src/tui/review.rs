@@ -75,6 +75,9 @@ pub struct ReviewScreenArgs<'a> {
     pub prompt_branch: Option<&'a str>,
     pub input: &'a str,
     pub cursor: usize,
+    /// The grey inline completion ghost drawn after the input cursor (empty for
+    /// none), previewing the file path or command Tab would fill in.
+    pub ghost: &'a str,
     pub left_status: Option<StatusFragment>,
     pub pending_count: usize,
     pub actual_width: usize,
@@ -185,7 +188,7 @@ pub fn render_review_screen(args: ReviewScreenArgs<'_>) -> String {
         prompt_prefix: &prompt_prefix,
         input: args.input,
         cursor: args.cursor,
-        ghost: "",
+        ghost: args.ghost,
         height,
         actual_width: width,
     }));
@@ -672,6 +675,20 @@ mod tests {
         assert!(box_block.contains("needs a guard"), "comment text missing");
         // The line after the box continues the diff.
         assert!(rows[line_row + 7].contains("line two"));
+    }
+
+    #[test]
+    fn render_review_screen_draws_the_input_completion_ghost() {
+        // Typing an open command in the input window previews the file Tab would
+        // fill in as a grey ghost, exactly like the main prompt.
+        let files = vec![review_entry("a.txt", ReviewStatus::Unreviewed, &["+x"])];
+        let mut args = review_args(&files, 0, 0, 80, 10);
+        args.input = "/open_file READ";
+        args.cursor = args.input.len();
+        args.ghost = "ME.md";
+        let rendered = render_review_screen(args);
+        assert!(rendered.contains("/open_file READ"), "input not shown");
+        assert!(rendered.contains("ME.md"), "ghost suffix not shown");
     }
 
     #[test]

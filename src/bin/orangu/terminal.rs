@@ -90,24 +90,14 @@ pub fn print_screen(render: RenderContext<'_>, screen: ScreenState<'_>) {
     // `ghost_index` selects which candidate to preview (cycled with Shift+Tab).
     // Structured argument completions (branches, tags, files, models, servers)
     // fall last, previewing the first candidate Tab would fill in.
-    let structured_ghost = if screen.cursor == screen.input.len() {
-        completion::command_ghost_suffix(screen.input)
-            .or_else(|| {
-                completion::natural_language_ghost_suffix_at(screen.input, screen.ghost_index)
-            })
-            .map(str::to_string)
-            .or_else(|| {
-                completion::completion_ghost_suffix(
-                    screen.input,
-                    screen.cursor,
-                    render.workspace,
-                    render.server_names,
-                    render.available_models,
-                )
-            })
-    } else {
-        None
-    };
+    let structured_ghost = completion::input_ghost_suffix(
+        screen.input,
+        screen.cursor,
+        screen.ghost_index,
+        render.workspace,
+        render.server_names,
+        render.available_models,
+    );
     let ghost = structured_ghost.as_deref().unwrap_or("");
     print!("{CLEAR_TERMINAL_SEQUENCE}");
     print!(

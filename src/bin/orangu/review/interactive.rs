@@ -428,6 +428,7 @@ pub(crate) fn print_review_screen(
     viewport: &ViewportState,
     chrome: ReviewChrome<'_>,
     left_status: Option<StatusFragment>,
+    ghost: &str,
 ) {
     let feedback = state.feedback.as_ref().map(|feedback| ReviewFeedbackView {
         title: &feedback.title,
@@ -462,6 +463,7 @@ pub(crate) fn print_review_screen(
             prompt_branch: chrome.prompt_branch,
             input: input_state.as_str(),
             cursor: input_state.cursor(),
+            ghost,
             left_status,
             pending_count: chrome.pending_count,
             actual_width: viewport.actual_width,
@@ -476,6 +478,7 @@ pub(crate) fn run_review_mode(
     viewport: &mut ViewportState,
     input_state: &mut InputState,
     chrome: ReviewChrome<'_>,
+    workspace: &Path,
 ) -> Result<ReviewSignal> {
     let mut escape_cancel = EscapeCancelState::default();
     loop {
@@ -488,7 +491,18 @@ pub(crate) fn run_review_mode(
         let right_width = orangu::tui::review_right_width(&state.files, viewport.actual_width);
         let left_width = viewport.actual_width.saturating_sub(right_width + 1).max(1);
         state.clamp(body_height, left_width, viewport.actual_width);
-        print_review_screen(state, input_state, viewport, chrome, None);
+        // Preview the file/command Tab would fill in, the same way the main
+        // prompt does, so `/open_file ` and `open ` complete project files.
+        let ghost = crate::completion::input_ghost_suffix(
+            input_state.as_str(),
+            input_state.cursor(),
+            input_state.ghost_index,
+            workspace,
+            &[],
+            &[],
+        )
+        .unwrap_or_default();
+        print_review_screen(state, input_state, viewport, chrome, None, &ghost);
         std::io::stdout().flush()?;
 
         let (code, modifiers) = match event::read()? {
@@ -620,6 +634,15 @@ pub(crate) fn run_review_mode(
                     // LLM request.
                     state.add_general_note(input_state.as_str());
                     input_state.clear();
+                } else if let Some(path) =
+                    crate::commands::parse_open_command_target(input_state.as_str())
+                {
+                    // `/open_file <path>` or `open <path>` opens any project
+                    // file in the editor — not only the changed files. Available
+                    // the whole time in `/review`.
+                    let path = path.to_string();
+                    input_state.clear();
+                    return Ok(ReviewSignal::OpenFile { path });
                 } else if let Some(file) = state.files.get(state.selected) {
                     return Ok(ReviewSignal::RequestReview {
                         path: file.path.clone(),
@@ -639,6 +662,13 @@ pub(crate) fn run_review_mode(
             // Move the highlighted line through the diff, view following.
             (KeyCode::Up, false, _) => state.cursor_up(),
             (KeyCode::Down, false, _) => state.cursor_down(body_height),
+            // Tab completes the input window — `/open_file ` and `open ` over
+            // every project file, like the main prompt — and Shift+Tab cycles
+            // the ghost preview.
+            (KeyCode::Tab, _, _) => {
+                crate::input::apply_completion(input_state, workspace, &[], &[]);
+            }
+            (KeyCode::BackTab, _, _) => crate::input::cycle_ghost_suggestion(input_state),
             // Input window editing.
             (KeyCode::Backspace, true, _) => input_state.delete_backward_readline_word(),
             (KeyCode::Backspace, _, _) => input_state.backspace(),
@@ -728,7 +758,7 @@ pub(crate) async fn run_review_request(
                 let frame = (started.elapsed().as_millis()
                     / THINKING_FRAME_INTERVAL.as_millis().max(1)) as usize;
                 let status = render_thinking_status(frame, started.elapsed());
-                print_review_screen(state, input_state, viewport, chrome, Some(status));
+                print_review_screen(state, input_state, viewport, chrome, Some(status), "");
                 std::io::stdout().flush()?;
             }
         }
@@ -973,6 +1003,7 @@ mod tests {
             prompt_branch: Some("main"),
             input: "",
             cursor: 0,
+            ghost: "",
             left_status: None,
             pending_count: 0,
             actual_width: 60,

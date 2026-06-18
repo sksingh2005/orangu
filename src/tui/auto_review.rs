@@ -65,6 +65,14 @@ pub struct AutoReviewScreenArgs<'a> {
     pub browsing: bool,
     /// When set, the Alt+r reject window is drawn over the panes.
     pub reject: Option<AutoReviewRejectView<'a>>,
+    /// The input window contents. Empty while the run is in progress; once the
+    /// run is done the browse loop fills it in so `/open_file <path>` and
+    /// `open <path>` can open any project file in `$EDITOR`.
+    pub input: &'a str,
+    pub cursor: usize,
+    /// The grey inline completion ghost drawn after the input cursor (empty for
+    /// none), previewing the file path or command Tab would fill in.
+    pub ghost: &'a str,
     pub current_model: &'a str,
     pub prompt_branch: Option<&'a str>,
     pub left_status: Option<StatusFragment>,
@@ -75,13 +83,16 @@ pub struct AutoReviewScreenArgs<'a> {
 
 /// Number of scrollable body rows in the auto review report pane: one less
 /// than the `/review` panes, since the status area takes the left pane's first
-/// body row (the input window is always empty in auto review mode).
+/// body row. `input` is empty while the run is in progress; once the run is
+/// done the browse loop's `/open_file` input window can grow the prompt frame,
+/// shrinking the report by the same rows the renderer reserves.
 pub fn auto_review_pane_body_height(
     actual_height: usize,
+    input: &str,
     prompt_branch: Option<&str>,
     actual_width: usize,
 ) -> usize {
-    review_pane_body_height(actual_height, "", prompt_branch, actual_width)
+    review_pane_body_height(actual_height, input, prompt_branch, actual_width)
         .saturating_sub(1)
         .max(1)
 }
@@ -90,10 +101,11 @@ pub fn render_auto_review_screen(args: AutoReviewScreenArgs<'_>) -> String {
     let width = args.actual_width.max(1);
     let height = args.actual_height.max(1);
 
-    // Reserve the bottom prompt frame exactly like `/review`. Auto review takes
-    // no typed request, so the input window stays empty.
+    // Reserve the bottom prompt frame exactly like `/review`. The input window
+    // stays empty during the run and carries the browse-phase `/open_file`
+    // line afterwards.
     let prompt_prefix = prompt_prefix(args.prompt_branch);
-    let input_lines = wrapped_input_lines("", width, &prompt_prefix);
+    let input_lines = wrapped_input_lines(args.input, width, &prompt_prefix);
     let prompt_frame_height = input_lines.len() + 3;
     let pane_rows = height.saturating_sub(prompt_frame_height).max(2);
 
@@ -110,9 +122,9 @@ pub fn render_auto_review_screen(args: AutoReviewScreenArgs<'_>) -> String {
         left_status: args.left_status,
         pending_count: args.pending_count,
         prompt_prefix: &prompt_prefix,
-        input: "",
-        cursor: 0,
-        ghost: "",
+        input: args.input,
+        cursor: args.cursor,
+        ghost: args.ghost,
         height,
         actual_width: width,
     }));
@@ -143,7 +155,7 @@ fn render_auto_review_panes(
     // While the run is in progress the header offers the run keys; once the
     // report is being browsed it offers the per-file browse keys instead.
     let keys = if args.browsing {
-        "Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  - Remove  Alt+x Exit"
+        "Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  PgUp/PgDn Category  - Remove  Alt+x Exit"
     } else {
         "Esc Esc Cancel  Alt+x Exit"
     };
@@ -355,6 +367,22 @@ mod tests {
     }
 
     #[test]
+    fn auto_review_browse_shows_the_open_input_and_ghost() {
+        // After the run, the input window accepts `/open_file <path>` to open any
+        // project file, with the same grey completion ghost as the main prompt.
+        let files = vec![review_entry("src/main.rs", ReviewStatus::Approved, &[])];
+        let report: Vec<String> = Vec::new();
+        let mut args = auto_review_args(&files, &report, 80, 12);
+        args.browsing = true;
+        args.input = "/open_file READ";
+        args.cursor = args.input.len();
+        args.ghost = "ME.md";
+        let screen = render_auto_review_screen(args);
+        assert!(screen.contains("/open_file READ"), "{screen:?}");
+        assert!(screen.contains("ME.md"), "{screen:?}");
+    }
+
+    #[test]
     fn auto_review_reject_window_covers_the_panes() {
         let files = vec![review_entry("src/main.rs", ReviewStatus::Rejected, &[])];
         let report: Vec<String> = vec!["Overall".to_string()];
@@ -402,8 +430,8 @@ mod tests {
 
     #[test]
     fn auto_review_browse_header_documents_item_keys() {
-        // The Up/Down item cursor and `-` removal are documented in the browse
-        // key help, before Alt+x.
+        // The Up/Down item cursor, the PageUp/PageDown category jump, and `-`
+        // removal are documented in the browse key help, before Alt+x.
         let files = vec![review_entry("src/main.rs", ReviewStatus::Rejected, &[])];
         let report: Vec<String> = Vec::new();
         let mut args = auto_review_args(&files, &report, 200, 12);
@@ -411,9 +439,15 @@ mod tests {
         let screen = render_auto_review_screen(args);
         let header = screen.split("\r\n").next().unwrap_or_default();
         let item = header.find("↑/↓ Item").expect("item key documented");
+        let category = header
+            .find("PgUp/PgDn Category")
+            .expect("category key documented");
         let remove = header.find("- Remove").expect("remove key documented");
         let exit = header.find("Alt+x").expect("exit key documented");
-        assert!(item < exit && remove < exit, "{header:?}");
+        assert!(
+            item < category && category < exit && remove < exit,
+            "{header:?}"
+        );
     }
 
     #[test]
@@ -452,9 +486,9 @@ mod tests {
         // never less than one.
         let review = review_pane_body_height(24, "", Some("main"), 80);
         assert_eq!(
-            auto_review_pane_body_height(24, Some("main"), 80),
+            auto_review_pane_body_height(24, "", Some("main"), 80),
             review - 1
         );
-        assert_eq!(auto_review_pane_body_height(1, Some("main"), 80), 1);
+        assert_eq!(auto_review_pane_body_height(1, "", Some("main"), 80), 1);
     }
 }

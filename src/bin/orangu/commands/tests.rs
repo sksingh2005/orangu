@@ -38,6 +38,45 @@ fn parses_open_file_commands() {
 }
 
 #[test]
+fn parse_open_command_target_recognizes_the_review_open_forms() {
+    // The `/review` and `/auto_review` input windows accept the same open/edit
+    // forms the main prompt does, opening any project file in `$EDITOR`.
+    assert_eq!(
+        parse_open_command_target("/open_file src/main.rs"),
+        Some("src/main.rs")
+    );
+    assert_eq!(
+        parse_open_command_target("open src/main.rs"),
+        Some("src/main.rs")
+    );
+    // `open file <x>` yields the path, not `file <x>`; quotes are stripped.
+    assert_eq!(
+        parse_open_command_target("open file README.md"),
+        Some("README.md")
+    );
+    assert_eq!(
+        parse_open_command_target("edit src/lib.rs"),
+        Some("src/lib.rs")
+    );
+    assert_eq!(
+        parse_open_command_target("open \"docs/user guide.md\""),
+        Some("docs/user guide.md")
+    );
+    // Matching is case-insensitive on the verb.
+    assert_eq!(
+        parse_open_command_target("OPEN src/main.rs"),
+        Some("src/main.rs")
+    );
+
+    // Anything that is not an open/edit form — a review request, a note, or a
+    // bare verb with no path — is left for the LLM (returns `None`).
+    assert_eq!(parse_open_command_target("focus on error handling"), None);
+    assert_eq!(parse_open_command_target("# please add a test"), None);
+    assert_eq!(parse_open_command_target("open"), None);
+    assert_eq!(parse_open_command_target("open   "), None);
+}
+
+#[test]
 fn parses_show_file_natural_language_commands() {
     match parse_local_command("show README.md") {
         Some(LocalCommand::ShowFile(path)) => assert_eq!(path.as_ref(), "README.md"),

@@ -35,6 +35,23 @@ pub fn parse_open_file_target<'a>(input: &'a str, prefix: &str) -> Option<&'a st
     Some(strip_matching_quotes(path))
 }
 
+/// The file path of an open command submitted in a review input window —
+/// `/open_file <file>`, `open file <file>`, `open <file>`, `edit file <file>`,
+/// or `edit <file>` (case-insensitive), with any wrapping quotes removed —
+/// matching the open/edit forms `parse_natural_language_command` accepts in the
+/// main prompt. `None` when the input is not one of those forms. This is what
+/// lets `/review` (always) and `/auto_review` (once the run is done) open any
+/// project file in `$EDITOR`, not just the changed files. `open file ` is tried
+/// before the bare `open `, so `open file x` yields `x` rather than `file x`.
+pub fn parse_open_command_target(input: &str) -> Option<&str> {
+    for prefix in ["/open_file ", "open file ", "open ", "edit file ", "edit "] {
+        if let Some(path) = parse_open_file_target(input, prefix) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 pub fn parse_show_file_natural_language_args(input: &str) -> Option<Cow<'_, str>> {
     parse_show_file_natural_language_args_with_prefix(input, "show file ", false)
         .or_else(|| parse_show_file_natural_language_args_with_prefix(input, "show ", true))
