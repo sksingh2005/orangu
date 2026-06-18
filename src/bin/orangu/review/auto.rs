@@ -91,6 +91,49 @@ pub(crate) const AUTO_REVIEW_SKIP_FILENAMES: [&str; 5] = [
 /// already falls through to the full review.
 pub(crate) const AUTO_REVIEW_SOURCE_FILENAMES: [&str; 2] = ["CMakeLists.txt", "requirements.txt"];
 
+/// File extensions forced to a full code review because their guessed MIME
+/// misclassifies them: `mime_guess` maps TypeScript's `.ts`/`.mts` to a
+/// `video/*` MPEG transport-stream type, which would otherwise skip the file as
+/// a video asset. Listed here, they are recognized as code before the skip
+/// check runs — the deliberate "fall back to a code review unless we are sure"
+/// guard against a confident-looking but wrong MIME.
+const AUTO_REVIEW_SOURCE_EXTENSIONS: [&str; 3] = ["ts", "mts", "cts"];
+
+/// MIME essences (from `mime_guess`) recognized as documentation on top of the
+/// curated extension list, so a markup or typesetting source whose extension is
+/// not listed but whose MIME is known still skips the code-related checks. Only
+/// unambiguous documentation types belong here: `text/plain` is deliberately
+/// absent, since metadata files like `CMakeLists.txt` and `requirements.txt`
+/// also map to it.
+const AUTO_REVIEW_DOCUMENTATION_MIMES: [&str; 4] = [
+    "text/markdown",
+    "text/x-markdown",
+    "application/x-tex",
+    "application/x-texinfo",
+];
+
+/// Binary `application/*` MIME essences (from `mime_guess`) whose changes a
+/// review cannot act on: archives, compiled artifacts, and packaged documents.
+/// Top-level `image`, `audio`, `video`, and `font` types — and any essence
+/// naming a font (`application/font-woff`, `application/vnd.ms-fontobject`) —
+/// are recognized directly in `auto_review_skipped_file` and need no entry. The
+/// generic `application/octet-stream` is deliberately absent: too many code
+/// extensions (`.java`, …) map to it, so a real binary carrying it is caught by
+/// the content-based detection instead.
+const AUTO_REVIEW_SKIP_MIMES: [&str; 11] = [
+    "application/pdf",
+    "application/zip",
+    "application/gzip",
+    "application/x-tar",
+    "application/x-7z-compressed",
+    "application/x-bzip2",
+    "application/x-rar-compressed",
+    "application/java-archive",
+    "application/wasm",
+    "application/x-msdownload",
+    "application/vnd.android.package-archive",
+];
+
 /// The base file name of `path` (the final path component), or `""` when there
 /// is none.
 fn auto_review_file_name(path: &str) -> &str {
@@ -108,22 +151,50 @@ fn auto_review_extension(path: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Whether `path` is detected as documentation, by its file extension.
-pub(crate) fn auto_review_documentation_file(path: &str) -> bool {
-    let extension = auto_review_extension(path);
-    AUTO_REVIEW_DOCUMENTATION_EXTENSIONS
-        .iter()
-        .any(|known| extension.eq_ignore_ascii_case(known))
+/// The MIME type guessed for `path` from its extension (`mime_guess`), or `None`
+/// when the extension is unknown. Used to widen the documentation and skip
+/// detection beyond the curated extension lists.
+fn auto_review_mime(path: &str) -> Option<mime_guess::Mime> {
+    mime_guess::from_path(path).first()
 }
 
-/// Whether `path` is a metadata/build file that must take the full per-file
-/// review regardless of its extension (see `AUTO_REVIEW_SOURCE_FILENAMES`).
-/// Matched by name and takes precedence over the documentation and skip checks.
+/// Whether `path` is detected as documentation: its extension is on the curated
+/// list, or its guessed MIME is an unambiguous documentation type
+/// (`AUTO_REVIEW_DOCUMENTATION_MIMES`). A metadata file forced to a full review
+/// (`auto_review_source_file`) is not pulled out here — that override is applied
+/// by `auto_review_kind` — so this can still report `true` for `CMakeLists.txt`.
+pub(crate) fn auto_review_documentation_file(path: &str) -> bool {
+    let extension = auto_review_extension(path);
+    if AUTO_REVIEW_DOCUMENTATION_EXTENSIONS
+        .iter()
+        .any(|known| extension.eq_ignore_ascii_case(known))
+    {
+        return true;
+    }
+    auto_review_mime(path).is_some_and(|mime| {
+        AUTO_REVIEW_DOCUMENTATION_MIMES
+            .iter()
+            .any(|known| mime.essence_str().eq_ignore_ascii_case(known))
+    })
+}
+
+/// Whether `path` must take the full per-file review regardless of how its
+/// extension would otherwise classify it: a metadata/build file matched by name
+/// (`AUTO_REVIEW_SOURCE_FILENAMES`), or a source file whose extension a guessed
+/// MIME misreads (`AUTO_REVIEW_SOURCE_EXTENSIONS`). Takes precedence over the
+/// documentation and skip checks.
 pub(crate) fn auto_review_source_file(path: &str) -> bool {
     let name = auto_review_file_name(path);
-    AUTO_REVIEW_SOURCE_FILENAMES
+    if AUTO_REVIEW_SOURCE_FILENAMES
         .iter()
         .any(|known| name.eq_ignore_ascii_case(known))
+    {
+        return true;
+    }
+    let extension = auto_review_extension(path);
+    AUTO_REVIEW_SOURCE_EXTENSIONS
+        .iter()
+        .any(|known| extension.eq_ignore_ascii_case(known))
 }
 
 /// Whether `path` is on the skip list: a generated lock file or binary asset
@@ -139,30 +210,141 @@ pub(crate) fn auto_review_skipped_file(path: &str) -> bool {
         return true;
     }
     let extension = auto_review_extension(path);
-    AUTO_REVIEW_SKIP_EXTENSIONS
+    if AUTO_REVIEW_SKIP_EXTENSIONS
         .iter()
         .any(|known| extension.eq_ignore_ascii_case(known))
+    {
+        return true;
+    }
+    // Widen the skip detection with the guessed MIME: audio, video, image, and
+    // font assets (by top-level type or a font-naming essence) and the binary
+    // `application/*` types are all unreviewable.
+    auto_review_mime(path).is_some_and(|mime| {
+        let essence = mime.essence_str();
+        matches!(mime.type_().as_str(), "image" | "audio" | "video" | "font")
+            || essence.contains("font")
+            || AUTO_REVIEW_SKIP_MIMES
+                .iter()
+                .any(|known| essence.eq_ignore_ascii_case(known))
+    })
 }
 
-/// The categories scanned for `path`, enabled by its file name and extension.
-/// A forced-full metadata file (`CMakeLists.txt`, …) takes the full review
-/// whatever its extension; a skip-list file (lock files, binary assets) is
-/// approved at once with no categories; a documentation file is reviewed only
-/// for `Documentation`; and everything else — the fallback — is scanned for
-/// every per-file category.
-pub(crate) fn auto_review_file_categories(path: &str) -> &'static [(usize, &'static str)] {
+/// Which of the three review groups a changed file falls into, decided from its
+/// path. `Code` is the default — the group a file lands in unless it is
+/// confidently documentation or skippable — so an unrecognized change is always
+/// given a full review rather than dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AutoReviewKind {
+    /// Approved at once with no category requests (lock files, binary assets).
+    Skip,
+    /// Reviewed only for the `Documentation` category.
+    Documentation,
+    /// Reviewed for every per-file category — the fallback.
+    Code,
+}
+
+/// The review group of `path`, by name and extension alone. A forced-full
+/// metadata file (`CMakeLists.txt`, …) is `Code` whatever its extension; a
+/// skip-list or binary-asset file is `Skip`; a documentation file is
+/// `Documentation`; everything else falls back to `Code`. Content-based binary
+/// detection (`auto_review_entry_categories`) can still pull a `Code` file down
+/// to a skip when its change turns out to be binary.
+pub(crate) fn auto_review_kind(path: &str) -> AutoReviewKind {
     if auto_review_source_file(path) {
-        return &AUTO_REVIEW_FILE_CATEGORIES[..];
+        return AutoReviewKind::Code;
     }
     if auto_review_skipped_file(path) {
-        // Approved at once: no category requests.
-        return &[];
+        return AutoReviewKind::Skip;
     }
     if auto_review_documentation_file(path) {
-        // `Documentation` is the last per-file category.
-        return &AUTO_REVIEW_FILE_CATEGORIES[AUTO_REVIEW_FILE_CATEGORIES.len() - 1..];
+        return AutoReviewKind::Documentation;
     }
-    &AUTO_REVIEW_FILE_CATEGORIES[..]
+    AutoReviewKind::Code
+}
+
+/// The per-file categories enabled for a review group: none for `Skip`, only
+/// `Documentation` (the last per-file category) for `Documentation`, and every
+/// category for `Code`.
+fn auto_review_kind_categories(kind: AutoReviewKind) -> &'static [(usize, &'static str)] {
+    match kind {
+        // Approved at once: no category requests.
+        AutoReviewKind::Skip => &[],
+        // `Documentation` is the last per-file category.
+        AutoReviewKind::Documentation => {
+            &AUTO_REVIEW_FILE_CATEGORIES[AUTO_REVIEW_FILE_CATEGORIES.len() - 1..]
+        }
+        AutoReviewKind::Code => &AUTO_REVIEW_FILE_CATEGORIES[..],
+    }
+}
+
+/// Whether `patch` is the diff git produces for a binary file — the `Binary
+/// files a/… and b/… differ` marker it writes in place of a textual hunk. Such
+/// a change carries no reviewable lines, so the file is skipped even when its
+/// extension is unknown or misleading.
+pub(crate) fn auto_review_binary_patch(patch: &str) -> bool {
+    patch.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("Binary files ") && line.ends_with(" differ")
+    })
+}
+
+/// Whether an `infer` magic-number match is a binary file type a review cannot
+/// act on: an image, audio, video, archive, document, font, e-book, or
+/// executable. Plain text and unrecognized content are not binary.
+fn auto_review_binary_matcher(kind: infer::Type) -> bool {
+    use infer::MatcherType::{App, Archive, Audio, Book, Doc, Font, Image, Video};
+    matches!(
+        kind.matcher_type(),
+        App | Archive | Audio | Book | Doc | Font | Image | Video
+    )
+}
+
+/// Whether `bytes` are detected as binary by their magic number (`infer`). An
+/// undetected buffer is treated as text, so the file falls back to a code
+/// review.
+pub(crate) fn auto_review_binary_content(bytes: &[u8]) -> bool {
+    infer::get(bytes).is_some_and(auto_review_binary_matcher)
+}
+
+/// Whether the file at `path` is detected as binary by its on-disk magic number
+/// (`infer`). Only the file's header is read — magic numbers live at the start —
+/// so a large asset is not slurped whole. Best-effort: an unreadable or missing
+/// file (e.g. a deletion that is no longer on disk) is treated as not binary,
+/// leaving the content-based skip to the patch marker.
+fn auto_review_path_is_binary(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    // 8 KiB comfortably covers every magic number `infer` looks for.
+    let mut header = Vec::new();
+    if file.take(8192).read_to_end(&mut header).is_err() {
+        return false;
+    }
+    auto_review_binary_content(&header)
+}
+
+/// The categories scanned for one changed file: its path-based group
+/// (`auto_review_kind`), with a `Code` file downgraded to a skip when its change
+/// is binary — git diffed it as binary (`auto_review_binary_patch`), or its
+/// on-disk content sniffs as binary (`auto_review_path_is_binary`, when
+/// `repo_root` is known). Only the `Code` fallback is reconsidered: a file
+/// already recognized as documentation or skipped, or forced to a full review,
+/// keeps its group, so the binary check can never override a confident decision.
+pub(crate) fn auto_review_entry_categories(
+    path: &str,
+    patch: &str,
+    repo_root: Option<&Path>,
+) -> &'static [(usize, &'static str)] {
+    let kind = auto_review_kind(path);
+    if kind == AutoReviewKind::Code {
+        let binary = auto_review_binary_patch(patch)
+            || repo_root.is_some_and(|root| auto_review_path_is_binary(&root.join(path)));
+        if binary {
+            return auto_review_kind_categories(AutoReviewKind::Skip);
+        }
+    }
+    auto_review_kind_categories(kind)
 }
 
 /// The Alt+r reject window of `/auto_review`: the category receiving the
@@ -1224,20 +1406,26 @@ pub(crate) async fn run_auto_review_mode(
     state.model = chrome.current_model.to_string();
     let mut exit_requested = false;
     let total = state.files.len();
-    // The run's request count: each file is scanned only for the categories
-    // its detected kind enables (a file detected as documentation skips the
-    // code-related checks), plus the whole-change pass.
-    let total_requests: usize = state
+    // The repository root the file paths are relative to, for the on-disk binary
+    // sniff; `None` (and so a patch-marker-only skip) outside a repository.
+    let repo_root = discover_git_root(workspace);
+    // The categories each file is scanned for, decided once up front so the
+    // progress total and the per-file loop below agree. A file is scanned only
+    // for the categories its detected group enables: a documentation file skips
+    // the code-related checks, and a skipped or binary file gets none.
+    let file_categories: Vec<&'static [(usize, &'static str)]> = state
         .files
         .iter()
-        .map(|file| auto_review_file_categories(&file.path).len())
-        .sum::<usize>()
-        + 1;
+        .map(|file| auto_review_entry_categories(&file.path, &file.patch, repo_root.as_deref()))
+        .collect();
+    // The run's request count: every enabled per-file category, plus the final
+    // whole-change pass.
+    let total_requests: usize = file_categories.iter().map(|cats| cats.len()).sum::<usize>() + 1;
     let mut completed = 0usize;
     // Review each file by itself, one focused request per enabled category.
     // Every request runs in a scratch session so the reviews stay independent
     // and the main chat session is left untouched.
-    'auto: for index in 0..total {
+    'auto: for (index, categories) in file_categories.iter().enumerate() {
         state.selected = Some(index);
         let (path, patch) = {
             let file = &state.files[index];
@@ -1246,7 +1434,7 @@ pub(crate) async fn run_auto_review_mode(
         state.reviewing = Some(index);
         let mut any_rejected = false;
         let mut any_failed = false;
-        for (section, focus) in auto_review_file_categories(&path) {
+        for (section, focus) in *categories {
             let section = *section;
             let category = AUTO_REVIEW_CATEGORIES[section];
             state.status = format!(
@@ -2383,42 +2571,58 @@ mod tests {
 
     #[test]
     fn auto_review_file_categories_follow_the_file_extension() {
-        use crate::review::auto_review_file_categories;
+        use crate::review::auto_review_entry_categories;
         use crate::review::{AUTO_REVIEW_CATEGORIES, AUTO_REVIEW_FILE_CATEGORIES};
 
+        // The path-only decision: no patch and no repo root, so the
+        // content-based binary sniff is a no-op.
+        let categories = |path: &str| auto_review_entry_categories(path, "", None);
+
         // Code files are scanned for every per-file category.
-        assert_eq!(
-            auto_review_file_categories("src/main.rs"),
-            &AUTO_REVIEW_FILE_CATEGORIES[..]
-        );
+        assert_eq!(categories("src/main.rs"), &AUTO_REVIEW_FILE_CATEGORIES[..]);
         // Files without an extension too.
-        assert_eq!(
-            auto_review_file_categories("Makefile"),
-            &AUTO_REVIEW_FILE_CATEGORIES[..]
-        );
-        // Known documentation extensions go straight to Documentation,
-        // case-insensitively — including the extensions added to the list.
-        for path in ["README.md", "doc/manual.RST", "notes.txt", "guide.mdx"] {
-            let categories = auto_review_file_categories(path);
+        assert_eq!(categories("Makefile"), &AUTO_REVIEW_FILE_CATEGORIES[..]);
+        // Code files whose guessed MIME would misclassify them keep the full
+        // review: TypeScript reads as an MPEG transport stream (`video/*`), and
+        // a `.java` source as `application/octet-stream`. Falling back to a code
+        // review is the safe choice when the MIME is not certain.
+        for path in ["app/main.ts", "app/main.mts", "src/App.java"] {
             assert_eq!(
-                categories.len(),
-                1,
-                "expected only Documentation for {path:?}"
+                categories(path),
+                &AUTO_REVIEW_FILE_CATEGORIES[..],
+                "expected the full review for {path:?}"
             );
-            assert_eq!(AUTO_REVIEW_CATEGORIES[categories[0].0], "Documentation");
+        }
+        // Known documentation extensions go straight to Documentation,
+        // case-insensitively — including the extensions added to the list, and
+        // the MIME-detected types (`.tex`) that no extension entry covers.
+        for path in [
+            "README.md",
+            "doc/manual.RST",
+            "notes.txt",
+            "guide.mdx",
+            "paper.tex",
+        ] {
+            let enabled = categories(path);
+            assert_eq!(enabled.len(), 1, "expected only Documentation for {path:?}");
+            assert_eq!(AUTO_REVIEW_CATEGORIES[enabled[0].0], "Documentation");
         }
 
         // A skip-list file (lock file or binary asset) is approved at once: no
-        // categories, so no requests.
+        // categories, so no requests. Audio and video assets, detected by MIME
+        // type, skip too.
         for path in [
             "Cargo.lock",
             "package-lock.json",
             "go.sum",
             "assets/logo.png",
             "fonts/Inter.woff2",
+            "media/theme.mp3",
+            "media/intro.mp4",
+            "dist/app.wasm",
         ] {
             assert!(
-                auto_review_file_categories(path).is_empty(),
+                categories(path).is_empty(),
                 "expected no categories for {path:?}"
             );
         }
@@ -2427,7 +2631,7 @@ mod tests {
         // `.txt` extension would otherwise read as documentation.
         for path in ["CMakeLists.txt", "build/CMakeLists.txt", "requirements.txt"] {
             assert_eq!(
-                auto_review_file_categories(path),
+                categories(path),
                 &AUTO_REVIEW_FILE_CATEGORIES[..],
                 "expected the full review for {path:?}"
             );
@@ -2445,7 +2649,45 @@ mod tests {
         assert!(!auto_review_skipped_file("CMakeLists.txt"));
         assert!(auto_review_skipped_file("Cargo.lock"));
         assert!(auto_review_skipped_file("assets/logo.PNG"));
+        // Audio, video, and font assets are skipped by MIME type, not a curated
+        // extension list.
+        assert!(auto_review_skipped_file("sound/clip.WAV"));
+        assert!(auto_review_skipped_file("clips/demo.mov"));
         assert!(!auto_review_skipped_file("src/main.rs"));
+    }
+
+    #[test]
+    fn auto_review_binary_changes_skip_by_patch_and_content() {
+        use crate::review::{
+            AUTO_REVIEW_FILE_CATEGORIES, auto_review_binary_content, auto_review_binary_patch,
+            auto_review_entry_categories,
+        };
+
+        // git emits this marker instead of a textual hunk for a binary file with
+        // an extension we do not otherwise recognize.
+        let binary_patch = "diff --git a/blob.dat b/blob.dat\n\
+             index 0000000..1111111 100644\n\
+             Binary files a/blob.dat and b/blob.dat differ\n";
+        assert!(auto_review_binary_patch(binary_patch));
+        assert!(
+            auto_review_entry_categories("blob.dat", binary_patch, None).is_empty(),
+            "a binary patch downgrades a code file to a skip"
+        );
+
+        // A textual diff is not a binary change, so it keeps the full review.
+        let text_patch = "diff --git a/src/main.rs b/src/main.rs\n\
+             @@ -1 +1 @@\n\
+             -old\n+new\n";
+        assert!(!auto_review_binary_patch(text_patch));
+        assert_eq!(
+            auto_review_entry_categories("src/main.rs", text_patch, None),
+            &AUTO_REVIEW_FILE_CATEGORIES[..]
+        );
+
+        // Magic-number detection: a PNG header is binary, plain UTF-8 is not.
+        let png_header = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        assert!(auto_review_binary_content(&png_header));
+        assert!(!auto_review_binary_content(b"fn main() {}\n"));
     }
 
     #[test]
