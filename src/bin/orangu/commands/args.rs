@@ -271,6 +271,33 @@ pub fn close_usage_message() -> &'static str {
     "Usage: /close -i <number> or /close -p <number>. Use /help to see available commands."
 }
 
+/// Parse `/issue` arguments — `<field> <number> <value>` — into an
+/// [`IssueAction`]. The field is one of `reviewer`, `assignee`, `label`; the
+/// number is an issue or pull/merge-request number (a leading `#` is allowed);
+/// and the value is the rest of the line (so a multi-word label like
+/// `needs triage` is kept whole). Returns `None` on any malformed input.
+pub fn parse_issue_args(input: &str) -> Option<IssueAction<'_>> {
+    let input = input.trim();
+    let (field_word, rest) = input.split_once(char::is_whitespace)?;
+    let field = IssueField::parse(field_word)?;
+    let rest = rest.trim_start();
+    let (number_word, value) = rest.split_once(char::is_whitespace)?;
+    let number = number_word.trim_start_matches('#').parse::<u64>().ok()?;
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(IssueAction {
+        field,
+        number,
+        value: Cow::Borrowed(value),
+    })
+}
+
+pub fn issue_usage_message() -> &'static str {
+    "Usage: /issue <reviewer|assignee|label> <number> <value>. Use /help to see available commands."
+}
+
 pub fn parse_get_comments_args(input: &str) -> Option<GetCommentsTarget> {
     let input = input.trim();
     if let Some(rest) = input.strip_prefix("-i ") {

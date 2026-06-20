@@ -199,6 +199,51 @@ pub enum CloseTarget {
     PullRequest(u64),
 }
 
+/// A field of an issue or pull/merge request that `/issue` adds a value to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IssueField {
+    /// A review request (pull/merge requests only).
+    Reviewer,
+    /// An assigned user (issues and pull/merge requests).
+    Assignee,
+    /// A label (issues and pull/merge requests).
+    Label,
+}
+
+/// The `/issue` subcommand names, in offer order, used for parsing and Tab
+/// completion. Kept in step with [`IssueField`].
+pub const ISSUE_FIELDS: [&str; 3] = ["reviewer", "assignee", "label"];
+
+impl IssueField {
+    /// Parse a subcommand word (case-insensitive, exact) into a field.
+    pub fn parse(word: &str) -> Option<IssueField> {
+        match word.to_ascii_lowercase().as_str() {
+            "reviewer" => Some(IssueField::Reviewer),
+            "assignee" => Some(IssueField::Assignee),
+            "label" => Some(IssueField::Label),
+            _ => None,
+        }
+    }
+
+    /// The subcommand word for this field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IssueField::Reviewer => "reviewer",
+            IssueField::Assignee => "assignee",
+            IssueField::Label => "label",
+        }
+    }
+}
+
+/// A parsed `/issue <field> <number> <value>` command: add `value` to `field`
+/// of issue/PR `number`. The number may be an issue or a pull/merge request —
+/// which it is is detected against the forge when the command runs.
+pub struct IssueAction<'a> {
+    pub field: IssueField,
+    pub number: u64,
+    pub value: Cow<'a, str>,
+}
+
 pub enum GetCommentsTarget {
     Issue(u64),
     PullRequest(u64),
@@ -282,6 +327,10 @@ pub enum LocalCommand<'a> {
     Pull(Option<u64>),
     Comment(Option<(u64, CommentBody<'a>)>),
     Close(Option<CloseTarget>),
+    /// `/issue <reviewer|assignee|label> <number> <value>`: add a reviewer,
+    /// assignee, or label to an issue or pull/merge request. `None` is a usage
+    /// error (missing or malformed arguments).
+    Issue(Option<IssueAction<'a>>),
     GetComments(Option<GetCommentsTarget>),
     Prune(Option<PruneTarget>),
     CreatePullRequest,

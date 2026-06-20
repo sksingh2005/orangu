@@ -699,6 +699,44 @@ close pr 58
 
 \newpage
 
+## /issue
+
+Adds a **reviewer**, **assignee**, or **label** to a GitHub/GitLab issue or pull/merge request. Requires the `gh` or `glab` CLI.
+
+```text
+/issue <reviewer|assignee|label> <number> <value>
+```
+
+The three subcommands are:
+
+- **`reviewer`** — request a review from a user. Reviewers exist only on pull/merge requests, so the number must be one; an issue number is refused.
+- **`assignee`** — assign a user. Works on both issues and pull/merge requests.
+- **`label`** — add a label. Works on both, and the value may contain spaces (it is the rest of the line), so `needs triage` is a single label.
+
+The `<number>` may be an issue **or** a pull/merge request — orangu detects which by asking the CLI (`gh pr view` / `glab mr view` first, then the issue view) and runs the matching edit:
+
+- GitHub — `gh pr edit <n> --add-reviewer|--add-assignee|--add-label <value>`, or `gh issue edit <n> --add-assignee|--add-label <value>`.
+- GitLab — `glab mr update <n> --reviewer|--assignee|--label <value>`, or `glab issue update <n> --assignee|--label <value>`.
+
+### Completion
+
+Every part Tab-completes (and shows the inline ghost hint):
+
+- the **subcommand** completes against `reviewer`, `assignee`, `label`;
+- the **value** completes against the repository's candidates for that subcommand — collaborators for `reviewer`, assignable users for `assignee`, and label names for `label`.
+
+The candidate lists are fetched once at startup (via `gh`/`glab`) and cached, so completion never shells out on a keystroke. The `<number>` is typed directly (no completion). So `/issue re⇥ 114 je⇥` expands to `/issue reviewer 114 jesperpedersen`.
+
+### Examples
+
+```text
+/issue reviewer 114 jesperpedersen
+/issue assignee 51 alice
+/issue label 51 needs triage
+```
+
+\newpage
+
 ## /get_comments
 
 Lists the comments on a GitHub/GitLab issue or pull request. Requires the `gh` or `glab` CLI.

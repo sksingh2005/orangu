@@ -64,6 +64,7 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
         "/pull" => Some(LocalCommand::Pull(None)),
         "/comment" => Some(LocalCommand::Comment(None)),
         "/close" => Some(LocalCommand::Close(None)),
+        "/issue" => Some(LocalCommand::Issue(None)),
         "/get_comments" => Some(LocalCommand::GetComments(None)),
         "/prune" => Some(LocalCommand::Prune(None)),
         "/pull_request" => Some(LocalCommand::CreatePullRequest),
@@ -151,6 +152,9 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
             }
             if let Some(args) = input.strip_prefix("/close ") {
                 return Some(LocalCommand::Close(parse_close_args(args.trim())));
+            }
+            if let Some(args) = input.strip_prefix("/issue ") {
+                return Some(LocalCommand::Issue(parse_issue_args(args)));
             }
             if let Some(args) = input.strip_prefix("/get_comments ") {
                 return Some(LocalCommand::GetComments(parse_get_comments_args(

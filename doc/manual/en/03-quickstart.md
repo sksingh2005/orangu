@@ -109,6 +109,7 @@ Then start with:
 /cherry_pick abc1234
 /comment 51 "My comment"
 /close -i 51
+/issue reviewer 114 jesperpedersen
 /get_comments -i 51
 /commit "[#42] My feature"
 /restore README.md

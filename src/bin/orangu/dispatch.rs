@@ -407,6 +407,13 @@ pub(crate) fn handle_command(
             Ok(output) => Ok(CommandOutcome::Output(output)),
             Err(err) => Ok(local_command_error(err)),
         },
+        LocalCommand::Issue(None) => Ok(CommandOutcome::OutputError(
+            issue_usage_message().to_string(),
+        )),
+        LocalCommand::Issue(Some(action)) => match issue_field_output(workspace, &action, forge) {
+            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Err(err) => Ok(local_command_error(err)),
+        },
         LocalCommand::GetComments(None) => Ok(CommandOutcome::OutputError(
             get_comments_usage_message().to_string(),
         )),

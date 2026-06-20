@@ -23,6 +23,7 @@ mod bisect;
 mod files;
 mod ghost;
 mod git_refs;
+mod issue;
 mod pull;
 mod session;
 
@@ -30,6 +31,7 @@ pub use bisect::*;
 pub use files::*;
 pub use ghost::*;
 pub use git_refs::*;
+pub use issue::*;
 pub use pull::*;
 pub(crate) use session::*;
 
@@ -52,6 +54,7 @@ pub const COMMANDS: &[&str] = &[
     "/pull",
     "/comment",
     "/close",
+    "/issue",
     "/get_comments",
     "/prune",
     "/rebase",
@@ -233,6 +236,10 @@ fn structured_completion_candidates(
     }
 
     if let Some((start, candidates)) = comment_file_completion_candidates(prefix) {
+        return Some((start, cursor, candidates));
+    }
+
+    if let Some((start, candidates)) = issue_completion_candidates(prefix) {
         return Some((start, cursor, candidates));
     }
 

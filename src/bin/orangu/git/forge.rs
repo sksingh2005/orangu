@@ -17,7 +17,7 @@ use anyhow::{Context, Result, anyhow};
 use std::{fs, path::Path};
 
 use super::*;
-use crate::commands::{CloseTarget, CommentBody, GetCommentsTarget};
+use crate::commands::{CloseTarget, CommentBody, GetCommentsTarget, IssueAction, IssueField};
 use crate::render::{ANSI_FG_RESET, ANSI_FG_SUBTLE};
 
 /// An open pull request (GitHub) or merge request (GitLab), reduced to the number
@@ -393,6 +393,250 @@ pub fn close_output(workspace: &Path, target: &CloseTarget, forge: Forge) -> Res
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Whether a number names a pull/merge request or a plain issue. They share one
+/// number space on both forges, so `/issue` detects which by asking the CLI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForgeTargetKind {
+    PullRequest,
+    Issue,
+}
+
+/// Detect whether `number` is a pull/merge request or an issue in the repository
+/// at `repo_root`, by asking the forge CLI (`gh`/`glab`). A pull request is
+/// tried first (it is also reachable as an issue on GitHub, so the order
+/// matters); if neither view succeeds the number does not exist.
+fn forge_target_kind(repo_root: &Path, number: u64, forge: Forge) -> Result<ForgeTargetKind> {
+    let cli = forge.cli();
+    let number = number.to_string();
+    // (args that view a PR/MR, args that view an issue)
+    let (pr_args, issue_args): (&[&str], &[&str]) = match forge {
+        Forge::GitHub => (&["pr", "view", &number], &["issue", "view", &number]),
+        Forge::GitLab => (&["mr", "view", &number], &["issue", "view", &number]),
+    };
+    let views = |args: &[&str]| -> Result<bool> {
+        match std::process::Command::new(cli)
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+        {
+            Ok(output) => Ok(output.status.success()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Err(anyhow!("issue requires the {cli} CLI to be installed"))
+            }
+            Err(err) => Err(err).context(format!("failed to run {cli}")),
+        }
+    };
+    if views(pr_args)? {
+        Ok(ForgeTargetKind::PullRequest)
+    } else if views(issue_args)? {
+        Ok(ForgeTargetKind::Issue)
+    } else {
+        Err(anyhow!("no issue or pull request #{number} found"))
+    }
+}
+
+/// `/issue <field> <number> <value>`: add a reviewer, assignee, or label to an
+/// issue or pull/merge request. The number is detected as an issue or a
+/// pull/merge request first (reviewers only apply to the latter), then the
+/// matching `gh`/`glab` edit command runs.
+pub fn issue_field_output(
+    workspace: &Path,
+    action: &IssueAction<'_>,
+    forge: Forge,
+) -> Result<String> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("issue is only available inside a Git repository"))?;
+    let cli = forge.cli();
+    let kind = forge_target_kind(&repo_root, action.number, forge)?;
+
+    // Reviewers only exist on pull/merge requests.
+    if action.field == IssueField::Reviewer && kind == ForgeTargetKind::Issue {
+        return Err(anyhow!(
+            "#{} is an issue; reviewers can only be added to pull requests",
+            action.number
+        ));
+    }
+
+    let number = action.number.to_string();
+    let value = action.value.as_ref();
+    // GitHub: `gh pr edit N --add-reviewer V` / `--add-assignee V` / `--add-label V`,
+    // or `gh issue edit N --add-assignee V` / `--add-label V`.
+    // GitLab: `glab mr update N --reviewer V` / `--assignee V` / `--label V`,
+    // or `glab issue update N --assignee V` / `--label V`.
+    let args: Vec<&str> = match (forge, kind, action.field) {
+        (Forge::GitHub, ForgeTargetKind::PullRequest, IssueField::Reviewer) => {
+            vec!["pr", "edit", &number, "--add-reviewer", value]
+        }
+        (Forge::GitHub, ForgeTargetKind::PullRequest, IssueField::Assignee) => {
+            vec!["pr", "edit", &number, "--add-assignee", value]
+        }
+        (Forge::GitHub, ForgeTargetKind::PullRequest, IssueField::Label) => {
+            vec!["pr", "edit", &number, "--add-label", value]
+        }
+        (Forge::GitHub, ForgeTargetKind::Issue, IssueField::Assignee) => {
+            vec!["issue", "edit", &number, "--add-assignee", value]
+        }
+        (Forge::GitHub, ForgeTargetKind::Issue, IssueField::Label) => {
+            vec!["issue", "edit", &number, "--add-label", value]
+        }
+        (Forge::GitLab, ForgeTargetKind::PullRequest, IssueField::Reviewer) => {
+            vec!["mr", "update", &number, "--reviewer", value]
+        }
+        (Forge::GitLab, ForgeTargetKind::PullRequest, IssueField::Assignee) => {
+            vec!["mr", "update", &number, "--assignee", value]
+        }
+        (Forge::GitLab, ForgeTargetKind::PullRequest, IssueField::Label) => {
+            vec!["mr", "update", &number, "--label", value]
+        }
+        (Forge::GitLab, ForgeTargetKind::Issue, IssueField::Assignee) => {
+            vec!["issue", "update", &number, "--assignee", value]
+        }
+        (Forge::GitLab, ForgeTargetKind::Issue, IssueField::Label) => {
+            vec!["issue", "update", &number, "--label", value]
+        }
+        // Reviewer on an issue is already rejected above.
+        (_, ForgeTargetKind::Issue, IssueField::Reviewer) => unreachable!(),
+    };
+
+    let output = match std::process::Command::new(cli)
+        .args(&args)
+        .current_dir(&repo_root)
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow!("issue requires the {cli} CLI to be installed"));
+        }
+        Err(err) => return Err(err).context(format!("failed to run {cli}")),
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "{cli} {} edit failed{}",
+            action.field.as_str(),
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let target = match kind {
+        ForgeTargetKind::PullRequest => "pull request",
+        ForgeTargetKind::Issue => "issue",
+    };
+    Ok(format!(
+        "Added {} {} to {target} #{number}",
+        action.field.as_str(),
+        action.value
+    ))
+}
+
+/// The reviewers, assignees, and labels a repository offers, fetched once at
+/// startup so `/issue` value completion needs no network call per keystroke.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IssueMetadata {
+    /// Logins that can be requested as reviewers (repository collaborators).
+    pub reviewers: Vec<String>,
+    /// Logins that can be assigned.
+    pub assignees: Vec<String>,
+    /// Label names.
+    pub labels: Vec<String>,
+}
+
+/// Fetch the repository's candidate reviewers, assignees, and labels via the
+/// forge CLI. Returns empty lists (never an error) when the workspace is not a
+/// Git repository, the CLI is missing, or a query fails, so a missing or
+/// offline `gh`/`glab` cannot break startup — completion simply offers nothing.
+pub fn fetch_issue_metadata(workspace: &Path, forge: Forge) -> IssueMetadata {
+    let Some(repo_root) = discover_git_root(workspace) else {
+        return IssueMetadata::default();
+    };
+    let cli = forge.cli();
+    // `gh api` / `glab api` resolve `{owner}/{repo}` / `:id` to the current repo.
+    let (reviewer_args, assignee_args, label_args): (&[&str], &[&str], &[&str]) = match forge {
+        Forge::GitHub => (
+            &[
+                "api",
+                "repos/{owner}/{repo}/collaborators",
+                "--jq",
+                ".[].login",
+            ],
+            &["api", "repos/{owner}/{repo}/assignees", "--jq", ".[].login"],
+            &["label", "list", "--json", "name", "--jq", ".[].name"],
+        ),
+        Forge::GitLab => (
+            &["api", "projects/:id/members/all", "--paginate"],
+            &["api", "projects/:id/members/all", "--paginate"],
+            &["label", "list"],
+        ),
+    };
+    // GitLab's `api members` returns JSON objects; pull the `username` field out.
+    // GitHub's `--jq` already yields one login per line.
+    let collect = |args: &[&str], json_field: Option<&str>| -> Vec<String> {
+        let Ok(output) = std::process::Command::new(cli)
+            .args(args)
+            .current_dir(&repo_root)
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        match json_field {
+            Some(field) => parse_member_usernames(&text, field),
+            None => text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect(),
+        }
+    };
+
+    match forge {
+        Forge::GitHub => IssueMetadata {
+            reviewers: collect(reviewer_args, None),
+            assignees: collect(assignee_args, None),
+            labels: collect(label_args, None),
+        },
+        Forge::GitLab => {
+            let members = collect(reviewer_args, Some("username"));
+            IssueMetadata {
+                reviewers: members.clone(),
+                assignees: members,
+                labels: collect(label_args, None),
+            }
+        }
+    }
+}
+
+/// Pull the string `field` out of every object in a JSON array of `{...}`
+/// members (GitLab `api .../members`), without a JSON dependency: a small
+/// scan for `"field": "value"` occurrences. Deduplicates while preserving order.
+fn parse_member_usernames(text: &str, field: &str) -> Vec<String> {
+    let needle = format!("\"{field}\"");
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(pos) = rest.find(&needle) {
+        rest = &rest[pos + needle.len()..];
+        // Skip past the colon to the opening quote of the value.
+        let Some(colon) = rest.find(':') else { break };
+        rest = &rest[colon + 1..];
+        let Some(open) = rest.find('"') else { break };
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find('"') else { break };
+        let value = &rest[..close];
+        if !value.is_empty() && !out.iter().any(|seen| seen == value) {
+            out.push(value.to_string());
+        }
+        rest = &rest[close + 1..];
+    }
+    out
+}
+
 /// One comment on an issue or pull/merge request, as fetched by
 /// [`get_comments_output`].
 #[derive(Debug, PartialEq, Eq)]
@@ -722,6 +966,24 @@ mod tests {
     use super::*;
     use crate::process_env_lock;
     use tempfile::tempdir;
+
+    #[test]
+    fn parses_gitlab_member_usernames() {
+        // The `username` field is pulled out of each member object, in order and
+        // de-duplicated, ignoring the other fields (id, name, ...).
+        let json = r#"[
+            {"id": 1, "username": "alice", "name": "Alice A"},
+            {"id": 2, "username": "bob", "name": "Bob B"},
+            {"id": 3, "username": "alice", "name": "Alice again"}
+        ]"#;
+        assert_eq!(
+            parse_member_usernames(json, "username"),
+            vec!["alice", "bob"]
+        );
+        // No matching field ⇒ empty.
+        assert!(parse_member_usernames(json, "email").is_empty());
+        assert!(parse_member_usernames("", "username").is_empty());
+    }
 
     #[test]
     fn parses_github_pull_request_list() {

@@ -75,10 +75,11 @@ use commands::{
     BisectSubcommand, BranchSubcommand, CommandContext, CommandOutcome, CommandState, ExportTarget,
     LocalCommand, LocalError, PruneTarget, StashSubcommand, add_file_usage_message,
     amend_usage_message, cherry_pick_usage_message, close_usage_message, comment_usage_message,
-    commit_usage_message, get_comments_usage_message, grep_usage_message, merge_usage_message,
-    model_usage_message, move_file_usage_message, open_file_usage_message, parse_local_command,
-    prune_usage_message, pull_usage_message, remove_file_usage_message, restore_usage_message,
-    server_usage_message, sorted_model_names, system_prompt, system_prompt_with_skills,
+    commit_usage_message, get_comments_usage_message, grep_usage_message, issue_usage_message,
+    merge_usage_message, model_usage_message, move_file_usage_message, open_file_usage_message,
+    parse_local_command, prune_usage_message, pull_usage_message, remove_file_usage_message,
+    restore_usage_message, server_usage_message, sorted_model_names, system_prompt,
+    system_prompt_with_skills,
 };
 use dispatch::*;
 use git::{
@@ -87,11 +88,12 @@ use git::{
     branch_create_output, branch_delete_output, branch_list_all_output, branch_list_output,
     branch_rename_output, cherry_pick_output, close_output, collect_review_diff, comment_output,
     commit_output, create_pull_request_output, discover_git_root, fetch_active_pull_requests,
-    fetch_output, get_comments_output, git_checkout, git_diff_against_branch, git_workspace_diff,
-    grep_output, init_repo_output, list_workspace_files_tree, log_output, merge_output,
-    move_file_output, open_in_editor, pull_request_output, push_output, rebase_output,
-    remove_file_output, restore_output, squash_output, stash_drop_output, stash_list_output,
-    stash_output, stash_pop_output, status_output, sync_default_branch, workspace_branch_name,
+    fetch_issue_metadata, fetch_output, get_comments_output, git_checkout, git_diff_against_branch,
+    git_workspace_diff, grep_output, init_repo_output, issue_field_output,
+    list_workspace_files_tree, log_output, merge_output, move_file_output, open_in_editor,
+    pull_request_output, push_output, rebase_output, remove_file_output, restore_output,
+    squash_output, stash_drop_output, stash_list_output, stash_output, stash_pop_output,
+    status_output, sync_default_branch, workspace_branch_name,
 };
 use input::{
     EscapeCancelState, IDLE_STATUS_REFRESH_INTERVAL, InputContext, InputResult, InputState,
@@ -335,6 +337,14 @@ async fn run() -> Result<()> {
         tokio::task::spawn_blocking(move || fetch_active_pull_requests(&pr_workspace, forge))
     });
 
+    // Likewise fetch the repository's reviewers, assignees, and labels once, off
+    // the UI thread, so `/issue` value completion has them without a per-keystroke
+    // `gh`/`glab` call.
+    let mut issue_meta_handle = discover_git_root(tools.workspace()).map(|_| {
+        let meta_workspace = tools.workspace().to_path_buf();
+        tokio::task::spawn_blocking(move || fetch_issue_metadata(&meta_workspace, forge))
+    });
+
     loop {
         let prompt_branch = workspace_branch_name(tools.workspace());
         let active_profile = config
@@ -411,6 +421,17 @@ async fn run() -> Result<()> {
                 }
                 Err(_) => {}
             }
+        }
+
+        // Collect the startup `/issue` metadata fetch once it finishes, caching
+        // the reviewers/assignees/labels for `/issue` completion.
+        if issue_meta_handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+            && let Some(handle) = issue_meta_handle.take()
+            && let Ok(metadata) = handle.await
+        {
+            completion::set_issue_metadata(metadata);
         }
 
         let resume_left_status = startup_notice_until

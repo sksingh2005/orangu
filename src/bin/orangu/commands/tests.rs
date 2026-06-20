@@ -488,6 +488,54 @@ fn parses_close_commands() {
 }
 
 #[test]
+fn parses_issue_commands() {
+    use crate::commands::IssueField;
+
+    match parse_local_command("/issue reviewer 114 jesperpedersen") {
+        Some(LocalCommand::Issue(Some(action))) => {
+            assert_eq!(action.field, IssueField::Reviewer);
+            assert_eq!(action.number, 114);
+            assert_eq!(action.value, "jesperpedersen");
+        }
+        other => panic!("expected a reviewer action, got {:?}", other.is_some()),
+    }
+
+    // The field is case-insensitive and a leading `#` on the number is allowed.
+    match parse_local_command("/issue Assignee #5 bob") {
+        Some(LocalCommand::Issue(Some(action))) => {
+            assert_eq!(action.field, IssueField::Assignee);
+            assert_eq!(action.number, 5);
+            assert_eq!(action.value, "bob");
+        }
+        _ => panic!("expected an assignee action"),
+    }
+
+    // A label value may carry spaces — it is the rest of the line.
+    match parse_local_command("/issue label 7 needs triage") {
+        Some(LocalCommand::Issue(Some(action))) => {
+            assert_eq!(action.field, IssueField::Label);
+            assert_eq!(action.number, 7);
+            assert_eq!(action.value, "needs triage");
+        }
+        _ => panic!("expected a label action"),
+    }
+
+    // Missing pieces, an unknown field, or a non-numeric number are usage errors.
+    for bad in [
+        "/issue",
+        "/issue reviewer",
+        "/issue reviewer 114",
+        "/issue bogus 1 x",
+        "/issue reviewer notanumber x",
+    ] {
+        assert!(
+            matches!(parse_local_command(bad), Some(LocalCommand::Issue(None))),
+            "expected a usage error for {bad:?}"
+        );
+    }
+}
+
+#[test]
 fn parses_get_comments_commands() {
     assert!(matches!(
         parse_local_command("/get_comments -i 69"),
