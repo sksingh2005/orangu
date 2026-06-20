@@ -422,6 +422,15 @@ pub(crate) struct AutoReviewState {
     pub(crate) projected_finish: Option<std::time::Instant>,
     /// The run finished every file and the overall pass.
     pub(crate) done: bool,
+    /// Whether the auto review run has been started (Alt+s, or `immediate`).
+    /// While `false` the view is the pre-start phase: the report shows
+    /// `(Press Alt+s)` placeholders and files can be navigated (Alt+j/Alt+k)
+    /// and marked Ignore (Alt+m) before the run begins.
+    pub(crate) run_started: bool,
+    /// Per-file Ignore flag (parallel to `files`): an ignored file is skipped
+    /// from the run entirely and shown with a blue dot. Toggled with Alt+m
+    /// during the pre-start phase.
+    pub(crate) ignored: Vec<bool>,
     /// The run was cancelled with Esc Esc.
     pub(crate) cancelled: bool,
     /// When set, the Alt+r reject window is open over the panes (browse
@@ -433,6 +442,7 @@ pub(crate) struct AutoReviewState {
 
 impl AutoReviewState {
     pub(crate) fn new(launch: ReviewLaunch) -> Self {
+        let ignored = vec![false; launch.files.len()];
         Self {
             files: launch.files,
             selected: None,
@@ -446,9 +456,45 @@ impl AutoReviewState {
             finished: None,
             projected_finish: None,
             done: false,
+            run_started: false,
+            ignored,
             cancelled: false,
             reject: None,
             model: String::new(),
+        }
+    }
+
+    /// Whether the file at `index` is marked Ignore (skipped from the run).
+    pub(crate) fn is_ignored(&self, index: usize) -> bool {
+        self.ignored.get(index).copied().unwrap_or(false)
+    }
+
+    /// Alt+m during the pre-start phase: toggle the highlighted file between
+    /// Ignore and Normal. A no-op with no file highlighted or once the run has
+    /// started (Ignore can only be set before the review begins).
+    pub(crate) fn toggle_ignore_selected(&mut self) {
+        if self.run_started {
+            return;
+        }
+        if let Some(index) = self.selected
+            && let Some(flag) = self.ignored.get_mut(index)
+        {
+            *flag = !*flag;
+        }
+    }
+
+    /// Begin the run (Alt+s, or the `immediate` argument): mark it started and
+    /// restart the clock so the `Time:` element measures the review, not the
+    /// time spent on the pre-start screen. Ignored files are skipped from the
+    /// run, so they are approved up front — they keep their blue dot but count
+    /// as approved toward the verdict.
+    pub(crate) fn begin_run(&mut self) {
+        self.run_started = true;
+        self.started = std::time::Instant::now();
+        for index in 0..self.files.len() {
+            if self.is_ignored(index) {
+                self.files[index].status = ReviewStatus::Approved;
+            }
         }
     }
 
@@ -512,6 +558,8 @@ impl AutoReviewState {
     /// this patch` when every file is approved, otherwise `orangu rejects
     /// this patch`.
     pub(crate) fn conclusion_verdict(&self) -> &'static str {
+        // Ignored files are approved when the run starts, so a plain status
+        // check already counts them as approved.
         let all_approved = self
             .files
             .iter()
@@ -555,6 +603,8 @@ impl AutoReviewState {
     /// bold), grouped by their status, rejected first. Empty when every file is
     /// approved.
     pub(crate) fn conclusion_entries(&self) -> Vec<(String, String)> {
+        // Ignored files are approved when the run starts, so they never reach
+        // this rejected / not-reviewed listing.
         let mut entries = Vec::new();
         for file in &self.files {
             if file.status == ReviewStatus::Rejected {
@@ -605,6 +655,13 @@ impl AutoReviewState {
     /// "line" the user is pointing at maps back to.
     pub(crate) fn build_report(&self) -> (Vec<String>, Vec<AutoReviewItem>) {
         let pending = !(self.done || self.cancelled);
+        // Before the run starts the placeholder invites Alt+s; once it is
+        // running (but not yet done) it shows the usual pending marker.
+        let placeholder = if !self.run_started {
+            "\x1b[2m(Press Alt+s)\x1b[0m"
+        } else {
+            "\x1b[2m(pending)\x1b[0m"
+        };
         let mut lines = Vec::new();
         let mut items = Vec::new();
         for (index, name) in AUTO_REVIEW_CATEGORIES.iter().enumerate() {
@@ -613,7 +670,7 @@ impl AutoReviewState {
             let section = &self.sections[index];
             if section.is_empty() {
                 if pending {
-                    lines.push("\x1b[2m(pending)\x1b[0m".to_string());
+                    lines.push(placeholder.to_string());
                 } else {
                     lines.push("No issues found".to_string());
                 }
@@ -637,7 +694,7 @@ impl AutoReviewState {
         lines.push(format!("\x1b[1m{AUTO_REVIEW_CONCLUSION}\x1b[0m"));
         lines.push(String::new());
         if pending {
-            lines.push("\x1b[2m(pending)\x1b[0m".to_string());
+            lines.push(placeholder.to_string());
         } else {
             // The verdict stands alone in bold; the affected files follow as a
             // bullet list.
@@ -1399,6 +1456,10 @@ pub(crate) fn print_auto_review_screen(
             // Pulsing the index on the render tick makes the dot blink.
             reviewing: state.reviewing.filter(|_| blink_on),
             browsing: state.done || state.cancelled,
+            // Pre-start phase: the run has not begun and is neither done nor
+            // cancelled.
+            prestart: !state.run_started && !state.done && !state.cancelled,
+            ignored: &state.ignored,
             reject,
             report_lines: &report_lines,
             // Highlight the Up/Down item cursor only while browsing the report.
@@ -1439,9 +1500,25 @@ pub(crate) async fn run_auto_review_mode(
     feedback: bool,
     skills: &orangu::skills::SkillRegistry,
 ) -> Result<AutoReviewState> {
+    let immediate = launch.immediate;
     let mut state = AutoReviewState::new(launch);
     state.model = chrome.current_model.to_string();
     let mut exit_requested = false;
+
+    // Pre-start phase: unless `immediate` was given, the run waits for Alt+s so
+    // the user can navigate the files (Alt+j/Alt+k) and mark any as Ignore
+    // (Alt+m) first. Leaving here (Alt+x or Esc Esc) returns without reviewing.
+    if !immediate {
+        if !state.files.is_empty() {
+            state.selected = Some(0);
+        }
+        match run_auto_review_prestart(&mut state, viewport, chrome, terminal)? {
+            PreStartOutcome::Start => {}
+            PreStartOutcome::Exit => return Ok(state),
+        }
+    }
+    state.begin_run();
+
     let total = state.files.len();
     // The repository root the file paths are relative to, for the on-disk binary
     // sniff; `None` (and so a patch-marker-only skip) outside a repository.
@@ -1455,14 +1532,25 @@ pub(crate) async fn run_auto_review_mode(
         .iter()
         .map(|file| auto_review_entry_categories(&file.path, &file.patch, repo_root.as_deref()))
         .collect();
-    // The run's request count: every enabled per-file category, plus the final
-    // whole-change pass.
-    let total_requests: usize = file_categories.iter().map(|cats| cats.len()).sum::<usize>() + 1;
+    // The run's request count: every enabled per-file category of a reviewed
+    // (non-ignored) file, plus the final whole-change pass.
+    let total_requests: usize = file_categories
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !state.is_ignored(*index))
+        .map(|(_, cats)| cats.len())
+        .sum::<usize>()
+        + 1;
     let mut completed = 0usize;
     // Review each file by itself, one focused request per enabled category.
     // Every request runs in a scratch session so the reviews stay independent
     // and the main chat session is left untouched.
     'auto: for (index, categories) in file_categories.iter().enumerate() {
+        // An ignored file is skipped entirely: it keeps its blue dot and never
+        // gets a review status.
+        if state.is_ignored(index) {
+            continue;
+        }
         state.selected = Some(index);
         let (path, patch) = {
             let file = &state.files[index];
@@ -1594,6 +1682,119 @@ pub(crate) async fn run_auto_review_mode(
         run_auto_review_browse(&mut state, viewport, chrome, workspace, terminal, skills)?;
     }
     Ok(state)
+}
+
+/// How the pre-start phase ended.
+pub(crate) enum PreStartOutcome {
+    /// Alt+s: begin the review.
+    Start,
+    /// Alt+x or Esc Esc: leave without reviewing.
+    Exit,
+}
+
+/// The pre-start phase of `/auto_review`: the panes are drawn with the
+/// `(Press Alt+s)` placeholders, and the user can switch the highlighted file
+/// (Alt+j/Alt+k), toggle it between Normal and Ignore (Alt+m), and scroll the
+/// (empty) report before starting the run with Alt+s. Alt+x or a double Esc
+/// leaves without reviewing. No LLM requests run here, so the loop simply blocks
+/// on input between renders.
+pub(crate) fn run_auto_review_prestart(
+    state: &mut AutoReviewState,
+    viewport: &mut ViewportState,
+    chrome: ReviewChrome<'_>,
+    terminal: &str,
+) -> Result<PreStartOutcome> {
+    let mut escape_cancel = EscapeCancelState::default();
+    loop {
+        let body_height = auto_review_pane_body_height(
+            viewport.actual_height,
+            "",
+            chrome.prompt_branch,
+            viewport.actual_width,
+        );
+        let right_width = orangu::tui::review_right_width(&state.files, viewport.actual_width);
+        let left_width = viewport.actual_width.saturating_sub(right_width + 1).max(1);
+        state.clamp(body_height, left_width);
+        state.status = auto_review_prestart_status(state);
+        print_auto_review_screen(state, viewport, chrome, None, false, "", 0, "");
+        std::io::stdout().flush()?;
+
+        let (code, modifiers) = match event::read()? {
+            Event::Resize(width, height) => {
+                viewport.on_resize(usize::from(width), usize::from(height));
+                continue;
+            }
+            Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind,
+                ..
+            }) if kind == KeyEventKind::Press || kind == KeyEventKind::Repeat => (code, modifiers),
+            _ => continue,
+        };
+        let alt =
+            modifiers.contains(KeyModifiers::ALT) && !modifiers.contains(KeyModifiers::CONTROL);
+
+        // A second Esc within the timeout leaves; the first arms it.
+        if code == KeyCode::Esc {
+            if escape_cancel.handle_escape(std::time::Instant::now()) {
+                return Ok(PreStartOutcome::Exit);
+            }
+            continue;
+        }
+        escape_cancel.reset();
+
+        match (code, alt) {
+            (KeyCode::Char('s'), true) => return Ok(PreStartOutcome::Start),
+            (KeyCode::Char('x'), true) => return Ok(PreStartOutcome::Exit),
+            (KeyCode::Char('j'), true) => state.select_next(),
+            (KeyCode::Char('k'), true) => state.select_prev(),
+            (KeyCode::Char('m'), true) => state.toggle_ignore_selected(),
+            // Alt+e opens the selected file's diff in `$EDITOR`, like `/diff`.
+            (KeyCode::Char('e'), true) => {
+                if let Err(err) = open_selected_file_diff(state, terminal) {
+                    state.status = format!("Open diff failed: {err:#}");
+                }
+            }
+            (KeyCode::Up, _) => state.scroll = state.scroll.saturating_sub(1),
+            (KeyCode::Down, _) => state.scroll = state.scroll.saturating_add(1),
+            (KeyCode::Left, _) => state.x_offset = state.x_offset.saturating_sub(1),
+            (KeyCode::Right, _) => state.x_offset = state.x_offset.saturating_add(1),
+            (KeyCode::PageUp, _) => state.scroll = state.scroll.saturating_sub(body_height),
+            (KeyCode::PageDown, _) => state.scroll = state.scroll.saturating_add(body_height),
+            _ => {}
+        }
+    }
+}
+
+/// Write the selected file's diff to a temporary file and open it in `$EDITOR`,
+/// the pre-start equivalent of `/diff` for one file. The diff is the unified
+/// patch already collected for the review; an absolute temp path (outside the
+/// workspace) is used so the editor opens it directly. A no-op with no file
+/// highlighted.
+fn open_selected_file_diff(state: &AutoReviewState, terminal: &str) -> Result<()> {
+    let Some(file) = state.selected.and_then(|index| state.files.get(index)) else {
+        return Ok(());
+    };
+    let mut name = String::from("orangu-diff-");
+    name.push_str(&file.path.replace(['/', '\\'], "-"));
+    name.push_str(".diff");
+    let path = std::env::temp_dir().join(name);
+    std::fs::write(&path, &file.patch)
+        .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", path.display()))?;
+    crate::git::open_path_in_editor(&path, terminal)
+}
+
+/// The pre-start status bar: how many files will be reviewed and how many are
+/// marked Ignore, with a reminder to start.
+fn auto_review_prestart_status(state: &AutoReviewState) -> String {
+    let ignored = state.ignored.iter().filter(|flag| **flag).count();
+    let to_review = state.files.len().saturating_sub(ignored);
+    if ignored > 0 {
+        format!("Ready: {to_review} to review, {ignored} ignored  Press Alt+s to start")
+    } else {
+        format!("Ready: {to_review} to review  Press Alt+s to start")
+    }
 }
 
 /// Result of one auto review LLM request.
@@ -2099,6 +2300,7 @@ mod tests {
         use orangu::tui::{ReviewEntry, ReviewStatus};
 
         let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![ReviewEntry {
                 path: "a.rs".to_string(),
                 status: ReviewStatus::Approved,
@@ -2165,6 +2367,7 @@ mod tests {
             patch: String::new(),
         };
         let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![entry("a.rs"), entry("b.rs")],
         });
 
@@ -2208,6 +2411,7 @@ mod tests {
             patch: String::new(),
         };
         let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![entry("a.rs"), entry("b.rs")],
         });
         // A mix of line-bearing (`**path:line**:`) and line-less (`**path**:`,
@@ -2246,6 +2450,7 @@ mod tests {
             patch: String::new(),
         };
         let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![entry("a.rs"), entry("b.rs")],
         });
         state.sections[1].push("**a.rs:42**: broken loop".to_string());
@@ -2303,6 +2508,7 @@ mod tests {
             patch: String::new(),
         };
         let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![entry("a.rs"), entry("b.rs")],
         });
         // Code (two findings), Security (one), and the Conclusion (two rejected
@@ -2358,6 +2564,7 @@ mod tests {
             patch: String::new(),
         };
         let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![entry("a.rs"), entry("b.rs")],
         });
         state.sections[1].push("**a.rs:42**: broken loop".to_string());
@@ -2431,6 +2638,7 @@ mod tests {
         use orangu::tui::{ReviewEntry, ReviewStatus};
 
         let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![ReviewEntry {
                 path: "a.rs".to_string(),
                 status: ReviewStatus::Approved,
@@ -2488,6 +2696,7 @@ mod tests {
         );
 
         let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![ReviewEntry {
                 path: "a.rs".to_string(),
                 status: ReviewStatus::Approved,
@@ -2572,7 +2781,10 @@ mod tests {
 
         // `Time:` follows the progress information and freezes when the run
         // ends. (The duration format itself is covered by the tui tests.)
-        let mut state = AutoReviewState::new(ReviewLaunch { files: Vec::new() });
+        let mut state = AutoReviewState::new(ReviewLaunch {
+            files: Vec::new(),
+            immediate: false,
+        });
         state.status = "Category: Code  Progress: 1/13 (7%)".to_string();
         let text = state.status_text();
         let progress = text.find("Progress:").expect("progress in status");
@@ -2611,6 +2823,7 @@ mod tests {
             patch: String::new(),
         };
         let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![entry("a.rs"), entry("b.rs")],
         });
 
@@ -2636,6 +2849,7 @@ mod tests {
 
         // Cancelling clears the highlight too.
         let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![entry("a.rs")],
         });
         state.selected = Some(0);
@@ -2796,6 +3010,7 @@ mod tests {
         use orangu::tui::{ReviewEntry, ReviewStatus};
 
         let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![ReviewEntry {
                 path: "a.rs".to_string(),
                 status: ReviewStatus::Approved,
@@ -2913,6 +3128,7 @@ mod tests {
             patch: String::new(),
         };
         let state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![
                 entry("a.rs", ReviewStatus::Approved),
                 entry("b.rs", ReviewStatus::Unreviewed),
@@ -2935,6 +3151,7 @@ mod tests {
 
         // All approved: a clean verdict with no file list.
         let state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
             files: vec![entry("a.rs", ReviewStatus::Approved)],
         });
         assert_eq!(state.conclusion_verdict(), "orangu approves this patch");
@@ -2942,11 +3159,69 @@ mod tests {
     }
 
     #[test]
+    fn ignored_files_are_approved_when_the_run_starts() {
+        use crate::commands::ReviewLaunch;
+        use crate::review::AutoReviewState;
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let entry = |path: &str, status| ReviewEntry {
+            path: path.to_string(),
+            status,
+            diff_lines: vec!["+x".to_string()],
+            patch: String::new(),
+        };
+        let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
+            files: vec![
+                entry("a.rs", ReviewStatus::Approved),
+                entry("b.rs", ReviewStatus::Unreviewed),
+            ],
+        });
+
+        // Alt+m on the highlighted b.rs marks it Ignore; a toggle flips it back.
+        state.selected = Some(1);
+        state.toggle_ignore_selected();
+        assert!(state.is_ignored(1));
+        assert!(!state.is_ignored(0));
+        state.toggle_ignore_selected();
+        assert!(!state.is_ignored(1));
+        state.toggle_ignore_selected();
+        assert!(state.is_ignored(1));
+
+        // Before the run starts the ignored file keeps its unreviewed status.
+        assert_eq!(state.files[1].status, ReviewStatus::Unreviewed);
+
+        // Starting the run approves every ignored file: b.rs is now approved
+        // (still skipped — it keeps its blue dot), so the patch is approved and
+        // nothing is listed in the Conclusion.
+        state.begin_run();
+        assert_eq!(state.files[1].status, ReviewStatus::Approved);
+        assert!(state.is_ignored(1));
+        assert_eq!(state.conclusion_verdict(), "orangu approves this patch");
+        assert!(state.conclusion_findings().is_empty());
+
+        // Ignore can only be set before the run starts.
+        state.selected = Some(0);
+        state.toggle_ignore_selected();
+        assert!(!state.is_ignored(0));
+    }
+
+    #[test]
     fn auto_review_report_lines_show_pending_then_findings() {
         use crate::commands::ReviewLaunch;
         use crate::review::AutoReviewState;
 
-        let mut state = AutoReviewState::new(ReviewLaunch { files: Vec::new() });
+        let mut state = AutoReviewState::new(ReviewLaunch {
+            files: Vec::new(),
+            immediate: false,
+        });
+        // Before the run starts the placeholder invites Alt+s.
+        let lines = state.report_lines();
+        assert_eq!(lines[2], "\x1b[2m(Press Alt+s)\x1b[0m");
+        assert_eq!(lines[30], "\x1b[2m(Press Alt+s)\x1b[0m");
+
+        // Once the run is under way it shows the usual pending marker.
+        state.begin_run();
         let lines = state.report_lines();
         // Seven findings categories (bold heading without the Markdown `##`
         // markers, blank line, placeholder, blank separator) plus the

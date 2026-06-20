@@ -121,7 +121,18 @@ fn terminal_launcher(configured: &str) -> Option<Vec<String>> {
 /// directly.
 fn editor_launch_argv(workspace: &Path, raw_path: &str, terminal: &str) -> Result<Vec<String>> {
     let (program, args, path) = resolve_editor_command(workspace, raw_path)?;
+    build_editor_argv(program, args, &path, terminal)
+}
 
+/// Assemble the editor argument vector for an already-resolved `path`: a
+/// terminal editor is wrapped in a terminal emulator so it gets its own window,
+/// a GUI editor is launched directly, and the path is appended last.
+fn build_editor_argv(
+    program: String,
+    args: Vec<String>,
+    path: &Path,
+    terminal: &str,
+) -> Result<Vec<String>> {
     let mut argv = Vec::new();
     if editor_needs_terminal(&program, &args) {
         let launcher = terminal_launcher(terminal).ok_or_else(|| {
@@ -144,7 +155,28 @@ fn editor_launch_argv(workspace: &Path, raw_path: &str, terminal: &str) -> Resul
 /// closes when the editor exits; GUI editors open their own window. The process
 /// is detached and not waited on.
 pub fn open_in_editor(workspace: &Path, raw_path: &str, terminal: &str) -> Result<()> {
-    let argv = editor_launch_argv(workspace, raw_path, terminal)?;
+    spawn_editor(editor_launch_argv(workspace, raw_path, terminal)?)
+}
+
+/// Open `$EDITOR` on an already-resolved absolute `path` (e.g. a temporary file
+/// orangu just wrote, outside the workspace), in a separate window like
+/// [`open_in_editor`]. Used to show a file's diff from `/auto_review`.
+pub fn open_path_in_editor(path: &Path, terminal: &str) -> Result<()> {
+    let editor = std::env::var("EDITOR").context("EDITOR is not set")?;
+    let parts = shell_words(&editor)?;
+    let (program, args) = parts
+        .split_first()
+        .ok_or_else(|| anyhow!("EDITOR is empty"))?;
+    spawn_editor(build_editor_argv(
+        program.clone(),
+        args.to_vec(),
+        path,
+        terminal,
+    )?)
+}
+
+/// Spawn a prepared editor argument vector, detached so orangu stays usable.
+fn spawn_editor(argv: Vec<String>) -> Result<()> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| anyhow!("editor command is empty"))?;

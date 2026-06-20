@@ -45,6 +45,9 @@ impl TranscriptLine {
 pub(crate) const STATUS_GREEN: &str = "\x1b[38;2;80;200;120m";
 pub(crate) const STATUS_RED: &str = "\x1b[38;2;220;80;80m";
 pub(crate) const STATUS_WHITE: &str = "\x1b[38;2;230;230;230m";
+/// The Ignore dot in `/auto_review`: a file marked Ignore (Alt+m) is skipped
+/// from the run and shown with this blue dot.
+pub(crate) const STATUS_BLUE: &str = "\x1b[38;2;100;160;230m";
 pub(crate) const ANSI_RESET: &str = "\x1b[0m";
 pub const FEEDBACK_OK: &str = "\x1b[38;2;80;200;120m●\x1b[0m";
 pub const FEEDBACK_ERR: &str = "\x1b[38;2;220;80;80m●\x1b[0m";
@@ -105,6 +108,8 @@ pub(crate) mod test_fixtures {
             selected: None,
             reviewing: None,
             browsing: false,
+            prestart: false,
+            ignored: &[],
             reject: None,
             report_lines,
             selected_lines: None,

@@ -63,6 +63,14 @@ pub struct AutoReviewScreenArgs<'a> {
     /// The run has ended and the report is being browsed: the header shows the
     /// browse keys (Alt+j/k, Alt+a, Alt+r, Alt+e) instead of the run keys.
     pub browsing: bool,
+    /// The run has not started yet (pre-start phase): the header offers Alt+s
+    /// Start, Alt+j/k Switch file, and Alt+m Mode, and ignored files show a
+    /// blue dot. Cleared once the run begins.
+    pub prestart: bool,
+    /// Per-file Ignore flags (parallel to `files`): an ignored file shows a
+    /// blue dot and is skipped from the run. Read with `.get().copied()` so a
+    /// shorter (or empty) slice is treated as "none ignored".
+    pub ignored: &'a [bool],
     /// When set, the Alt+r reject window is drawn over the panes.
     pub reject: Option<AutoReviewRejectView<'a>>,
     /// The input window contents. Empty while the run is in progress; once the
@@ -152,9 +160,13 @@ fn render_auto_review_panes(
         0
     };
 
-    // While the run is in progress the header offers the run keys; once the
-    // report is being browsed it offers the per-file browse keys instead.
-    let keys = if args.browsing {
+    // The header keys depend on the phase: before the run starts it offers the
+    // pre-start keys (start, file switching, and Ignore mode); while the run is
+    // in progress only the run keys; once the report is browsed the per-file
+    // browse keys.
+    let keys = if args.prestart {
+        "Alt+s Start  Alt+j/k Switch file  Alt+m Mode  Alt+e Diff  Esc Esc Cancel  Alt+x Exit"
+    } else if args.browsing {
         "Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  PgUp/PgDn Category  - Remove  Alt+x Exit"
     } else {
         "Esc Esc Cancel  Alt+x Exit"
@@ -198,8 +210,14 @@ fn render_auto_review_panes(
         let file_index = list_start + row;
         let right = match args.files.get(file_index) {
             Some(file) => {
-                // The file under review blinks a white dot in its status box.
-                let status_box = if args.reviewing == Some(file_index) {
+                // Before the run starts an ignored file shows a blue dot
+                // (skipped); once the run starts it is approved, so the dot
+                // follows its status (green) like any other. The file under
+                // review blinks a white dot; otherwise the dot is the status.
+                let ignored = args.ignored.get(file_index).copied().unwrap_or(false);
+                let status_box = if args.prestart && ignored {
+                    format!("[{STATUS_BLUE}●{ANSI_RESET}]")
+                } else if args.reviewing == Some(file_index) {
                     format!("[{STATUS_WHITE}●{ANSI_RESET}]")
                 } else {
                     review_status_box(file.status)
@@ -364,6 +382,63 @@ mod tests {
         assert!(screen.contains("Alt+a Approve"), "{screen:?}");
         assert!(screen.contains("Alt+r Reject"), "{screen:?}");
         assert!(screen.contains("Alt+e Open"), "{screen:?}");
+    }
+
+    #[test]
+    fn auto_review_prestart_header_offers_start_and_mode_keys() {
+        let files = vec![review_entry("src/main.rs", ReviewStatus::Unreviewed, &[])];
+        let report: Vec<String> = Vec::new();
+
+        // The pre-start header offers Alt+s Start, file switching, and Alt+m
+        // Mode, and none of the run/browse-only keys.
+        let mut args = auto_review_args(&files, &report, 120, 12);
+        args.prestart = true;
+        let screen = render_auto_review_screen(args);
+        assert!(screen.contains("Alt+s Start"), "{screen:?}");
+        assert!(screen.contains("Alt+j/k Switch file"), "{screen:?}");
+        assert!(screen.contains("Alt+m Mode"), "{screen:?}");
+        assert!(screen.contains("Alt+e Diff"), "{screen:?}");
+        assert!(!screen.contains("Alt+a Approve"), "{screen:?}");
+
+        // Once the run starts those keys are gone, leaving only the run keys.
+        let screen = render_auto_review_screen(auto_review_args(&files, &report, 120, 12));
+        assert!(!screen.contains("Alt+s Start"), "{screen:?}");
+        assert!(!screen.contains("Alt+m Mode"), "{screen:?}");
+        assert!(screen.contains("Esc Esc Cancel"), "{screen:?}");
+    }
+
+    #[test]
+    fn auto_review_ignored_file_shows_a_blue_dot_until_the_run_starts() {
+        let blue_dot = format!("[{}●", super::STATUS_BLUE);
+        let green_dot = format!("[{}●", super::STATUS_GREEN);
+        let ignored = [false, true];
+        let report: Vec<String> = Vec::new();
+
+        // Pre-start: the ignored file (b.rs) carries the blue dot; the normal
+        // one keeps its empty box.
+        let files = vec![
+            review_entry("a.rs", ReviewStatus::Unreviewed, &[]),
+            review_entry("b.rs", ReviewStatus::Unreviewed, &[]),
+        ];
+        let mut args = auto_review_args(&files, &report, 80, 12);
+        args.prestart = true;
+        args.ignored = &ignored;
+        let screen = render_auto_review_screen(args);
+        assert!(screen.contains(&blue_dot), "{screen:?}");
+        assert!(screen.contains("[ ] a.rs"), "{screen:?}");
+
+        // Once the run starts the ignored file is approved: no blue dot any
+        // more, just the green status dot.
+        let files = vec![
+            review_entry("a.rs", ReviewStatus::Approved, &[]),
+            review_entry("b.rs", ReviewStatus::Approved, &[]),
+        ];
+        let mut args = auto_review_args(&files, &report, 80, 12);
+        args.prestart = false;
+        args.ignored = &ignored;
+        let screen = render_auto_review_screen(args);
+        assert!(!screen.contains(&blue_dot), "{screen:?}");
+        assert!(screen.contains(&green_dot), "{screen:?}");
     }
 
     #[test]

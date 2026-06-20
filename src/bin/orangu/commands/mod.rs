@@ -164,7 +164,14 @@ pub enum CommandOutcome {
 /// own rendered diff lines.
 pub struct ReviewLaunch {
     pub files: Vec<ReviewEntry>,
+    /// `/auto_review` only: start the run at once, skipping the pre-start phase
+    /// (the `immediate` argument). Always `false` for `/review`.
+    pub immediate: bool,
 }
+
+/// The `/auto_review` keyword argument that starts the run at once, skipping
+/// the pre-start phase. Offered by Tab completion and the inline ghost.
+pub const AUTO_REVIEW_IMMEDIATE: &str = "immediate";
 
 /// The `/comment` keyword that submits the last `/review` summary as the
 /// comment body. Matched case-insensitively against the whole argument, so a
@@ -266,7 +273,9 @@ pub enum LocalCommand<'a> {
     Diff(Option<Cow<'a, str>>),
     Grep(Option<Cow<'a, str>>),
     Review,
-    AutoReview(Option<Cow<'a, str>>),
+    /// `/auto_review [<file>] [immediate]`: an optional single-file target and
+    /// whether to start the run at once (the `immediate` keyword).
+    AutoReview(Option<Cow<'a, str>>, bool),
     Status,
     Log(Option<u64>),
     Fetch(Option<Cow<'a, str>>),

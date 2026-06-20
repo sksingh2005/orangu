@@ -64,7 +64,10 @@ pub(crate) fn review_outcome(
                     patch: file.patch,
                 })
                 .collect();
-            launch_outcome(ReviewLaunch { files })
+            launch_outcome(ReviewLaunch {
+                files,
+                immediate: false,
+            })
         }
         Err(err) => local_command_error(err),
     }
@@ -76,7 +79,11 @@ pub(crate) fn review_outcome(
 /// Tab completion offers for `/auto_review <file>` (every tracked file on
 /// main/master, only the changed files on a branch). The report style is
 /// identical to a whole-branch run — there is just one file in the checklist.
-pub(crate) fn auto_review_file_outcome(workspace: &Path, file: &str) -> CommandOutcome {
+pub(crate) fn auto_review_file_outcome(
+    workspace: &Path,
+    file: &str,
+    immediate: bool,
+) -> CommandOutcome {
     let Some(repo_root) = git::discover_git_root(workspace) else {
         return CommandOutcome::OutputError(
             "auto review is only available inside a Git repository".to_string(),
@@ -124,7 +131,10 @@ pub(crate) fn auto_review_file_outcome(workspace: &Path, file: &str) -> CommandO
         }
     };
 
-    CommandOutcome::AutoReview(ReviewLaunch { files: vec![entry] })
+    CommandOutcome::AutoReview(ReviewLaunch {
+        files: vec![entry],
+        immediate,
+    })
 }
 
 /// Whether a changed file's repo-relative `path` matches the user's `arg`: the
@@ -345,9 +355,12 @@ pub(crate) fn handle_command(
             Err(err) => Ok(local_command_error(err)),
         },
         LocalCommand::Review => Ok(review_outcome(workspace, CommandOutcome::Review)),
-        LocalCommand::AutoReview(None) => Ok(review_outcome(workspace, CommandOutcome::AutoReview)),
-        LocalCommand::AutoReview(Some(file)) => {
-            Ok(auto_review_file_outcome(workspace, file.trim()))
+        LocalCommand::AutoReview(None, immediate) => Ok(review_outcome(workspace, |mut launch| {
+            launch.immediate = immediate;
+            CommandOutcome::AutoReview(launch)
+        })),
+        LocalCommand::AutoReview(Some(file), immediate) => {
+            Ok(auto_review_file_outcome(workspace, file.trim(), immediate))
         }
         LocalCommand::Status => match status_output(workspace) {
             Ok(output) => Ok(CommandOutcome::Output(output)),
@@ -739,7 +752,7 @@ mod tests {
 
         // On main the whole file is reviewed: a one-file launch whose patch is
         // the file content as an all-added diff.
-        match auto_review_file_outcome(workspace.path(), "src/tui.rs") {
+        match auto_review_file_outcome(workspace.path(), "src/tui.rs", false) {
             CommandOutcome::AutoReview(launch) => {
                 assert_eq!(launch.files.len(), 1);
                 let entry = &launch.files[0];
@@ -757,7 +770,7 @@ mod tests {
 
         // An unknown file is refused.
         assert!(matches!(
-            auto_review_file_outcome(workspace.path(), "src/missing.rs"),
+            auto_review_file_outcome(workspace.path(), "src/missing.rs", false),
             CommandOutcome::OutputError(_)
         ));
     }
@@ -782,7 +795,7 @@ mod tests {
 
         // The changed file is reviewed against the merge base: the patch shows
         // only the added line, not the whole file.
-        match auto_review_file_outcome(workspace.path(), "README.md") {
+        match auto_review_file_outcome(workspace.path(), "README.md", false) {
             CommandOutcome::AutoReview(launch) => {
                 assert_eq!(launch.files.len(), 1);
                 let patch = &launch.files[0].patch;
@@ -795,7 +808,7 @@ mod tests {
         // A file with no changes on the branch is refused.
         fs::write(workspace.path().join("other.txt"), "x\n").expect("other");
         assert!(matches!(
-            auto_review_file_outcome(workspace.path(), "other.txt"),
+            auto_review_file_outcome(workspace.path(), "other.txt", false),
             CommandOutcome::OutputError(_)
         ));
     }

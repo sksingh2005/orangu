@@ -549,7 +549,7 @@ fn parses_auto_review_commands() {
         assert!(
             matches!(
                 parse_local_command(input),
-                Some(LocalCommand::AutoReview(None))
+                Some(LocalCommand::AutoReview(None, false))
             ),
             "expected {input:?} to parse as a whole-branch AutoReview"
         );
@@ -561,11 +561,30 @@ fn parses_auto_review_commands() {
         assert!(
             matches!(
                 parse_local_command(input),
-                Some(LocalCommand::AutoReview(Some(file))) if file == "src/tui.rs"
+                Some(LocalCommand::AutoReview(Some(file), false)) if file == "src/tui.rs"
             ),
             "expected {input:?} to carry the path"
         );
     }
+
+    // The `immediate` keyword starts the run at once — alone (whole branch) or
+    // alongside a file, in either order.
+    assert!(matches!(
+        parse_local_command("/auto_review immediate"),
+        Some(LocalCommand::AutoReview(None, true))
+    ));
+    assert!(matches!(
+        parse_local_command("auto review immediate"),
+        Some(LocalCommand::AutoReview(None, true))
+    ));
+    assert!(matches!(
+        parse_local_command("/auto_review src/tui.rs immediate"),
+        Some(LocalCommand::AutoReview(Some(file), true)) if file == "src/tui.rs"
+    ));
+    assert!(matches!(
+        parse_local_command("/auto_review immediate src/tui.rs"),
+        Some(LocalCommand::AutoReview(Some(file), true)) if file == "src/tui.rs"
+    ));
 }
 
 #[test]

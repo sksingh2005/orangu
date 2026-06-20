@@ -571,7 +571,7 @@ review branch
 
 `/auto_review` runs an LLM-driven review of the changes on the current branch, in a full-screen, two-pane view modeled on `/review`. The model reviews the changes overall and each file by itself, sorts what it finds into the **Overall**, **Code**, **Security**, **Memory**, **Performance**, **Test Suite**, and **Documentation** categories, and marks each file approved or rejected. It is available inside a Git repository and requires a connected LLM server.
 
-Enter it with the `/auto_review` command, or the natural-language form `auto review`. Give it a file — `/auto_review <file>` — to review just that one file instead of the whole branch (see *Reviewing a single file* below).
+Enter it with the `/auto_review` command, or the natural-language form `auto review`. Give it a file — `/auto_review <file>` — to review just that one file instead of the whole branch (see *Reviewing a single file* below). The view opens in a **pre-start phase** that waits for you to begin the run (see *Starting the run* below); add the `immediate` keyword — `/auto_review immediate` (or `/auto_review <file> immediate`) — to skip it and start at once.
 
 ### What is reviewed
 
@@ -586,7 +586,7 @@ Like `/review`, the branch must be **up to date (rebased)** against the default 
 - **On `main`/`master`** the whole file is reviewed — a full read of its current content, every line in scope — not a diff. This is the way to have the model review a file that is not part of any in-progress change.
 - **On any other branch** only the file's **changes** against the default branch are reviewed, exactly as in a whole-branch run (the same rebased-branch guard applies).
 
-The natural-language form takes a file too: `auto review <file>` is equivalent to `/auto_review <file>`. The file argument is resolved by **Tab completion** in either form, and it completes on the file's **name, not its location** — typing `t` and pressing Tab offers `src/tui.rs`. The candidate list matches what will be reviewed: on `main`/`master` it is every tracked file (files ignored by `.gitignore` are excluded); on any other branch it is only the files that differ from the default branch. Selecting a candidate fills in its full repository-relative path; a hand-typed bare name (e.g. `tui.rs`) is resolved too. On a branch, a file with no changes against the default branch is refused with `'<file>' has no changes against <base>.`
+The natural-language form takes a file too: `auto review <file>` is equivalent to `/auto_review <file>`. The file argument is resolved by **Tab completion** in either form, and it completes on the file's **name, not its location** — typing `t` and pressing Tab offers `src/tui.rs`. The `immediate` keyword Tab-completes (and ghosts) the same way — typing `imm` offers `immediate` — and may be combined with a file in either order. The candidate list matches what will be reviewed: on `main`/`master` it is every tracked file (files ignored by `.gitignore` are excluded); on any other branch it is only the files that differ from the default branch. Selecting a candidate fills in its full repository-relative path; a hand-typed bare name (e.g. `tui.rs`) is resolved too. On a branch, a file with no changes against the default branch is refused with `'<file>' has no changes against <base>.`
 
 ### Layout
 
@@ -594,10 +594,10 @@ The view opens with the tool header row at the top and under it the two panes, e
 
 - **Header row** — the tool title (`Auto review: <branch>`) and the key help, with the `Files (n)` header of the right pane.
 - **Status area** — a highlighted bar across the left pane, just below the header, showing what is being worked on: the file (with its position in the file list), the category, the overall progress across all of the run's requests, the total time spent on the run so far, and the estimated time still to go, e.g. `File: src/main.rs (2/5)  Category: Security  Progress: 8/26 (30%)  Time: 1m12s  Estimated: 2m48s`. Both times use the same shortest form as the Thinking/Working timers (`5s`, `1m5s`, `1h2m3s`). The **estimate** is the average time per completed request so far extrapolated over the requests still to run; it is recomputed after each request finishes and counts down between them. It appears once the first request completes and drops away when the run ends — after the run the bar shows `Done` (or `Cancelled`) with the time frozen at the run's total.
-- **Left pane** — below the status area, the **report**, rendered from Markdown with the syntax markers consumed: one bold heading per category (Overall, Code, Security, Memory, Performance, Test Suite, Documentation), each listing the findings collected so far as a bullet list with the file names in bold, ending with the **Conclusion**. A category that has produced nothing yet shows `(pending)` while the run is in progress, and `No issues found` once it is done. The pane scrolls and pans independently.
-- **Right pane** — the checklist of changed files, one per row, as in `/review`. The file currently being reviewed is highlighted and its status box blinks a white dot until its review resolves to green or red. Once the run ends (or the whole-change pass starts) the highlight is cleared — nothing is being reviewed anymore; `Alt+j`/`Alt+k` bring it back to move through the list while browsing.
+- **Left pane** — below the status area, the **report**, rendered from Markdown with the syntax markers consumed: one bold heading per category (Overall, Code, Security, Memory, Performance, Test Suite, Documentation), each listing the findings collected so far as a bullet list with the file names in bold, ending with the **Conclusion**. A category that has produced nothing yet shows `(Press Alt+s)` before the run starts, `(pending)` while it is in progress, and `No issues found` once it is done. The pane scrolls and pans independently.
+- **Right pane** — the checklist of changed files, one per row, as in `/review`. The file currently being reviewed is highlighted and its status box blinks a white dot until its review resolves to green or red. A file marked **Ignore** (Alt+m, before the run) shows a **blue dot** and is skipped. Once the run ends (or the whole-change pass starts) the highlight is cleared — nothing is being reviewed anymore; `Alt+j`/`Alt+k` bring it back to move through the list while browsing.
 
-While the run is in progress the header row offers the run keys (`Esc Esc Cancel  Alt+x Exit`); once the run has ended it switches to the browse keys (`Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  PgUp/PgDn Category  - Remove  Alt+x Exit`).
+The header row offers different keys in each phase: **before the run starts** the pre-start keys (`Alt+s Start  Alt+j/k Switch file  Alt+m Mode  Alt+e Diff  Esc Esc Cancel  Alt+x Exit`); **while the run is in progress** the run keys (`Esc Esc Cancel  Alt+x Exit`); once the run has **ended** the browse keys (`Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  PgUp/PgDn Category  - Remove  Alt+x Exit`).
 
 ```
  Auto review: feature/x ...                          |Files (3)
@@ -609,6 +609,18 @@ While the run is in progress the header row offers the run keys (`Esc Esc Cancel
  Security                               |
    (pending)                            |
 ```
+
+### Starting the run
+
+Unless you passed `immediate`, the view opens in a **pre-start phase**: the panes are drawn but no requests are sent yet, every category reads `(Press Alt+s)`, and the status area shows how many files will be reviewed. Press **`Alt+s`** to begin; from then on the run behaves exactly as described below.
+
+Before starting, you can prepare the run:
+
+- **`Alt+j`/`Alt+k`** move the highlight through the file list (like `/review`).
+- **`Alt+m`** (Mode) toggles the highlighted file between **Normal** and **Ignore**. An ignored file shows a **blue dot** and is **skipped from the run entirely** — it gets no requests, and when the run starts it is **automatically approved**: its blue dot turns **green** and it counts as approved toward the verdict, so it never appears in the Conclusion's rejected / not-reviewed listing. This lets you exclude files you do not want reviewed (vendored code, generated output, an unrelated change) before the run begins. Toggle `Alt+m` again to bring a file back to Normal.
+- **`Alt+e`** (Diff) opens the highlighted file's diff in `$EDITOR`, like `/diff` for one file — orangu writes the file's unified diff to a temporary file and opens it in a separate window, so you can read what changed before deciding whether to review or ignore it.
+
+`Alt+x` (or a double `Esc`) leaves without reviewing. Ignore can only be set in this phase; once the run has started, `Alt+s`, `Alt+j`/`Alt+k`, and `Alt+m` drop from the header.
 
 ### How the review runs
 

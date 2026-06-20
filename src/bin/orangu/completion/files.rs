@@ -17,7 +17,7 @@ use std::{fs, path::Path};
 use walkdir::WalkDir;
 
 use super::*;
-use crate::commands::{shell_words, strip_ascii_prefix};
+use crate::commands::{AUTO_REVIEW_IMMEDIATE, shell_words, strip_ascii_prefix};
 use crate::git::{
     discover_git_root, git_current_branch, git_file_commit_hashes, is_protected_branch,
     review_changed_paths,
@@ -148,7 +148,7 @@ pub fn auto_review_completion_candidates(
         .map(|branch| is_protected_branch(&branch))
         .unwrap_or(true);
 
-    let candidates = if on_protected {
+    let mut candidates = if on_protected {
         open_file_completion_candidates(token, workspace)
     } else {
         review_changed_paths(workspace)
@@ -162,6 +162,11 @@ pub fn auto_review_completion_candidates(
             })
             .collect()
     };
+    // Offer the `immediate` keyword (start the run at once) when the typed token
+    // is a prefix of it, so `/auto_review imm` completes — and ghosts — to it.
+    if !token.is_empty() && AUTO_REVIEW_IMMEDIATE.starts_with(&token.to_ascii_lowercase()) {
+        candidates.push(AUTO_REVIEW_IMMEDIATE.to_string());
+    }
     Some((start, candidates))
 }
 

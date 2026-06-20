@@ -16,6 +16,23 @@
 use super::*;
 use std::borrow::Cow;
 
+/// Parse the argument string of `/auto_review` into `(file, immediate)`: the
+/// `immediate` keyword (case-insensitive) requests an at-once start, and the
+/// first remaining token, if any, is the single-file target. So `immediate`,
+/// `src/main.rs`, and `src/main.rs immediate` are all accepted, in any order.
+pub(crate) fn parse_auto_review_args(args: &str) -> (Option<&str>, bool) {
+    let mut file = None;
+    let mut immediate = false;
+    for token in args.split_whitespace() {
+        if token.eq_ignore_ascii_case(AUTO_REVIEW_IMMEDIATE) {
+            immediate = true;
+        } else if file.is_none() {
+            file = Some(token);
+        }
+    }
+    (file, immediate)
+}
+
 pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
     match input {
         "/help" => Some(LocalCommand::Help),
@@ -51,7 +68,7 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
         "/prune" => Some(LocalCommand::Prune(None)),
         "/pull_request" => Some(LocalCommand::CreatePullRequest),
         "/review" => Some(LocalCommand::Review),
-        "/auto_review" => Some(LocalCommand::AutoReview(None)),
+        "/auto_review" => Some(LocalCommand::AutoReview(None, false)),
         "/export" => Some(LocalCommand::Export(ExportTarget::Console)),
         "/push" => Some(LocalCommand::Push(false)),
         "/rebase" => Some(LocalCommand::Rebase(None)),
@@ -109,12 +126,8 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
                 return Some(LocalCommand::ShowFile(Cow::Borrowed(args.trim())));
             }
             if let Some(args) = input.strip_prefix("/auto_review ") {
-                let file = args.trim();
-                return Some(LocalCommand::AutoReview(if file.is_empty() {
-                    None
-                } else {
-                    Some(Cow::Borrowed(file))
-                }));
+                let (file, immediate) = parse_auto_review_args(args.trim());
+                return Some(LocalCommand::AutoReview(file.map(Cow::Borrowed), immediate));
             }
             if let Some(args) = input.strip_prefix("/export ") {
                 return parse_export_target(args.trim()).map(LocalCommand::Export);

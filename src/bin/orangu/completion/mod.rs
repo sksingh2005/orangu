@@ -395,6 +395,19 @@ mod tests {
     }
 
     #[test]
+    fn auto_review_completes_the_immediate_keyword() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        // Typing a prefix of `immediate` offers it as a candidate.
+        let (_, candidates) =
+            auto_review_completion_candidates("/auto_review imm", workspace.path())
+                .expect("auto-review argument");
+        assert!(
+            candidates.iter().any(|c| c == "immediate"),
+            "{candidates:?}"
+        );
+    }
+
+    #[test]
     fn slash_completion_includes_discovered_skills() {
         let workspace = tempfile::tempdir().expect("workspace");
         let skill_dir = workspace.path().join(".agents/skills/deploy");
