@@ -725,7 +725,7 @@ Every part Tab-completes (and shows the inline ghost hint):
 - the **subcommand** completes against `reviewer`, `assignee`, `label`;
 - the **value** completes against the repository's candidates for that subcommand — collaborators for `reviewer`, assignable users for `assignee`, and label names for `label`.
 
-The candidate lists are fetched once at startup (via `gh`/`glab`) and cached, so completion never shells out on a keystroke. The `<number>` is typed directly (no completion). So `/issue re⇥ 114 je⇥` expands to `/issue reviewer 114 jesperpedersen`.
+The candidate lists are fetched once at startup (via `gh`/`glab`) and cached, so completion never shells out on a keystroke. The `<number>` is typed directly (no completion). So `/issue re<TAB> 114 je<TAB>` expands to `/issue reviewer 114 jesperpedersen`.
 
 ### Examples
 
