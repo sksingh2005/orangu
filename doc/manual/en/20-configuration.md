@@ -59,6 +59,9 @@ available after `--init`:
 /debugging reproduce the failing request path and identify the root cause
 ```
 
+See the Skills chapter for how to write instruction-only skills, skills with
+helper files, and skills that compile helper code.
+
 ## `[orangu]`
 
 The main section selects the default server and client-wide limits. The
