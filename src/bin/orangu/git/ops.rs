@@ -1332,7 +1332,12 @@ pub fn branch_list_output(workspace: &Path) -> Result<String> {
             }
         ));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Trim only the trailing newline: `git branch` indents every entry (`  ` for
+    // others, `* ` for the current branch), so a leading `trim()` would strip the
+    // first entry's two-space prefix and misalign it against the rest.
+    let stdout = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string();
     Ok(if stdout.is_empty() {
         "No local branches found".to_string()
     } else {
@@ -1360,7 +1365,11 @@ pub fn branch_list_all_output(workspace: &Path) -> Result<String> {
             }
         ));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Trim only the trailing newline so the first entry keeps its two-space
+    // indent (see `branch_list_output`).
+    let stdout = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string();
     Ok(if stdout.is_empty() {
         "No branches found".to_string()
     } else {
@@ -1934,6 +1943,37 @@ mod tests {
         assert_eq!(
             sync_default_branch(workspace.path(), Forge::GitHub).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn branch_list_keeps_the_first_entry_indented() {
+        let _env_lock = process_env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let workspace = tempdir().expect("workspace");
+        let home = tempdir().expect("home");
+        let _home_guard = EnvVarGuard::set_path("HOME", home.path());
+        init_git_for_test(workspace.path());
+
+        std::fs::write(workspace.path().join("file.txt"), "x\n").expect("write");
+        git_run(workspace.path(), &["add", "."]);
+        git_run(workspace.path(), &["commit", "-m", "base"]);
+        // Current branch is `main`; `aaa` sorts before it, so it is the first
+        // line `git branch` prints — indented with two spaces, not `* `.
+        git_run(workspace.path(), &["checkout", "-B", "main"]);
+        git_run(workspace.path(), &["branch", "aaa"]);
+
+        let output = branch_list_output(workspace.path()).expect("branch list");
+        let lines: Vec<&str> = output.lines().collect();
+        // Every line keeps its `git branch` prefix: `  ` for other branches and
+        // `* ` for the current one — in particular the first entry is not
+        // stripped of its two-space indent.
+        assert_eq!(lines[0], "  aaa", "{output:?}");
+        assert!(lines.contains(&"* main"), "{output:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.starts_with("  ") || line.starts_with("* ")),
+            "{output:?}"
         );
     }
 }
