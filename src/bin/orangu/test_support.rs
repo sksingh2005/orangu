@@ -23,6 +23,7 @@ pub(crate) fn test_profile(provider: &str, endpoint: &str, model: &str) -> LlmCo
         provider: provider.to_string(),
         endpoint: endpoint.to_string(),
         model: model.to_string(),
+        role: "all".to_string(),
         api_key: None,
         request_timeout_seconds: 1800,
         max_tool_rounds: 10,

@@ -29,6 +29,7 @@ pub struct ClientAppConfiguration {
     pub default_server: String,
     pub default_model: Option<String>,
     pub llms: HashMap<String, LlmConfiguration>,
+    pub compression: bool,
     pub quotes: String,
     pub width: usize,
     #[serde(skip)]
@@ -43,11 +44,25 @@ pub struct ClientAppConfiguration {
     pub drop_down: bool,
 }
 
+impl ClientAppConfiguration {
+    /// Returns the name of the first server configured with the given role.
+    /// If no server specifies this role, returns the `default_server`.
+    pub fn find_server_for_role(&self, role: &str) -> String {
+        for (name, profile) in &self.llms {
+            if profile.role == role {
+                return name.clone();
+            }
+        }
+        self.default_server.clone()
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct LlmConfiguration {
     pub provider: String,
     pub endpoint: String,
     pub model: String,
+    pub role: String,
     pub api_key: Option<String>,
     pub request_timeout_seconds: u64,
     pub max_tool_rounds: usize,
@@ -89,6 +104,10 @@ pub fn default_drop_down() -> bool {
     true
 }
 
+pub fn default_compression() -> bool {
+    true
+}
+
 pub fn parse_feedback_bool(s: &str) -> bool {
     matches!(s.trim().to_lowercase().as_str(), "on" | "true" | "1")
 }
@@ -109,6 +128,10 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
     let review_max_tokens =
         parse_client_field(&client, "review_max_tokens", default_review_max_tokens)?;
     let code_max_tokens = parse_client_field(&client, "code_max_tokens", default_code_max_tokens)?;
+    let compression = client
+        .get("compression")
+        .map(|value| parse_feedback_bool(value))
+        .unwrap_or_else(default_compression);
     let width = parse_client_field(&client, "width", default_virtual_width)?;
     let workspaces = parse_client_field(&client, "workspaces", WorkspacePlacement::default)?;
     let drop_down = client
@@ -125,7 +148,11 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
         .filter(|value| !value.is_empty());
 
     normalize_client_configuration(ClientAppConfiguration {
-        default_server: client.get("server").cloned().unwrap_or_default(),
+        default_server: client
+            .get("server")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default(),
         default_model: default_model.clone(),
         llms: parse_llm_profiles(
             sections,
@@ -136,6 +163,7 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
             system_prompt,
             default_model,
         )?,
+        compression,
         quotes: client.get("quotes").cloned().unwrap_or_default(),
         width,
         banner: client
@@ -326,6 +354,11 @@ fn parse_llm_profiles(
                 .get("api_key")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
+            let role = values
+                .get("role")
+                .map(|value| value.trim().to_lowercase())
+                .filter(|r| !r.is_empty())
+                .unwrap_or_else(|| "all".to_string());
 
             Ok((
                 name,
@@ -333,6 +366,7 @@ fn parse_llm_profiles(
                     provider: values.get("provider").cloned().unwrap_or_default(),
                     endpoint: values.get("endpoint").cloned().unwrap_or_default(),
                     model,
+                    role,
                     api_key,
                     request_timeout_seconds: timeout,
                     max_tool_rounds,
@@ -387,6 +421,7 @@ mod tests {
         assert_eq!(conf.llms["gemma"].provider, "llama.cpp");
         assert_eq!(conf.llms["gemma"].request_timeout_seconds, 45);
         assert_eq!(conf.llms["gemma"].max_tool_rounds, 12);
+        assert!(conf.compression);
         // Absent platform defaults to GitHub.
         assert_eq!(conf.platform, "github");
     }
@@ -414,6 +449,27 @@ mod tests {
         let conf = load_client_configuration(file.path()).unwrap();
         assert_eq!(conf.llms["a"].review_max_tokens, 2048);
         assert_eq!(conf.llms["a"].code_max_tokens, 4096);
+    }
+
+    #[test]
+    fn parses_compression_with_default_and_override() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu]\nserver = a\n\n[a]\nprovider = llama.cpp\nendpoint = http://x/v1\nmodel = m\n"
+        )
+        .unwrap();
+        let conf = load_client_configuration(file.path()).unwrap();
+        assert!(conf.compression);
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu]\nserver = a\ncompression = off\n\n[a]\nprovider = llama.cpp\nendpoint = http://x/v1\nmodel = m\n"
+        )
+        .unwrap();
+        let conf = load_client_configuration(file.path()).unwrap();
+        assert!(!conf.compression);
     }
 
     #[test]
@@ -588,5 +644,19 @@ mod tests {
             err.to_string().contains("unique endpoint"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn parses_and_finds_roles() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu]\nserver = a\n\n[a]\nprovider = llama.cpp\nendpoint = http://x/v1\nmodel = m\nrole = all\n\n[b]\nprovider = llama.cpp\nendpoint = http://y/v1\nmodel = n\nrole = explorer\n"
+        )
+        .unwrap();
+        let conf = load_client_configuration(file.path()).unwrap();
+        assert_eq!(conf.find_server_for_role("explorer"), "b");
+        assert_eq!(conf.find_server_for_role("review"), "a");
+        assert_eq!(conf.find_server_for_role("missing"), "a"); // fallback
     }
 }

@@ -75,6 +75,10 @@ impl ChatSession {
         self.messages.push(ChatMessage::system(system_prompt));
     }
 
+    pub fn push_user(&mut self, content: &str) {
+        self.messages.push(ChatMessage::user(content));
+    }
+
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
     }
@@ -240,6 +244,7 @@ mod tests {
             provider: "llama.cpp".to_string(),
             endpoint: endpoint.to_string(),
             model: "test-model".to_string(),
+            role: "all".to_string(),
             api_key: None,
             request_timeout_seconds: 5,
             max_tool_rounds: 10,

@@ -460,6 +460,7 @@ mod tests {
             provider: "llama.cpp".to_string(),
             endpoint: "http://localhost:8100".to_string(),
             model: "model".to_string(),
+            role: "all".to_string(),
             api_key: None,
             request_timeout_seconds: 5,
             max_tool_rounds: 10,

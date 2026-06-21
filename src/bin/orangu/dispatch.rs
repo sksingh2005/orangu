@@ -238,6 +238,7 @@ pub(crate) fn handle_command(
         virtual_width,
         auto_rebase,
         auto_squash,
+        compression,
         terminal,
         forge,
         review_reports,
@@ -284,7 +285,30 @@ pub(crate) fn handle_command(
         },
         LocalCommand::ShowFile(args) => {
             match show_file_output(workspace, args.as_ref(), virtual_width) {
-                Ok(output) => Ok(CommandOutcome::WideOutput(output)),
+                Ok(output) => {
+                    let context = orangu::compression::prepare_llm_file_context(
+                        args.as_ref(),
+                        &output,
+                        compression,
+                    );
+                    let mut llm_msg = String::new();
+                    llm_msg.push_str(&format!(
+                        "The user executed `/show_file {}`. Output:\n\n",
+                        args.as_ref()
+                    ));
+                    if let Some(note) = context.note {
+                        llm_msg.push_str(&note);
+                        llm_msg.push_str("\n\n");
+                    }
+                    llm_msg.push_str("```\n");
+                    llm_msg.push_str(&context.content);
+                    llm_msg.push_str("\n```");
+
+                    Ok(CommandOutcome::WideOutputWithLlmContext {
+                        display: output,
+                        llm_context: llm_msg,
+                    })
+                }
                 Err(err) => Ok(local_command_error(err)),
             }
         }
@@ -348,11 +372,44 @@ pub(crate) fn handle_command(
             Ok(CommandOutcome::Quiet)
         }
         LocalCommand::Diff(None) => match git_workspace_diff(workspace) {
-            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Ok(output) => {
+                let context = orangu::compression::prepare_llm_diff_context(&output, compression);
+                let mut llm_msg = String::new();
+                llm_msg.push_str("The user executed `/diff`. Output:\n\n");
+                if let Some(note) = context.note {
+                    llm_msg.push_str(&note);
+                    llm_msg.push_str("\n\n");
+                }
+                llm_msg.push_str("```diff\n");
+                llm_msg.push_str(&context.content);
+                llm_msg.push_str("\n```");
+                Ok(CommandOutcome::OutputWithLlmContext {
+                    display: output,
+                    llm_context: llm_msg,
+                })
+            }
             Err(err) => Ok(local_command_error(err)),
         },
         LocalCommand::Diff(Some(branch)) => match git_diff_against_branch(workspace, &branch) {
-            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Ok(output) => {
+                let context = orangu::compression::prepare_llm_diff_context(&output, compression);
+                let mut llm_msg = String::new();
+                llm_msg.push_str(&format!(
+                    "The user executed `/diff {}`. Output:\n\n",
+                    branch
+                ));
+                if let Some(note) = context.note {
+                    llm_msg.push_str(&note);
+                    llm_msg.push_str("\n\n");
+                }
+                llm_msg.push_str("```diff\n");
+                llm_msg.push_str(&context.content);
+                llm_msg.push_str("\n```");
+                Ok(CommandOutcome::OutputWithLlmContext {
+                    display: output,
+                    llm_context: llm_msg,
+                })
+            }
             Err(err) => Ok(local_command_error(err)),
         },
         LocalCommand::Review => Ok(review_outcome(workspace, CommandOutcome::Review)),
@@ -371,7 +428,24 @@ pub(crate) fn handle_command(
             grep_usage_message().to_string(),
         )),
         LocalCommand::Grep(Some(pattern)) => match grep_output(workspace, &pattern) {
-            Ok(output) => Ok(CommandOutcome::Output(output)),
+            Ok(output) => {
+                let context =
+                    orangu::compression::prepare_llm_grep_context(&pattern, &output, compression);
+                let mut llm_msg = String::new();
+                llm_msg.push_str(&format!(
+                    "The user executed `/grep {}`. Output:\n\n",
+                    pattern
+                ));
+                if let Some(note) = context.note {
+                    llm_msg.push_str(&note);
+                    llm_msg.push_str("\n\n");
+                }
+                llm_msg.push_str(&context.content);
+                Ok(CommandOutcome::OutputWithLlmContext {
+                    display: output,
+                    llm_context: llm_msg,
+                })
+            }
             Err(err) => Ok(local_command_error(err)),
         },
         LocalCommand::Log(count) => match log_output(workspace, count) {
@@ -697,7 +771,7 @@ pub(crate) fn handle_command(
         LocalCommand::DeleteWorkspace => Ok(CommandOutcome::CloseWorkspaceTab),
         LocalCommand::Export(target) => Ok(CommandOutcome::Export(target)),
         LocalCommand::Manual => Ok(CommandOutcome::Manual),
-        LocalCommand::Usage => Ok(CommandOutcome::Output(usage_stats.format())),
+        LocalCommand::Usage => Ok(CommandOutcome::Output(usage_stats.format(tools))),
         LocalCommand::Build => {
             let ws = workspace.to_path_buf();
             Ok(CommandOutcome::Streaming(Box::new(move |sink| {
@@ -858,6 +932,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),
@@ -914,6 +989,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),
@@ -973,6 +1049,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),
@@ -1026,6 +1103,7 @@ mod tests {
                     virtual_width: 512,
                     auto_rebase: false,
                     auto_squash: false,
+                    compression: false,
                     terminal: "",
                     forge: crate::git::Forge::GitHub,
                     review_reports: crate::git::ReviewReports::default(),
@@ -1107,6 +1185,7 @@ mod tests {
                     virtual_width: 512,
                     auto_rebase: false,
                     auto_squash: false,
+                    compression: false,
                     terminal: "",
                     forge: crate::git::Forge::GitHub,
                     review_reports: crate::git::ReviewReports::default(),
@@ -1210,6 +1289,7 @@ mod tests {
                     virtual_width: 512,
                     auto_rebase: false,
                     auto_squash: false,
+                    compression: false,
                     terminal: "",
                     forge: crate::git::Forge::GitHub,
                     review_reports: crate::git::ReviewReports::default(),
@@ -1278,6 +1358,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),
@@ -1336,6 +1417,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),
@@ -1396,6 +1478,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),
@@ -1451,6 +1534,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),
@@ -1512,6 +1596,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),
@@ -1541,6 +1626,7 @@ mod tests {
                 provider: "openai".to_string(),
                 model: "gpt-4.1".to_string(),
                 endpoint: "http://localhost:11434/v1".to_string(),
+                role: "all".to_string(),
                 api_key: None,
                 request_timeout_seconds: 30,
                 max_tool_rounds: 10,
@@ -1575,6 +1661,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),
@@ -1623,6 +1710,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),
@@ -1667,6 +1755,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),
@@ -1711,6 +1800,7 @@ mod tests {
                 virtual_width: 512,
                 auto_rebase: false,
                 auto_squash: false,
+                compression: false,
                 terminal: "",
                 forge: crate::git::Forge::GitHub,
                 review_reports: crate::git::ReviewReports::default(),

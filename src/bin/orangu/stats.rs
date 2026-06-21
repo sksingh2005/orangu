@@ -63,14 +63,15 @@ impl UsageStats {
         }
     }
 
-    pub(crate) fn format(&self) -> String {
+    pub(crate) fn format(&self, tools: &orangu::tools::ToolExecutor) -> String {
         let app_elapsed = self.app_start.elapsed();
         let avg_tps = if self.total_llm_duration.as_secs_f64() > 0.0 {
             self.total_tokens as f64 / self.total_llm_duration.as_secs_f64()
         } else {
             0.0
         };
-        format!(
+
+        let mut out = format!(
             "Application time : {}\nLLM time         : {}\nTool time        : {}\nTotal tokens     : {}\nAvg tokens/sec   : {:.1}\nSession          : {}\nPID              : {}",
             format_duration(app_elapsed),
             format_duration(self.total_llm_duration),
@@ -79,7 +80,52 @@ impl UsageStats {
             avg_tps,
             self.session_id,
             std::process::id(),
-        )
+        );
+
+        if let Ok(cache) = tools.context_cache().lock() {
+            let s = cache.stats();
+            if s.total_reads > 0 {
+                let saved_kb = s.bytes_saved as f64 / 1024.0;
+                out.push_str(&format!(
+                    "\n\nContext Cache:\nTotal reads      : {}\nCache hits       : {}\nCache misses     : {}\nBytes saved      : {:.1} KB",
+                    s.total_reads,
+                    s.cache_hits,
+                    s.cache_misses,
+                    saved_kb
+                ));
+            }
+        }
+
+        if let Ok(metrics) = tools.compression_metrics.lock()
+            && metrics.total_original_lines > 0
+        {
+            let saved = metrics
+                .total_original_lines
+                .saturating_sub(metrics.total_compressed_lines);
+            let saved_pct = if metrics.total_original_lines > 0 {
+                (saved as f64 / metrics.total_original_lines as f64) * 100.0
+            } else {
+                0.0
+            };
+            out.push_str(&format!(
+                "\n\nShell Compression:\nOriginal lines   : {}\nCompressed lines : {}\nLines saved      : {} ({:.1}%)",
+                metrics.total_original_lines,
+                metrics.total_compressed_lines,
+                saved,
+                saved_pct
+            ));
+
+            if !metrics.pattern_hits.is_empty() {
+                out.push_str("\nPatterns applied :");
+                let mut hits: Vec<_> = metrics.pattern_hits.iter().collect();
+                hits.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
+                for (pattern, count) in hits {
+                    out.push_str(&format!("\n  - {} ({}x)", pattern, count));
+                }
+            }
+        }
+
+        out
     }
 }
 

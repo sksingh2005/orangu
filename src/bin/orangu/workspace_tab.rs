@@ -43,6 +43,7 @@ pub(crate) struct WorkspaceTab {
     pub(crate) session_hist_path: PathBuf,
     pub(crate) session_messages_path: PathBuf,
     pub(crate) session_metadata_path: PathBuf,
+    pub(crate) session_context_cache_path: PathBuf,
     pub(crate) current_branch: Option<String>,
     /// The last `/review` summary and `/auto_review` report (Markdown), kept so
     /// `/comment <number> with [auto] review` can post them. Per tab, since a
@@ -80,6 +81,7 @@ impl WorkspaceTab {
         resume: Option<&str>,
         auto_resume: bool,
         system_prompt: &str,
+        compression_enabled: bool,
     ) -> Result<Self> {
         let workspace_created = if !workspace.exists() {
             std::fs::create_dir_all(&workspace)
@@ -88,7 +90,7 @@ impl WorkspaceTab {
         } else {
             false
         };
-        let tools = ToolExecutor::new(&workspace);
+        let tools = ToolExecutor::with_compression(&workspace, compression_enabled);
         let skills = orangu::skills::SkillRegistry::discover(&workspace);
         let current_branch = workspace_branch_name(&workspace);
 
@@ -116,6 +118,7 @@ impl WorkspaceTab {
         let session_hist_path = session_dir.join("history");
         let session_messages_path = session_dir.join("messages");
         let session_metadata_path = session_dir.join("metadata");
+        let session_context_cache_path = session_dir.join("context-cache.json");
 
         if !is_resumed {
             save_session_metadata(
@@ -140,6 +143,13 @@ impl WorkspaceTab {
         let mut session = ChatSession::new(&enhanced_prompt);
         if is_resumed {
             session.restore(load_session_messages(&session_messages_path)?);
+            // Restore the context cache so unchanged files from the previous
+            // session are recognised immediately as hits rather than misses.
+            tools
+                .context_cache()
+                .lock()
+                .unwrap()
+                .load(&session_context_cache_path);
         }
 
         let usage_stats = UsageStats::new().with_session(&session_id);
@@ -170,6 +180,7 @@ impl WorkspaceTab {
             session_hist_path,
             session_messages_path,
             session_metadata_path,
+            session_context_cache_path,
             current_branch,
             last_review_report: None,
             last_auto_review_report: None,
@@ -193,6 +204,15 @@ impl WorkspaceTab {
             &self.session_metadata_path,
             self.current_branch.as_deref(),
         )?;
+        // Persist the context cache so the next resumed session can skip
+        // re-reading unchanged files. Failures are silently ignored — the
+        // worst outcome is cache misses on the next run.
+        let _ = self
+            .tools
+            .context_cache()
+            .lock()
+            .unwrap()
+            .persist(&self.session_context_cache_path);
         Ok(())
     }
 
@@ -365,6 +385,7 @@ mod tests {
             session_hist_path: PathBuf::from(workspace),
             session_messages_path: PathBuf::from(workspace),
             session_metadata_path: PathBuf::from(workspace),
+            session_context_cache_path: PathBuf::from(workspace),
             current_branch: None,
             last_review_report: None,
             last_auto_review_report: None,
@@ -372,16 +393,6 @@ mod tests {
             startup_notice_until: None,
             pending_response: None,
         }
-    }
-
-    fn workspaces(ring: &WorkspaceRing, active: &WorkspaceTab) -> Vec<String> {
-        let mut result = ring
-            .parked()
-            .iter()
-            .map(|t| t.session_id.clone())
-            .collect::<Vec<_>>();
-        result.insert(ring.active_pos(), active.session_id.clone());
-        result
     }
 
     #[test]

@@ -123,7 +123,14 @@ pub enum CommandOutcome {
     Quiet,
     /// Command ran and produced informational output (success).
     Output(String),
-    WideOutput(String),
+    OutputWithLlmContext {
+        display: String,
+        llm_context: String,
+    },
+    WideOutputWithLlmContext {
+        display: String,
+        llm_context: String,
+    },
     /// Command failed — invalid usage, unknown command, or other error.
     OutputError(String),
     Cleared,
@@ -399,6 +406,7 @@ pub struct CommandContext<'a> {
     pub virtual_width: usize,
     pub auto_rebase: bool,
     pub auto_squash: bool,
+    pub compression: bool,
     pub terminal: &'a str,
     pub forge: crate::git::Forge,
     pub review_reports: crate::git::ReviewReports<'a>,

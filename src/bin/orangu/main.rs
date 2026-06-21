@@ -251,6 +251,7 @@ async fn run() -> Result<()> {
         initial_session.as_deref().or(args.resume.as_deref()),
         initial_session.is_none() && args.resume.is_none(),
         &system_prompt,
+        config.compression,
     )?;
     // Load the initial tab's branch from session metadata so that Alt+./, and
     // checkout_tab_branch! can restore the right branch on next tab switch.
@@ -258,26 +259,29 @@ async fn run() -> Result<()> {
         initial_tab.current_branch = Some(branch);
     }
     let mut ring = WorkspaceRing::new();
-    // Reopen the remaining saved tabs as parked tabs, skipping the initial one.
-    for (saved_workspace, saved_session) in &saved_workspaces {
-        let is_initial = match saved_session {
-            Some(id) => *id == initial_tab.session_id,
-            None => *saved_workspace == initial_tab.workspace,
-        };
-        if !is_initial
-            && let Ok(mut tab) = WorkspaceTab::open(
-                saved_workspace.clone(),
-                saved_session.as_deref(),
-                saved_session.is_none(),
-                &system_prompt,
-            )
-        {
-            // Branch stored in session metadata takes precedence over the
-            // current git branch so Alt+./, restores the right branch.
-            if let Some(branch) = load_session_branch(&tab.session_id) {
-                tab.current_branch = Some(branch);
+    // If -a/--all, reopen the workspace tabs that were open at the end of the
+    // last run. Skip paths that equal the initial workspace (already open) and
+    // silently ignore tabs whose directories have since been deleted.
+    if args.all {
+        for (saved_workspace, saved_session) in &saved_workspaces {
+            let is_initial = match saved_session {
+                Some(id) => *id == initial_tab.session_id,
+                None => *saved_workspace == initial_tab.workspace,
+            };
+            if !is_initial
+                && let Ok(mut tab) = WorkspaceTab::open(
+                    saved_workspace.clone(),
+                    saved_session.as_deref(),
+                    saved_session.is_none(),
+                    &system_prompt,
+                    config.compression,
+                )
+            {
+                if let Some(branch) = load_session_branch(&tab.session_id) {
+                    tab.current_branch = Some(branch);
+                }
+                ring.park(tab);
             }
-            ring.park(tab);
         }
     }
 
@@ -322,6 +326,7 @@ async fn run() -> Result<()> {
         mut last_review_was_auto,
         mut startup_notice_until,
         mut pending_response,
+        mut session_context_cache_path,
     } = initial_tab;
 
     // If the active server isn't serving the configured model at startup, switch
@@ -391,6 +396,7 @@ async fn run() -> Result<()> {
                 last_review_was_auto,
                 startup_notice_until,
                 pending_response,
+                session_context_cache_path,
             }
         };
     }
@@ -416,6 +422,7 @@ async fn run() -> Result<()> {
             last_review_was_auto = tab.last_review_was_auto;
             startup_notice_until = tab.startup_notice_until;
             pending_response = tab.pending_response;
+            session_context_cache_path = tab.session_context_cache_path;
         }};
     }
     macro_rules! apply_tab_action {
@@ -443,10 +450,17 @@ async fn run() -> Result<()> {
                         checkout_tab_branch!();
                     }
                 }
+
                 TabAction::New => {
                     // A fresh tab on the active workspace's directory, with its
                     // own new session; the user re-points it with `/workspace`.
-                    match WorkspaceTab::open(workspace.clone(), None, false, &system_prompt) {
+                    match WorkspaceTab::open(
+                        workspace.clone(),
+                        None,
+                        false,
+                        &system_prompt,
+                        config.compression,
+                    ) {
                         Ok(new_tab) => {
                             let target = ring.open(current_tab!(), new_tab);
                             load_tab!(target);
@@ -918,6 +932,7 @@ async fn run() -> Result<()> {
                 virtual_width: viewport.virtual_width,
                 auto_rebase: config.auto_rebase,
                 auto_squash: config.auto_squash,
+                compression: config.compression,
                 terminal: &config.terminal,
                 forge,
                 review_reports: git::ReviewReports {
@@ -988,7 +1003,7 @@ async fn run() -> Result<()> {
                     &session_metadata_path,
                     workspace_branch_name(tools.workspace()).as_deref(),
                 );
-                match WorkspaceTab::open(dir, None, true, &system_prompt) {
+                match WorkspaceTab::open(dir, None, true, &system_prompt, config.compression) {
                     Ok(new_tab) => {
                         let target = ring.open(current_tab!(), new_tab);
                         load_tab!(target);
@@ -1018,7 +1033,7 @@ async fn run() -> Result<()> {
                         &session_metadata_path,
                         workspace_branch_name(tools.workspace()).as_deref(),
                     );
-                    match WorkspaceTab::open(dir, None, true, &system_prompt) {
+                    match WorkspaceTab::open(dir, None, true, &system_prompt, config.compression) {
                         Ok(new_tab) => {
                             load_tab!(new_tab);
                             restart_sync_tasks!();
@@ -1064,6 +1079,20 @@ async fn run() -> Result<()> {
                 output_state.reset_scroll();
                 continue;
             }
+            CommandOutcome::OutputWithLlmContext {
+                display,
+                llm_context,
+            } => {
+                output_state.push_text(&display);
+                if config.feedback {
+                    output_state.push_text(FEEDBACK_OK);
+                }
+                output_state.reset_scroll();
+                if current_endpoint.is_some() {
+                    session.push_user(&llm_context);
+                }
+                continue;
+            }
             CommandOutcome::OutputError(output) => {
                 output_state.push_text(&output);
                 if config.feedback {
@@ -1072,9 +1101,15 @@ async fn run() -> Result<()> {
                 output_state.reset_scroll();
                 continue;
             }
-            CommandOutcome::WideOutput(output) => {
-                output_state.push_wide(&output);
+            CommandOutcome::WideOutputWithLlmContext {
+                display,
+                llm_context,
+            } => {
+                output_state.push_wide(&display);
                 output_state.reset_scroll();
+                if current_endpoint.is_some() {
+                    session.push_user(&llm_context);
+                }
                 continue;
             }
             CommandOutcome::Blocking(f) => {
@@ -1266,7 +1301,8 @@ async fn run() -> Result<()> {
                             let mut prompt_profile = profile.clone();
                             prompt_profile.endpoint = endpoint.to_string();
                             prompt_profile.model = active_model_id.clone();
-                            let prompt = build_review_prompt(&path, &request, &patch);
+                            let prompt =
+                                build_review_prompt(&path, &request, &patch, config.compression);
                             let llm_start = std::time::Instant::now();
                             let tool_before = tools.total_tool_duration();
                             let result = run_review_request(
@@ -1368,6 +1404,7 @@ async fn run() -> Result<()> {
                     &workspace,
                     &config.terminal,
                     config.feedback,
+                    config.compression,
                     &skills,
                 )
                 .await?;

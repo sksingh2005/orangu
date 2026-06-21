@@ -1320,11 +1320,18 @@ pub(crate) fn build_auto_review_category_prompt(
     category: &str,
     focus: &str,
     patch: &str,
+    compression_enabled: bool,
 ) -> String {
+    let context = orangu::compression::prepare_llm_diff_context(patch, compression_enabled);
+    let note = context
+        .note
+        .map(|note| format!("{note}\n\n"))
+        .unwrap_or_default();
     format!(
         "You are performing an automated code review of the changes made to `{path}` in the diff below.\n\
          \n\
-         ```diff\n{patch}\n```\n\
+         {note}\
+         ```diff\n{}\n```\n\
          \n\
          Review only the changes — the added, removed, and modified lines — for {category} issues ({focus}), and judge how the changes fit into the surrounding context. Do not review pre-existing content the change does not touch.\n\
          \n\
@@ -1334,7 +1341,8 @@ pub(crate) fn build_auto_review_category_prompt(
          FINDINGS:\n\
          - <line>: <finding, or None>\n\
          \n\
-         List at most five findings, one short line each, prefixed with the affected line number — or range, as `<start>-<end>` — in the new version of the file (the right side of the diff, the lines marked with `+` or unchanged). Only report real {category} issues introduced by the changes. Answer REJECT only when a finding must be fixed before merging; otherwise answer APPROVE."
+         List at most five findings, one short line each, prefixed with the affected line number — or range, as `<start>-<end>` — in the new version of the file (the right side of the diff, the lines marked with `+` or unchanged). Only report real {category} issues introduced by the changes. Answer REJECT only when a finding must be fixed before merging; otherwise answer APPROVE.",
+        context.content
     )
 }
 
@@ -1502,6 +1510,7 @@ pub(crate) async fn run_auto_review_mode(
     workspace: &Path,
     terminal: &str,
     feedback: bool,
+    compression_enabled: bool,
     skills: &orangu::skills::SkillRegistry,
 ) -> Result<AutoReviewState> {
     let immediate = launch.immediate;
@@ -1571,7 +1580,13 @@ pub(crate) async fn run_auto_review_mode(
                 index + 1,
                 auto_review_progress_label(completed, total_requests),
             );
-            let prompt = build_auto_review_category_prompt(&path, category, focus, &patch);
+            let prompt = build_auto_review_category_prompt(
+                &path,
+                category,
+                focus,
+                &patch,
+                compression_enabled,
+            );
             let mut scratch = ChatSession::new(system_prompt(prompt_profile));
             let llm_start = std::time::Instant::now();
             let outcome = run_auto_review_request(
@@ -2800,9 +2815,15 @@ mod tests {
         let patch = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-x\n+y\n";
         let (_, code_focus) = AUTO_REVIEW_FILE_CATEGORIES[0];
         let (_, security_focus) = AUTO_REVIEW_FILE_CATEGORIES[1];
-        let code = build_auto_review_category_prompt("src/main.rs", "Code", code_focus, patch);
-        let security =
-            build_auto_review_category_prompt("src/main.rs", "Security", security_focus, patch);
+        let code =
+            build_auto_review_category_prompt("src/main.rs", "Code", code_focus, patch, false);
+        let security = build_auto_review_category_prompt(
+            "src/main.rs",
+            "Security",
+            security_focus,
+            patch,
+            false,
+        );
 
         let diff_end = code.find("```\n\n").expect("diff block") + "```".len();
         assert!(code[..diff_end].contains(patch));
