@@ -132,6 +132,7 @@ async fn drive_handle(
         viewport,
         skills,
         deferred_tab,
+        parked_tabs,
     } = wait_context;
 
     let mut handle = handle;
@@ -149,19 +150,25 @@ async fn drive_handle(
     ));
     let quote_line = thinking_quote.map(|q| format!("\x1b[2m{q}\x1b[0m"));
 
-    print_screen(
-        render,
-        ScreenState {
-            transcript: output_state.lines(),
-            scroll_offset: output_state.scroll_offset(),
-            left_status: initial_status,
-            pending_count: pending_commands.len(),
-            pending_line: quote_line.as_deref(),
-            input: input_state.as_str(),
-            cursor: input_state.cursor(),
-            ghost_index: input_state.ghost_index,
-        },
-    );
+    {
+        let live = live_tab_statuses(parked_tabs, render.tab_bar);
+        print_screen(
+            RenderContext {
+                tab_statuses: &live,
+                ..render
+            },
+            ScreenState {
+                transcript: output_state.lines(),
+                scroll_offset: output_state.scroll_offset(),
+                left_status: initial_status,
+                pending_count: pending_commands.len(),
+                pending_line: quote_line.as_deref(),
+                input: input_state.as_str(),
+                cursor: input_state.cursor(),
+                ghost_index: input_state.ghost_index,
+            },
+        );
+    }
     std::io::stdout().flush()?;
 
     loop {
@@ -186,8 +193,9 @@ async fn drive_handle(
                             final_pending_line(&final_state.output, &response)
                                 .map(|line| render_markdown_for_console(&line))
                         {
+                            let live = live_tab_statuses(parked_tabs, render.tab_bar);
                             print_screen(
-                                render,
+                                RenderContext { tab_statuses: &live, ..render },
                                 ScreenState {
                                     transcript: output_state.lines(),
                                     scroll_offset: output_state.scroll_offset(),
@@ -340,8 +348,9 @@ async fn drive_handle(
                     } else {
                         render_markdown_for_console(&last_rendered_output)
                     };
+                    let live = live_tab_statuses(parked_tabs, render.tab_bar);
                     print_screen(
-                        render,
+                        RenderContext { tab_statuses: &live, ..render },
                         ScreenState {
                             transcript: output_state.lines(),
                             scroll_offset: output_state.scroll_offset(),
@@ -378,6 +387,7 @@ pub(crate) async fn wait_for_local_command(
         viewport,
         skills,
         deferred_tab,
+        parked_tabs,
     } = wait_context;
     let started = std::time::Instant::now();
     let mut interval = tokio::time::interval(WAIT_LOOP_POLL_INTERVAL);
@@ -428,8 +438,9 @@ pub(crate) async fn wait_for_local_command(
                     render.x_offset = viewport.x_offset;
                 }
                 let left_status = Some(render_tool_running_status(frame, elapsed));
+                let live = live_tab_statuses(parked_tabs, render.tab_bar);
                 print_screen(
-                    render,
+                    RenderContext { tab_statuses: &live, ..render },
                     ScreenState {
                         transcript: output_state.lines(),
                         scroll_offset: output_state.scroll_offset(),
@@ -468,6 +479,7 @@ pub(crate) async fn wait_for_streaming_command(
         viewport,
         skills,
         deferred_tab,
+        parked_tabs,
     } = wait_context;
     let started = std::time::Instant::now();
     let mut interval = tokio::time::interval(WAIT_LOOP_POLL_INTERVAL);
@@ -525,8 +537,9 @@ pub(crate) async fn wait_for_streaming_command(
                     render.x_offset = viewport.x_offset;
                 }
                 let left_status = Some(render_tool_running_status(frame, elapsed));
+                let live = live_tab_statuses(parked_tabs, render.tab_bar);
                 print_screen(
-                    render,
+                    RenderContext { tab_statuses: &live, ..render },
                     ScreenState {
                         transcript: output_state.lines(),
                         scroll_offset: output_state.scroll_offset(),
@@ -542,6 +555,28 @@ pub(crate) async fn wait_for_streaming_command(
             }
         }
     }
+}
+
+fn live_tab_statuses(
+    parked_tabs: &[WorkspaceTab],
+    tab_bar: Option<WorkspaceTabsView>,
+) -> Vec<TabStatus> {
+    let Some(bar) = tab_bar else {
+        return vec![];
+    };
+    if parked_tabs.is_empty() {
+        return vec![];
+    }
+    (0..bar.count)
+        .map(|pos| {
+            if pos == bar.active {
+                TabStatus::Working
+            } else {
+                let idx = if pos < bar.active { pos } else { pos - 1 };
+                parked_tabs[idx].dot_status()
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn render_left_status(

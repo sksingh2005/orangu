@@ -268,6 +268,7 @@ pub struct WaitContext<'a> {
     /// wait (streaming, blocking command), the action is stored here instead of
     /// dropped, so `main` can apply it as soon as the wait returns.
     pub deferred_tab: &'a mut Option<crate::workspace_tab::TabAction>,
+    pub parked_tabs: &'a [crate::workspace_tab::WorkspaceTab],
 }
 
 #[derive(Default)]

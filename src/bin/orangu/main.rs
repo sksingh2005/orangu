@@ -473,8 +473,8 @@ async fn run() -> Result<()> {
             placement: config.workspaces,
         });
         // Per-tab colored dots: only computed when feedback is on and multiple
-        // tabs are open. Indexed left-to-right; parked tabs check whether their
-        // recorded branch is still the workspace's live branch.
+        // tabs are open. The wait loop recomputes these from live handle state
+        // on every render tick so parked-tab dots update without a tab switch.
         let tab_statuses: Vec<TabStatus> = if config.feedback && ring.total() > 1 {
             let active_pos = ring.active_pos();
             (0..ring.total())
@@ -483,7 +483,7 @@ async fn run() -> Result<()> {
                         TabStatus::Valid
                     } else {
                         let others_idx = if pos < active_pos { pos } else { pos - 1 };
-                        parked_tab_status(&ring.parked()[others_idx])
+                        ring.parked()[others_idx].dot_status()
                     }
                 })
                 .collect()
@@ -589,6 +589,7 @@ async fn run() -> Result<()> {
                     viewport: &mut viewport,
                     skills: &skills,
                     deferred_tab: &mut deferred_tab_during_wait,
+                    parked_tabs: ring.parked(),
                 },
             )
             .await;
@@ -976,6 +977,7 @@ async fn run() -> Result<()> {
                         viewport: &mut viewport,
                         skills: &skills,
                         deferred_tab: &mut deferred_tab_during_wait,
+                        parked_tabs: ring.parked(),
                     },
                     handle,
                 )
@@ -1036,6 +1038,7 @@ async fn run() -> Result<()> {
                         viewport: &mut viewport,
                         skills: &skills,
                         deferred_tab: &mut deferred_tab_during_wait,
+                        parked_tabs: ring.parked(),
                     },
                     handle,
                     &mut rx,
@@ -1394,6 +1397,7 @@ async fn run() -> Result<()> {
                 viewport: &mut viewport,
                 skills: &skills,
                 deferred_tab: &mut deferred_tab_during_wait,
+                parked_tabs: ring.parked(),
             },
         )
         .await
@@ -1498,27 +1502,6 @@ async fn run() -> Result<()> {
         tab.finish();
     }
     Ok(())
-}
-
-/// Determine the feedback-dot status of a parked (non-active) workspace tab.
-///
-/// The dot is green (Valid) when the workspace directory still exists and no
-/// background LLM task is running, and red (BranchGone) only when the
-/// directory itself has disappeared (deleted project, unmounted drive, …).
-///
-/// A branch-mismatch check was tried here but produced false positives: two
-/// tabs that share the same workspace path read the same `.git/HEAD`, so any
-/// branch change in one tab incorrectly turns the other tab red. Branch state
-/// is already visible in each tab's status bar, so the dot does not need to
-/// duplicate it.
-fn parked_tab_status(tab: &WorkspaceTab) -> TabStatus {
-    if tab.pending_response.is_some() {
-        return TabStatus::Working;
-    }
-    if !tab.workspace.is_dir() {
-        return TabStatus::BranchGone;
-    }
-    TabStatus::Valid
 }
 
 fn llm_prompt_block_reason(

@@ -210,6 +210,20 @@ impl WorkspaceTab {
             );
         }
     }
+
+    pub(crate) fn dot_status(&self) -> TabStatus {
+        if let Some(pr) = &self.pending_response {
+            return if pr.handle.is_finished() {
+                TabStatus::Valid
+            } else {
+                TabStatus::Working
+            };
+        }
+        if !self.workspace.is_dir() {
+            return TabStatus::BranchGone;
+        }
+        TabStatus::Valid
+    }
 }
 
 /// The open workspace tabs other than the active one, plus where the active tab
