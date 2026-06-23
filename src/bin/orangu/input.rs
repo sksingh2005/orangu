@@ -108,6 +108,7 @@ pub struct RenderContext<'a> {
     pub actual_height: usize,
     pub x_offset: usize,
     pub banner: Banner,
+    pub drop_down: bool,
     /// Currently unread: carried from `config.feedback` for future use by the
     /// screen renderer.
     #[allow(dead_code)]
@@ -181,6 +182,7 @@ pub struct ScreenState<'a> {
     pub input: &'a str,
     pub cursor: usize,
     pub ghost_index: usize,
+    pub dropdown: Option<&'a DropdownState>,
 }
 
 #[derive(Clone, Default)]
@@ -364,6 +366,12 @@ impl OutputState {
     }
 }
 
+#[derive(Clone, Default, Debug)]
+pub struct DropdownState {
+    pub candidates: Vec<(String, String)>,
+    pub selected_index: usize,
+}
+
 #[derive(Default)]
 pub struct InputState {
     pub buffer: String,
@@ -372,6 +380,7 @@ pub struct InputState {
     pub ghost_index: usize,
     pub history_index: Option<usize>,
     pub history_draft: String,
+    pub dropdown: Option<DropdownState>,
 }
 
 impl InputState {
@@ -390,6 +399,7 @@ impl InputState {
         self.ghost_index = 0;
         self.history_index = None;
         self.history_draft.clear();
+        self.dropdown = None;
     }
 
     pub fn set_buffer(&mut self, buffer: String) {
@@ -397,6 +407,7 @@ impl InputState {
         self.cursor = self.buffer.len();
         self.completion = None;
         self.ghost_index = 0;
+        self.dropdown = None;
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -546,6 +557,42 @@ impl InputState {
             self.ghost_index = 0;
         }
     }
+
+    pub fn update_dropdown(&mut self, skills: &orangu::skills::SkillRegistry, enabled: bool) {
+        if !enabled {
+            self.dropdown = None;
+            return;
+        }
+
+        if self.buffer.starts_with('/') && !self.buffer.contains(' ') {
+            let candidates =
+                super::completion::slash_command_dropdown_candidates(&self.buffer, skills);
+            if !candidates.is_empty() {
+                let mut new_dropdown = DropdownState {
+                    candidates,
+                    selected_index: 0,
+                };
+                if let Some(old) = &self.dropdown {
+                    // Try to preserve selection if the currently selected command is still in the list
+                    if old.selected_index < old.candidates.len() {
+                        let selected_cmd = &old.candidates[old.selected_index].0;
+                        if let Some(pos) = new_dropdown
+                            .candidates
+                            .iter()
+                            .position(|(c, _)| c == selected_cmd)
+                        {
+                            new_dropdown.selected_index = pos;
+                        }
+                    }
+                }
+                self.dropdown = Some(new_dropdown);
+            } else {
+                self.dropdown = None;
+            }
+        } else {
+            self.dropdown = None;
+        }
+    }
 }
 
 pub fn idle_status_refresh_timeout(refresh_deadline: Instant, now: Instant) -> Duration {
@@ -611,6 +658,7 @@ pub fn read_input(
                     input: input_state.as_str(),
                     cursor: input_state.cursor(),
                     ghost_index: input_state.ghost_index,
+                    dropdown: input_state.dropdown.as_ref(),
                 },
             );
             std::io::stdout().flush()?;
@@ -739,6 +787,18 @@ pub fn handle_input_event(
                 }
                 (KeyCode::Enter, KeyModifiers::NONE) => {
                     interrupt_state.reset();
+                    if let Some(dropdown) = &input_state.dropdown
+                        && dropdown.selected_index < dropdown.candidates.len()
+                    {
+                        let cmd = &dropdown.candidates[dropdown.selected_index].0;
+                        input_state.buffer = format!("{} ", cmd);
+                        input_state.cursor = input_state.buffer.len();
+                        input_state.dropdown = None;
+                        return InputEventResult {
+                            redraw: true,
+                            outcome: None,
+                        };
+                    }
                     let input = input_state.buffer.clone();
                     input_state.clear();
                     return InputEventResult {
@@ -817,24 +877,46 @@ pub fn handle_input_event(
                 }
                 (KeyCode::Up, _) => {
                     interrupt_state.reset();
-                    history_previous(input_state, input_context.history);
-                    redraw = true;
+                    if let Some(dropdown) = &mut input_state.dropdown {
+                        dropdown.selected_index = dropdown.selected_index.saturating_sub(1);
+                        redraw = true;
+                    } else {
+                        history_previous(input_state, input_context.history);
+                        redraw = true;
+                    }
                 }
                 (KeyCode::Down, _) => {
                     interrupt_state.reset();
-                    history_next(input_state, input_context.history);
-                    redraw = true;
+                    if let Some(dropdown) = &mut input_state.dropdown {
+                        if dropdown.selected_index + 1 < dropdown.candidates.len() {
+                            dropdown.selected_index += 1;
+                        }
+                        redraw = true;
+                    } else {
+                        history_next(input_state, input_context.history);
+                        redraw = true;
+                    }
                 }
                 (KeyCode::Tab, _) => {
                     interrupt_state.reset();
-                    apply_completion(
-                        input_state,
-                        input_context.workspace,
-                        input_context.server_names,
-                        input_context.available_models,
-                        input_context.skills,
-                    );
-                    redraw = true;
+                    if let Some(dropdown) = &input_state.dropdown {
+                        if dropdown.selected_index < dropdown.candidates.len() {
+                            let cmd = &dropdown.candidates[dropdown.selected_index].0;
+                            input_state.buffer = format!("{} ", cmd);
+                            input_state.cursor = input_state.buffer.len();
+                            input_state.dropdown = None;
+                            redraw = true;
+                        }
+                    } else {
+                        apply_completion(
+                            input_state,
+                            input_context.workspace,
+                            input_context.server_names,
+                            input_context.available_models,
+                            input_context.skills,
+                        );
+                        redraw = true;
+                    }
                 }
                 (KeyCode::BackTab, _) => {
                     interrupt_state.reset();
@@ -885,6 +967,10 @@ pub fn handle_input_event(
             }
         }
         _ => {}
+    }
+
+    if redraw {
+        input_state.update_dropdown(input_context.skills, input_context.render.drop_down);
     }
 
     InputEventResult {

@@ -502,6 +502,7 @@ fn render_manual_screen(args: &ManualScreenArgs<'_>) -> String {
         ghost: "",
         height,
         actual_width: width,
+        valid_command_len: 0,
     }));
     screen
 }

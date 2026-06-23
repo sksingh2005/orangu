@@ -191,6 +191,7 @@ pub fn render_review_screen(args: ReviewScreenArgs<'_>) -> String {
         ghost: args.ghost,
         height,
         actual_width: width,
+        valid_command_len: 0,
     }));
     screen
 }

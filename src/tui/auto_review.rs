@@ -135,6 +135,7 @@ pub fn render_auto_review_screen(args: AutoReviewScreenArgs<'_>) -> String {
         ghost: args.ghost,
         height,
         actual_width: width,
+        valid_command_len: 0,
     }));
     screen
 }

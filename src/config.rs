@@ -40,6 +40,7 @@ pub struct ClientAppConfiguration {
     pub platform: String,
     /// Where the workspace tab bar is drawn.
     pub workspaces: WorkspacePlacement,
+    pub drop_down: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -84,6 +85,10 @@ pub fn default_code_max_tokens() -> u32 {
     0
 }
 
+pub fn default_drop_down() -> bool {
+    true
+}
+
 pub fn parse_feedback_bool(s: &str) -> bool {
     matches!(s.trim().to_lowercase().as_str(), "on" | "true" | "1")
 }
@@ -106,6 +111,10 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
     let code_max_tokens = parse_client_field(&client, "code_max_tokens", default_code_max_tokens)?;
     let width = parse_client_field(&client, "width", default_virtual_width)?;
     let workspaces = parse_client_field(&client, "workspaces", WorkspacePlacement::default)?;
+    let drop_down = client
+        .get("drop_down")
+        .map(|value| parse_feedback_bool(value))
+        .unwrap_or_else(default_drop_down);
     let system_prompt = client.get("system_prompt").cloned().unwrap_or_default();
 
     // `[orangu].model` is the general default model id; a server section's own
@@ -143,6 +152,7 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
         terminal: client.get("terminal").cloned().unwrap_or_default(),
         platform: client.get("platform").cloned().unwrap_or_default(),
         workspaces,
+        drop_down,
     })
 }
 

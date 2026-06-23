@@ -14,6 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use std::path::Path;
+use strum::IntoEnumIterator;
 
 use super::*;
 use crate::commands::NATURAL_LANGUAGE_BINDINGS;
@@ -63,7 +64,10 @@ pub fn command_ghost_suffix(input: &str, skills: &orangu::skills::SkillRegistry)
     if !input.starts_with('/') || input.chars().any(char::is_whitespace) {
         return None;
     }
-    if let Some(candidate) = COMMANDS.iter().find(|command| command.starts_with(input)) {
+    if let Some(candidate) = crate::slash_command::SlashCommand::iter()
+        .map(|cmd| cmd.command())
+        .find(|command| command.starts_with(input))
+    {
         return candidate
             .strip_prefix(input)
             .filter(|rest| !rest.is_empty())

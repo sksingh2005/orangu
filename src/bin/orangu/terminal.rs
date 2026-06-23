@@ -14,6 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::*;
+use strum::IntoEnumIterator;
 
 pub(crate) const CLEAR_TERMINAL_SEQUENCE: &str = "\x1b[2J\x1b[H";
 pub(crate) const TERMINAL_TITLE: &str = "orangu";
@@ -107,6 +108,19 @@ pub fn print_screen(render: RenderContext<'_>, screen: ScreenState<'_>) {
         render.skills,
     );
     let ghost = structured_ghost.as_deref().unwrap_or("");
+    let mut valid_command_len = 0;
+    if screen.input.starts_with('/') {
+        let first_word = screen.input.split_whitespace().next().unwrap_or("");
+        if crate::slash_command::SlashCommand::iter().any(|c| c.command() == first_word)
+            || render
+                .skills
+                .find(first_word.trim_start_matches('/'))
+                .is_some()
+        {
+            valid_command_len = first_word.chars().count();
+        }
+    }
+
     print!("{CLEAR_TERMINAL_SEQUENCE}");
     print!(
         "{}",
@@ -132,6 +146,13 @@ pub fn print_screen(render: RenderContext<'_>, screen: ScreenState<'_>) {
             actual_width: render.actual_width,
             actual_height: render.actual_height,
             x_offset: render.x_offset,
+            dropdown_candidates: if render.drop_down {
+                screen.dropdown.map(|d| d.candidates.as_slice())
+            } else {
+                None
+            },
+            dropdown_selected: screen.dropdown.map_or(0, |d| d.selected_index),
+            valid_command_len,
         })
     );
 }

@@ -55,6 +55,7 @@ pub(crate) fn test_input_context<'a>(workspace: &'a std::path::Path) -> InputCon
             actual_height: 24,
             x_offset: 0,
             banner: Banner::Left,
+            drop_down: true,
             feedback: false,
             server_names: &[],
             available_models: &[],

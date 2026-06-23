@@ -210,7 +210,9 @@ The completion modes are checked in order:
 14. If the line starts with `/`, complete built-in slash commands and any
     discovered Agent Skills. Examples include `/help`, `/skills`, `/model`,
     `/server`, `/list_files`, `/show_file`, `/tools`, `/quit`, and a discovered
-    skill such as `/debugging`.
+    skill such as `/debugging`. When the `drop_down` option is enabled in
+    `orangu.conf` (the default), this completion is also visualized as an interactive
+    dropdown menu that intercepts the Up/Down arrow keys.
 15. Otherwise, complete filesystem entries from the current token relative to the workspace, using the token before the cursor.
 
 Path-completion details:

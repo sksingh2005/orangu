@@ -70,6 +70,9 @@ pub struct ScreenRenderArgs<'a> {
     pub actual_width: usize,
     pub actual_height: usize,
     pub x_offset: usize,
+    pub dropdown_candidates: Option<&'a [(String, String)]>,
+    pub dropdown_selected: usize,
+    pub valid_command_len: usize,
 }
 
 /// Inputs for the bottom prompt frame (separator, input window, status bar),
@@ -85,6 +88,7 @@ pub struct PromptFrameArgs<'a> {
     pub ghost: &'a str,
     pub height: usize,
     pub actual_width: usize,
+    pub valid_command_len: usize,
 }
 
 fn tab_dot(status: TabStatus) -> &'static str {
@@ -283,6 +287,19 @@ pub fn render_screen(args: ScreenRenderArgs<'_>) -> String {
         screen.push_str("\r\n");
     }
 
+    if let Some(candidates) = args.dropdown_candidates
+        && !candidates.is_empty()
+    {
+        let pf_height = frame_height.max(banner_rows + input_lines.len() + 3);
+        let pf_top_row = (pf_height.saturating_sub(input_lines.len() + 2)).max(banner_rows + 1);
+        screen.push_str(&render_dropdown_popup(
+            candidates,
+            args.dropdown_selected,
+            pf_top_row,
+            actual_width,
+        ));
+    }
+
     screen.push_str(&render_prompt_frame(PromptFrameArgs {
         header_height: banner_rows,
         current_model: args.current_model,
@@ -294,6 +311,7 @@ pub fn render_screen(args: ScreenRenderArgs<'_>) -> String {
         ghost: args.ghost,
         height: frame_height,
         actual_width,
+        valid_command_len: args.valid_command_len,
     }));
 
     // Bottom tab bar on the last terminal row.
@@ -441,12 +459,37 @@ pub fn render_prompt_frame(args: PromptFrameArgs<'_>) -> String {
     let prompt_width = args.prompt_prefix.chars().count();
     let mut frame = format!("\x1b[{top_row};1H{separator}");
 
+    let cmd_len = args.valid_command_len;
+
+    let mut char_offset = 0;
     let last_input_index = input_lines.len().saturating_sub(1);
     for (index, input_line) in input_lines.iter().enumerate() {
         let row = input_start_row + index;
         let content = truncate_to_width(input_line, args.actual_width.saturating_sub(prompt_width));
         let content_width = content.chars().count();
-        let mut full_line = format!("{}{}", args.prompt_prefix, content);
+
+        let highlighted_content = if cmd_len > 0 {
+            let mut res = String::new();
+            for (i, ch) in content.chars().enumerate() {
+                let global_idx = char_offset + i;
+                if global_idx == 0 {
+                    res.push_str("\x1b[38;2;210;140;70m");
+                }
+                if global_idx == cmd_len {
+                    res.push_str("\x1b[39m");
+                }
+                res.push(ch);
+            }
+            if char_offset + content_width <= cmd_len {
+                res.push_str("\x1b[39m");
+            }
+            res
+        } else {
+            content.clone()
+        };
+        char_offset += content_width;
+
+        let mut full_line = format!("{}{}", args.prompt_prefix, highlighted_content);
         let mut used = content_width + prompt_width;
 
         // The ghost suffix trails the input on the cursor's (final) line, in grey.
@@ -610,6 +653,57 @@ fn render_rolling_text(text: &str, frame: usize) -> String {
 
 fn truncate_to_width(input: &str, width: usize) -> String {
     input.chars().take(width).collect()
+}
+
+fn render_dropdown_popup(
+    candidates: &[(String, String)],
+    selected: usize,
+    bottom_row: usize,
+    actual_width: usize,
+) -> String {
+    let mut popup = String::new();
+    let max_height = 10.min(candidates.len());
+    let start_idx = selected
+        .saturating_sub(max_height / 2)
+        .min(candidates.len().saturating_sub(max_height));
+    let display_candidates = &candidates[start_idx..start_idx + max_height];
+
+    let top_row = bottom_row.saturating_sub(display_candidates.len()).max(1);
+
+    for (i, (cmd, desc)) in display_candidates.iter().enumerate() {
+        let row = top_row + i;
+        let is_selected = (start_idx + i) == selected;
+        let max_width = actual_width.min(100); // don't stretch too far
+
+        let mut cmd_padded = cmd.clone();
+        if cmd_padded.chars().count() < 32 {
+            cmd_padded.push_str(&" ".repeat(32 - cmd_padded.chars().count()));
+        }
+
+        let desc_truncated = truncate_to_width(desc, max_width.saturating_sub(34));
+        let visible_len = cmd_padded.chars().count() + 1 + desc_truncated.chars().count();
+        let padding = max_width.saturating_sub(visible_len);
+
+        let line = if is_selected {
+            format!(
+                "\x1b[49m\x1b[38;2;240;160;80m\x1b[1m{} \x1b[22m\x1b[38;2;120;120;120m{}{}\x1b[0m",
+                cmd_padded,
+                desc_truncated,
+                " ".repeat(padding)
+            )
+        } else {
+            format!(
+                "\x1b[49m\x1b[38;2;120;120;120m{} \x1b[38;2;120;120;120m{}{}\x1b[0m",
+                cmd_padded,
+                desc_truncated,
+                " ".repeat(padding)
+            )
+        };
+
+        popup.push_str(&format!("\x1b[{row};1H{line}"));
+    }
+
+    popup
 }
 
 /// Render `text` as a user-input line — a dark background spanning the full

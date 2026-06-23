@@ -37,58 +37,8 @@ pub use prune::*;
 pub use pull::*;
 pub(crate) use session::*;
 
-pub const COMMANDS: &[&str] = &[
-    "/help",
-    "/disconnect",
-    "/reload",
-    "/restart",
-    "/list_files",
-    "/show_file",
-    "/tools",
-    "/model",
-    "/server",
-    "/diff",
-    "/grep",
-    "/review",
-    "/status",
-    "/log",
-    "/fetch",
-    "/pull",
-    "/comment",
-    "/close",
-    "/issue",
-    "/get_comments",
-    "/prune",
-    "/rebase",
-    "/merge",
-    "/branch",
-    "/restore",
-    "/add_file",
-    "/auto_review",
-    "/export",
-    "/remove_file",
-    "/move_file",
-    "/cherry_pick",
-    "/commit",
-    "/amend",
-    "/pull_request",
-    "/push",
-    "/init_repo",
-    "/squash",
-    "/stash",
-    "/bisect",
-    "/open_file",
-    "/pending",
-    "/session",
-    "/workspace",
-    "/create",
-    "/manual",
-    "/usage",
-    "/build",
-    "/skills",
-    "/clear",
-    "/quit",
-];
+use crate::slash_command::SlashCommand;
+use strum::IntoEnumIterator;
 
 pub fn completion_candidates(
     input: &str,
@@ -111,10 +61,9 @@ pub fn completion_candidates(
         return Some((
             0,
             cursor,
-            COMMANDS
-                .iter()
+            SlashCommand::iter()
+                .map(|cmd| cmd.command())
                 .filter(|command| command.starts_with(prefix))
-                .map(|command| (*command).to_string())
                 .chain(skills_for_prefix(prefix, skills))
                 .collect(),
         ));
@@ -138,7 +87,9 @@ fn skills_for_prefix<'a>(
         .all()
         .iter()
         .map(|skill| format!("/{}", skill.name))
-        .filter(move |command| command.starts_with(prefix) && !COMMANDS.contains(&command.as_str()))
+        .filter(move |command| {
+            command.starts_with(prefix) && !SlashCommand::iter().any(|c| c.command() == *command)
+        })
 }
 
 /// The grey inline "ghost" suffix previewing the first structured completion
@@ -467,8 +418,8 @@ mod tests {
     #[test]
     fn auto_review_command_completes_from_the_command_list() {
         // `/auto_review` is registered in the completion list...
-        assert!(COMMANDS.contains(&"/auto_review"));
-        assert!(COMMANDS.contains(&"/skills"));
+        assert!(SlashCommand::iter().any(|c| c.command() == "/auto_review"));
+        assert!(SlashCommand::iter().any(|c| c.command() == "/skills"));
         // ...the inline ghost hint completes it once the prefix is unambiguous...
         assert_eq!(
             command_ghost_suffix(
@@ -617,11 +568,36 @@ mod tests {
         // The completion list is maintained by hand; every entry must stay a
         // real command, so a typo or a renamed command fails here instead of
         // silently completing to something the parser rejects.
-        for command in COMMANDS {
+        for command in crate::slash_command::SlashCommand::iter() {
+            let cmd_str = command.command();
             assert!(
-                crate::commands::parse_slash_command(command).is_some(),
-                "completion entry {command:?} does not parse as a slash command"
+                crate::commands::parse_slash_command(&cmd_str).is_some(),
+                "completion entry {cmd_str:?} does not parse as a slash command"
             );
         }
     }
+}
+
+pub fn slash_command_dropdown_candidates(
+    prefix: &str,
+    skills: &orangu::skills::SkillRegistry,
+) -> Vec<(String, String)> {
+    let mut candidates = Vec::new();
+
+    for cmd in SlashCommand::iter() {
+        let cmd_str = cmd.command();
+        if cmd_str.starts_with(prefix) {
+            candidates.push((cmd_str, cmd.description().to_string()));
+        }
+    }
+
+    for skill in skills.all() {
+        let cmd = format!("/{}", skill.name);
+        if cmd.starts_with(prefix) && !SlashCommand::iter().any(|c| c.command() == cmd) {
+            let desc = skill.description.clone();
+            candidates.push((cmd, desc));
+        }
+    }
+
+    candidates
 }

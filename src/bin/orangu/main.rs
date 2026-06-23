@@ -28,6 +28,7 @@ mod render;
 mod review;
 mod session_store;
 mod shell;
+mod slash_command;
 mod stats;
 mod terminal;
 mod wait;
@@ -611,6 +612,7 @@ async fn run() -> Result<()> {
             actual_height: viewport.actual_height,
             x_offset: viewport.x_offset,
             banner: config.banner,
+            drop_down: config.drop_down,
             feedback: config.feedback,
             server_names: &server_names,
             available_models: &available_models,
@@ -647,6 +649,7 @@ async fn run() -> Result<()> {
                         actual_height: viewport.actual_height,
                         x_offset: viewport.x_offset,
                         banner: config.banner,
+                        drop_down: config.drop_down,
                         feedback: config.feedback,
                         server_names: &server_names,
                         available_models: &available_models,
@@ -798,6 +801,7 @@ async fn run() -> Result<()> {
                 input: input_state.as_str(),
                 cursor: input_state.cursor(),
                 ghost_index: input_state.ghost_index,
+                dropdown: input_state.dropdown.as_ref(),
             },
         );
         std::io::stdout().flush()?;
@@ -887,6 +891,7 @@ async fn run() -> Result<()> {
                 input: input_state.as_str(),
                 cursor: input_state.cursor(),
                 ghost_index: input_state.ghost_index,
+                dropdown: input_state.dropdown.as_ref(),
             },
         );
         std::io::stdout().flush()?;
@@ -1086,6 +1091,7 @@ async fn run() -> Result<()> {
                     actual_height: viewport.actual_height,
                     x_offset: viewport.x_offset,
                     banner: config.banner,
+                    drop_down: config.drop_down,
                     feedback: config.feedback,
                     server_names: &server_names,
                     available_models: &available_models,
@@ -1147,6 +1153,7 @@ async fn run() -> Result<()> {
                     actual_height: viewport.actual_height,
                     x_offset: viewport.x_offset,
                     banner: config.banner,
+                    drop_down: config.drop_down,
                     feedback: config.feedback,
                     server_names: &server_names,
                     available_models: &available_models,
@@ -1510,6 +1517,7 @@ async fn run() -> Result<()> {
                     actual_height: viewport.actual_height,
                     x_offset: viewport.x_offset,
                     banner: config.banner,
+                    drop_down: config.drop_down,
                     feedback: config.feedback,
                     server_names: &server_names,
                     available_models: &available_models,
