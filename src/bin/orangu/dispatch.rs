@@ -1973,6 +1973,7 @@ mod tests {
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,
+
                 auto_rebase: false,
                 auto_squash: false,
                 compression: false,

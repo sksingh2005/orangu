@@ -58,6 +58,7 @@ impl TerminalUiGuard {
         // If it fails, we gracefully ignore the error.
         let _ = execute!(
             std::io::stdout(),
+            crossterm::event::EnableMouseCapture,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
         Ok(Self)
@@ -69,6 +70,7 @@ impl Drop for TerminalUiGuard {
         let _ = execute!(
             std::io::stdout(),
             PopKeyboardEnhancementFlags,
+            crossterm::event::DisableMouseCapture,
             LeaveAlternateScreen
         );
         let _ = disable_raw_mode();
@@ -145,6 +147,7 @@ pub fn print_screen(render: RenderContext<'_>, screen: ScreenState<'_>) {
             cursor: screen.cursor,
             ghost,
             virtual_width: render.virtual_width,
+            word_wrap: render.word_wrap,
             actual_width: render.actual_width,
             actual_height: render.actual_height,
             x_offset: render.x_offset,

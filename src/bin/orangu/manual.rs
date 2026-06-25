@@ -490,7 +490,6 @@ fn render_manual_screen(args: &ManualScreenArgs<'_>) -> String {
     let mut screen = rows.join("\r\n");
     screen.push_str("\r\n");
     screen.push_str(&render_prompt_frame(PromptFrameArgs {
-        header_height: pane_rows,
         current_model: args.current_model,
         left_status: args
             .notice

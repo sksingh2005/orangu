@@ -141,7 +141,6 @@ pub fn render_auto_review_screen(args: AutoReviewScreenArgs<'_>) -> String {
     let mut screen = content.join("\r\n");
     screen.push_str("\r\n");
     screen.push_str(&render_prompt_frame(PromptFrameArgs {
-        header_height: pane_rows,
         current_model: args.current_model,
         left_status: args.left_status,
         pending_count: args.pending_count,

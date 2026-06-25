@@ -698,6 +698,7 @@ async fn run() -> Result<()> {
             prompt_branch: prompt_branch.as_deref(),
             header_status,
             virtual_width: viewport.virtual_width,
+            word_wrap: config.word_wrap,
             actual_width: viewport.actual_width,
             actual_height: viewport.actual_height,
             x_offset: viewport.x_offset,
@@ -735,6 +736,7 @@ async fn run() -> Result<()> {
                         prompt_branch: prompt_branch.as_deref(),
                         header_status,
                         virtual_width: viewport.virtual_width,
+                        word_wrap: config.word_wrap,
                         actual_width: viewport.actual_width,
                         actual_height: viewport.actual_height,
                         x_offset: viewport.x_offset,
@@ -1001,7 +1003,11 @@ async fn run() -> Result<()> {
             }
         };
 
-        output_state.push_input(&format!("> {next_input}"));
+        output_state.push_input_gap();
+        output_state.push_input_padding();
+        output_state.push_input(&format!("› {next_input}"));
+        output_state.push_input_padding();
+        output_state.push_input_gap();
         output_state.reset_scroll();
         startup_notice_until = None;
         print_screen(
@@ -1041,6 +1047,7 @@ async fn run() -> Result<()> {
                 usage_stats: &usage_stats,
                 available_models: &available_models,
                 virtual_width: viewport.virtual_width,
+
                 auto_rebase: config.auto_rebase,
                 auto_squash: config.auto_squash,
                 compression: config.compression,
@@ -1269,6 +1276,7 @@ async fn run() -> Result<()> {
                     prompt_branch: prompt_branch.as_deref(),
                     header_status,
                     virtual_width: viewport.virtual_width,
+                    word_wrap: config.word_wrap,
                     actual_width: viewport.actual_width,
                     actual_height: viewport.actual_height,
                     x_offset: viewport.x_offset,
@@ -1397,6 +1405,7 @@ async fn run() -> Result<()> {
                     prompt_branch: prompt_branch.as_deref(),
                     header_status,
                     virtual_width: viewport.virtual_width,
+                    word_wrap: config.word_wrap,
                     actual_width: viewport.actual_width,
                     actual_height: viewport.actual_height,
                     x_offset: viewport.x_offset,
@@ -1851,6 +1860,7 @@ async fn run() -> Result<()> {
                     prompt_branch: prompt_branch.as_deref(),
                     header_status,
                     virtual_width: viewport.virtual_width,
+                    word_wrap: config.word_wrap,
                     actual_width: viewport.actual_width,
                     actual_height: viewport.actual_height,
                     x_offset: viewport.x_offset,
@@ -2086,7 +2096,11 @@ fn prepare_submitted_input(
     append_history_entry(history_path, trimmed)?;
 
     if trimmed.starts_with('#') {
-        output_state.push_input(&format!("> {trimmed}"));
+        output_state.push_input_gap();
+        output_state.push_input_padding();
+        output_state.push_input(&format!("› {trimmed}"));
+        output_state.push_input_padding();
+        output_state.push_input_gap();
         output_state.reset_scroll();
         return Ok(None);
     }

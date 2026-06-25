@@ -40,7 +40,7 @@ pub enum TabStatus {
     Working,
 }
 
-pub(crate) const USER_INPUT_BACKGROUND: &str = "\x1b[48;2;44;44;44m";
+pub(crate) const USER_INPUT_BACKGROUND: &str = "\x1b[48;2;60;50;40m";
 const GHOST_TEXT: &str = "\x1b[38;2;120;120;120m";
 const THINKING_TEXT: &str = "Thinking";
 const WORKING_TEXT: &str = "Working";
@@ -67,6 +67,7 @@ pub struct ScreenRenderArgs<'a> {
     pub cursor: usize,
     pub ghost: &'a str,
     pub virtual_width: usize,
+    pub word_wrap: bool,
     pub actual_width: usize,
     pub actual_height: usize,
     pub x_offset: usize,
@@ -78,7 +79,6 @@ pub struct ScreenRenderArgs<'a> {
 /// Inputs for the bottom prompt frame (separator, input window, status bar),
 /// shared by the normal screen, `/review` mode, and the manual viewer.
 pub struct PromptFrameArgs<'a> {
-    pub header_height: usize,
     pub current_model: &'a str,
     pub left_status: Option<StatusFragment>,
     pub pending_count: usize,
@@ -188,34 +188,52 @@ pub fn render_screen(args: ScreenRenderArgs<'_>) -> String {
         args.banner,
         inner_width,
     );
-    let header_line_count = header.lines().count();
     let prompt_prefix = prompt_prefix(args.prompt_branch);
     let input_lines = wrapped_input_lines(args.input, actual_width, &prompt_prefix);
     let prompt_frame_height = input_lines.len() + 3;
 
-    // Priority: prompt frame first, then banner, then output.
     let rows_above_prompt = frame_height.saturating_sub(prompt_frame_height);
-    // Banner = header lines + 1 blank separator line; truncate to what fits.
-    let full_banner_height = header_line_count + 1;
-    let banner_rows = full_banner_height.min(rows_above_prompt);
     // A top bar takes one row from the output area.
-    let available_output_rows =
-        available_output_rows(rows_above_prompt, banner_rows).saturating_sub(top_row);
+    let available_output_rows = rows_above_prompt.saturating_sub(top_row);
 
-    let mut output_lines = args
-        .transcript
-        .iter()
-        .map(|line| {
-            let (rendered, offset) = match line {
-                TranscriptLine::UserInput(_) => (render_transcript_line(line, inner_width), 0),
-                _ => (render_transcript_line(line, width), args.x_offset),
-            };
-            clip_line(&rendered, offset, inner_width)
-        })
-        .collect::<Vec<_>>();
+    let mut output_lines = Vec::new();
+    for line in header.split("\r\n") {
+        output_lines.push(clip_line(line, 0, inner_width));
+    }
+    output_lines.push(String::new());
+
+    output_lines.extend(args.transcript.iter().flat_map(|line| {
+        let (wrapped_strings, offset) = match line {
+            TranscriptLine::UserInput(content) => {
+                let mut lines = wrapped_input_lines(content, inner_width, "");
+                for line in &mut lines {
+                    let padding = inner_width.saturating_sub(visible_line_width(line));
+                    *line = format!(
+                        "{USER_INPUT_BACKGROUND}{line}{}{ANSI_RESET}",
+                        " ".repeat(padding)
+                    );
+                }
+                (lines, 0)
+            }
+            TranscriptLine::Plain(content) if args.word_wrap => {
+                (crate::tui::text::wrap_ansi_lines(content, inner_width), 0)
+            }
+            _ => (vec![render_transcript_line(line, width)], args.x_offset),
+        };
+        wrapped_strings
+            .into_iter()
+            .map(move |rendered| clip_line(&rendered, offset, inner_width))
+    }));
     if let Some(pending_line) = args.pending_line {
         if pending_line.is_empty() {
             output_lines.push(String::new());
+        } else if args.word_wrap {
+            output_lines.extend(
+                pending_line
+                    .lines()
+                    .flat_map(|l| crate::tui::text::wrap_ansi_lines(l, inner_width))
+                    .map(|l| clip_line(&l, 0, inner_width)),
+            );
         } else {
             output_lines.extend(
                 pending_line
@@ -232,15 +250,6 @@ pub fn render_screen(args: ScreenRenderArgs<'_>) -> String {
 
     // The banner and output region, as rows at `inner_width`.
     let mut upper: Vec<String> = Vec::new();
-    if banner_rows > 0 {
-        let shown_header_lines = banner_rows.min(header_line_count);
-        for line in header.split("\r\n").take(shown_header_lines) {
-            upper.push(clip_line(line, 0, inner_width));
-        }
-        if banner_rows > header_line_count {
-            upper.push(String::new());
-        }
-    }
     upper.extend(visible_lines.iter().cloned());
 
     let mut screen = String::new();
@@ -290,8 +299,8 @@ pub fn render_screen(args: ScreenRenderArgs<'_>) -> String {
     if let Some(candidates) = args.dropdown_candidates
         && !candidates.is_empty()
     {
-        let pf_height = frame_height.max(banner_rows + input_lines.len() + 3);
-        let pf_top_row = (pf_height.saturating_sub(input_lines.len() + 2)).max(banner_rows + 1);
+        let pf_height = frame_height.max(input_lines.len() + 3);
+        let pf_top_row = (pf_height.saturating_sub(input_lines.len() + 2)).max(1);
         screen.push_str(&render_dropdown_popup(
             candidates,
             args.dropdown_selected,
@@ -301,7 +310,6 @@ pub fn render_screen(args: ScreenRenderArgs<'_>) -> String {
     }
 
     screen.push_str(&render_prompt_frame(PromptFrameArgs {
-        header_height: banner_rows,
         current_model: args.current_model,
         left_status: args.left_status,
         pending_count: args.pending_count,
@@ -322,8 +330,8 @@ pub fn render_screen(args: ScreenRenderArgs<'_>) -> String {
         // Writing the bar moved the cursor to the last row; put it back in the
         // input area so keystrokes land in the right place.
         let input_height = input_lines.len();
-        let pf_height = frame_height.max(banner_rows + input_height + 3);
-        let pf_top_row = (pf_height.saturating_sub(input_height + 2)).max(banner_rows + 1);
+        let pf_height = frame_height.max(input_height + 3);
+        let pf_top_row = (pf_height.saturating_sub(input_height + 2)).max(1);
         let pf_input_start = pf_top_row + 1;
         let pf_prompt_width = prompt_prefix.chars().count();
         let (cr_offset, cc_offset) =
@@ -338,32 +346,20 @@ pub fn render_screen(args: ScreenRenderArgs<'_>) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub fn output_view_rows(
-    version: &str,
-    current_model: &str,
-    endpoint: &str,
-    workspace: &std::path::Path,
+    _version: &str,
+    _current_model: &str,
+    _endpoint: &str,
+    _workspace: &std::path::Path,
     prompt_branch: Option<&str>,
-    status: HeaderStatus,
+    _status: HeaderStatus,
     input: &str,
     actual_width: usize,
     actual_height: usize,
 ) -> usize {
-    let header = render_header(
-        version,
-        current_model,
-        endpoint,
-        workspace,
-        status,
-        Banner::Left,
-        actual_width,
-    );
-    let header_line_count = header.lines().count();
     let prompt_prefix = prompt_prefix(prompt_branch);
     let input_lines = wrapped_input_lines(input, actual_width.max(1), &prompt_prefix);
     let prompt_frame_height = input_lines.len() + 3;
-    let rows_above_prompt = actual_height.saturating_sub(prompt_frame_height);
-    let banner_rows = (header_line_count + 1).min(rows_above_prompt);
-    available_output_rows(rows_above_prompt, banner_rows)
+    actual_height.saturating_sub(prompt_frame_height)
 }
 
 pub fn render_thinking_status(frame: usize, elapsed: Duration) -> StatusFragment {
@@ -441,17 +437,13 @@ fn format_elapsed_timer(elapsed: Duration) -> String {
     format!("({})", format_status_duration(elapsed))
 }
 
-fn available_output_rows(rows_above_prompt: usize, banner_rows: usize) -> usize {
-    rows_above_prompt.saturating_sub(banner_rows)
-}
-
 /// Render the bottom prompt frame with absolute cursor positioning: the top
 /// separator, the input window, the bottom separator, and the status line.
 pub fn render_prompt_frame(args: PromptFrameArgs<'_>) -> String {
     let input_lines = wrapped_input_lines(args.input, args.actual_width, args.prompt_prefix);
     let input_height = input_lines.len();
-    let height = args.height.max(args.header_height + input_height + 3);
-    let top_row = (height.saturating_sub(input_height + 2)).max(args.header_height + 1);
+    let height = args.height.max(input_height + 3);
+    let top_row = (height.saturating_sub(input_height + 2)).max(1);
     let input_start_row = top_row + 1;
     let bottom_row = input_start_row + input_height;
     let model_row = bottom_row + 1;
@@ -489,7 +481,12 @@ pub fn render_prompt_frame(args: PromptFrameArgs<'_>) -> String {
         };
         char_offset += content_width;
 
-        let mut full_line = format!("{}{}", args.prompt_prefix, highlighted_content);
+        let prefix = if index == 0 {
+            args.prompt_prefix.to_string()
+        } else {
+            " ".repeat(prompt_width)
+        };
+        let mut full_line = format!("{}{}", prefix, highlighted_content);
         let mut used = content_width + prompt_width;
 
         // The ghost suffix trails the input on the cursor's (final) line, in grey.
@@ -533,7 +530,7 @@ fn render_transcript_line(line: &TranscriptLine, width: usize) -> String {
     match line {
         TranscriptLine::Plain(content) | TranscriptLine::Wide(content) => content.clone(),
         TranscriptLine::UserInput(content) => {
-            let padding = width.saturating_sub(content.chars().count());
+            let padding = width.saturating_sub(visible_line_width(content));
             format!(
                 "{USER_INPUT_BACKGROUND}{content}{}{ANSI_RESET}",
                 " ".repeat(padding)
@@ -582,8 +579,8 @@ pub(crate) fn cursor_position(
 /// The input-window prompt prefix: `<branch>> ` on a branch, `> ` otherwise.
 pub fn prompt_prefix(branch_name: Option<&str>) -> String {
     match branch_name {
-        Some(branch_name) if !branch_name.trim().is_empty() => format!("{branch_name}> "),
-        _ => "> ".to_string(),
+        Some(branch_name) if !branch_name.trim().is_empty() => format!("{branch_name}› "),
+        _ => "› ".to_string(),
     }
 }
 
@@ -790,9 +787,9 @@ mod tests {
     }
 
     #[test]
-    fn prompt_prefix_uses_branch_name() {
-        assert_eq!(prompt_prefix(Some("main")), "main> ");
-        assert_eq!(prompt_prefix(None), "> ");
+    fn prompt_prefix_formats_commands_and_defaults_to_caret() {
+        assert_eq!(prompt_prefix(Some("main")), "main› ");
+        assert_eq!(prompt_prefix(None), "› ");
     }
 
     #[test]
@@ -817,20 +814,10 @@ mod tests {
     }
 
     #[test]
-    fn available_output_rows_matches_current_layout_math() {
-        // header=8 lines, prompt_frame=4, height=24
-        // rows_above_prompt = 24-4 = 20, banner_rows = min(9, 20) = 9
-        assert_eq!(available_output_rows(20, 9), 11);
-    }
-
-    #[test]
     fn transcript_input_highlight_fills_the_row() {
-        let rendered =
-            render_transcript_line(&TranscriptLine::UserInput("> Hello World!".to_string()), 20);
-
         assert_eq!(
-            rendered,
-            format!("{USER_INPUT_BACKGROUND}> Hello World!      {ANSI_RESET}")
+            render_transcript_line(&TranscriptLine::UserInput("› Hello World!".to_string()), 20),
+            format!("{USER_INPUT_BACKGROUND}› Hello World!      {ANSI_RESET}")
         );
     }
 }

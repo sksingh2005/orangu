@@ -13,7 +13,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use orangu::{
     llm::{ChatMessage, StreamMetrics},
     session::ChatSession,
@@ -104,6 +106,7 @@ pub struct RenderContext<'a> {
     pub prompt_branch: Option<&'a str>,
     pub header_status: HeaderStatus,
     pub virtual_width: usize,
+    pub word_wrap: bool,
     pub actual_width: usize,
     pub actual_height: usize,
     pub x_offset: usize,
@@ -316,6 +319,14 @@ impl OutputState {
             text.lines()
                 .map(|line| TranscriptLine::UserInput(line.to_owned())),
         );
+    }
+
+    pub fn push_input_padding(&mut self) {
+        self.push_lines(std::iter::once(TranscriptLine::UserInput(String::new())));
+    }
+
+    pub fn push_input_gap(&mut self) {
+        self.push_lines(std::iter::once(TranscriptLine::Plain(String::new())));
     }
 
     pub fn push_lines<I>(&mut self, lines: I)
@@ -687,6 +698,17 @@ pub fn handle_input_event(
             input_state.insert_str(&text);
             redraw = true;
         }
+        Event::Mouse(MouseEvent { kind, .. }) => match kind {
+            MouseEventKind::ScrollUp => {
+                output_state.page_up(3);
+                redraw = true;
+            }
+            MouseEventKind::ScrollDown => {
+                output_state.page_down(3);
+                redraw = true;
+            }
+            _ => {}
+        },
         Event::Key(KeyEvent {
             code,
             modifiers,
@@ -1200,11 +1222,11 @@ mod tests {
     fn output_state_styles_echoed_user_input() {
         let mut output_state = OutputState::default();
 
-        output_state.push_input("> show README.md");
+        output_state.push_input("› show README.md");
         output_state.push_text("plain output");
 
         assert!(
-            matches!(output_state.lines().first(), Some(TranscriptLine::UserInput(s)) if s == "> show README.md")
+            matches!(output_state.lines().first(), Some(TranscriptLine::UserInput(s)) if s == "› show README.md")
         );
         assert!(
             matches!(output_state.lines().get(1), Some(TranscriptLine::Plain(s)) if s == "plain output")

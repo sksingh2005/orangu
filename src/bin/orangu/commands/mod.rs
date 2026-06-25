@@ -427,6 +427,7 @@ pub struct CommandContext<'a> {
     pub usage_stats: &'a crate::UsageStats,
     pub available_models: &'a [String],
     pub virtual_width: usize,
+
     pub auto_rebase: bool,
     pub auto_squash: bool,
     pub compression: bool,

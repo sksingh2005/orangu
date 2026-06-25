@@ -253,21 +253,22 @@ Path-completion details:
 - `Shift+PageDown` scrolls forward through the output window by a full page
 - `Alt+Up` scrolls backward one line at a time
 - `Alt+Down` scrolls forward one line at a time
+- Scrolling the mouse wheel up or down scrolls the output window by three lines at a time
 - The output scrollback buffer keeps the most recent 10,000 lines
 - Scrolling is limited to the output window; it does not replace the header or prompt area
 
 ### Horizontal panning
 
-`orangu` maintains a virtual canvas that can be wider than the visible terminal. Source files shown with `/show_file` may contain lines longer than the terminal width; those lines are laid out on the full virtual canvas and can be panned horizontally without reflowing.
+`orangu` maintains a virtual canvas that can be wider than the visible terminal. Source files shown with `/show_file` and code blocks may contain lines longer than the terminal width; those lines are laid out on the full virtual canvas and can be panned horizontally without reflowing.
 
 - `Alt+Right` pans the output window right (reveals content that extends past the right edge)
 - `Alt+Left` pans the output window left (back toward the start of the line)
 
 The header, status bar, and input window always occupy the full visible terminal width and are not affected by panning.
 
-The virtual canvas width is set by the `width` key in the `[orangu]` config section (default `512`). When the terminal is resized to a width larger than the configured virtual width, the virtual width grows to match so that content is never clipped unexpectedly. The virtual width never shrinks below its initial value during a session.
+The virtual canvas width is set by the `width` key in the `[orangu]` config section (default `512`). When the terminal is resized to a width larger than the configured virtual width, the virtual width grows to match so that content is never clipped unexpectedly.
 
-LLM and tool output is always wrapped or clipped to the visible terminal width and does not pan. Only `/show_file` output — where source lines must stay intact — uses the full virtual canvas.
+By default, LLM conversational text also uses the virtual canvas width. If you prefer LLM conversational text to automatically resize and wrap to your physical terminal width (disabling panning for normal text), you can set `word_wrap = true` in your `[orangu]` configuration. Source code files will continue to use the virtual canvas to preserve formatting even when `word_wrap` is enabled.
 
 ### Waiting and exit control
 

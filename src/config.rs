@@ -34,6 +34,7 @@ pub struct ClientAppConfiguration {
     pub diff_file_cap: usize,
     pub quotes: String,
     pub width: usize,
+    pub word_wrap: bool,
     #[serde(skip)]
     pub banner: Banner,
     pub feedback: bool,
@@ -83,6 +84,18 @@ pub const CLIENT_SECTION: &str = "orangu";
 
 pub fn default_virtual_width() -> usize {
     512
+}
+
+pub fn default_word_wrap() -> bool {
+    false
+}
+
+pub fn default_quotes() -> String {
+    "".to_string()
+}
+
+pub fn default_banner() -> Banner {
+    Banner::default()
 }
 
 pub fn default_timeout() -> u64 {
@@ -155,7 +168,13 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
         .get("compression")
         .map(|value| parse_feedback_bool(value))
         .unwrap_or_else(default_compression);
+    let quotes = parse_client_field(&client, "quotes", default_quotes)?;
     let width = parse_client_field(&client, "width", default_virtual_width)?;
+    let word_wrap = client
+        .get("word_wrap")
+        .map(|value| parse_feedback_bool(value))
+        .unwrap_or_else(default_word_wrap);
+    let banner = parse_client_field(&client, "banner", default_banner)?;
     let workspaces = parse_client_field(&client, "workspaces", WorkspacePlacement::default)?;
     let drop_down = client
         .get("drop_down")
@@ -196,12 +215,10 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
         compression,
         auto_downsample_lines,
         diff_file_cap,
-        quotes: client.get("quotes").cloned().unwrap_or_default(),
+        quotes,
         width,
-        banner: client
-            .get("banner")
-            .map(|value| value.parse().unwrap_or_default())
-            .unwrap_or_default(),
+        word_wrap,
+        banner,
         feedback: parse_feedback_bool(client.get("feedback").map(String::as_str).unwrap_or("")),
         auto_rebase: parse_feedback_bool(
             client.get("auto_rebase").map(String::as_str).unwrap_or(""),

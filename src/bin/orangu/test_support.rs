@@ -54,6 +54,7 @@ pub(crate) fn test_input_context<'a>(workspace: &'a std::path::Path) -> InputCon
                 model_ok: true,
             },
             virtual_width: 80,
+            word_wrap: false,
             actual_width: 80,
             actual_height: 24,
             x_offset: 0,

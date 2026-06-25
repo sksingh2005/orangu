@@ -181,7 +181,6 @@ pub fn render_review_screen(args: ReviewScreenArgs<'_>) -> String {
     let mut screen = content;
     screen.push_str("\r\n");
     screen.push_str(&render_prompt_frame(PromptFrameArgs {
-        header_height: pane_rows,
         current_model: args.current_model,
         left_status: args.left_status,
         pending_count: args.pending_count,
@@ -450,7 +449,7 @@ fn render_review_feedback_panel(
     // Echo the asked question (if any) below the title, styled like a submitted
     // prompt in the main output window. It stays pinned above the review text.
     if let Some(question) = feedback.question {
-        rows.push(render_user_input_line(&format!("> {question}"), width));
+        rows.push(render_user_input_line(&format!("› {question}"), width));
     }
 
     let body_height = pane_rows.saturating_sub(rows.len());
@@ -727,13 +726,13 @@ mod tests {
         assert!(!rendered.contains("+x"));
         // The asked question is echoed, styled like a submitted prompt.
         assert!(
-            rendered.contains(&format!("{USER_INPUT_BACKGROUND}> is this safe?")),
+            rendered.contains(&format!("{USER_INPUT_BACKGROUND}› is this safe?")),
             "question not echoed with input styling"
         );
         // The status bar (model name) and input window are still present.
         assert!(rendered.contains("my-model"), "status bar missing model");
         assert!(
-            rendered.contains("> focus on errors"),
+            rendered.contains("› focus on errors"),
             "input window missing"
         );
     }
