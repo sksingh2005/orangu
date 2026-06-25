@@ -33,6 +33,11 @@
 //! brand-coloured headings, bold/italic emphasis, lists, code blocks, block
 //! quotes, and tables. Lines wrap to the page using real glyph metrics — prose
 //! on word boundaries, code hard at the margin — across as many pages as needed.
+//! A review export (both `/review` and `/auto_review`) adds a final source
+//! appendix: the code around each finding (the `/show_file` view, 3 lines before
+//! and after) with line numbers, grouped by category. Only the finding's
+//! recorded line(s) are syntax-highlighted and bold; the context lines are left
+//! plain.
 
 use anyhow::{Context, Result};
 use markdown::{
@@ -48,13 +53,40 @@ use std::{
     fs::File,
     io::BufWriter,
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Theme, ThemeSet};
 
 use orangu::tui::TranscriptLine;
 
 use crate::VERSION;
 use crate::git::{discover_git_root, git_repository_name, workspace_branch_name};
+use crate::render::{SyntaxHighlightAssets, syntax_highlight_assets};
+
+/// One finding in the `/auto_review` source appendix: the category it belongs
+/// to, the finding's Markdown text, and the source code around the finding's
+/// line (the `/show_file` view — 3 lines before and after), as plain lines with
+/// the line number they start at and the file path (for syntax detection).
+/// `code` is empty when the finding has no resolvable file or line. Built by
+/// `AutoReviewState::export_appendix`.
+#[derive(Clone, Debug)]
+pub struct AutoReviewAppendixEntry {
+    pub category: String,
+    pub finding: String,
+    /// The file path, for syntax detection (empty when the finding has none).
+    pub path: String,
+    /// The 1-based line number of the first row of `code` (0 when `code` is empty).
+    pub start_line: usize,
+    /// The plain source lines around the finding (the ±3-line window).
+    pub code: Vec<String>,
+    /// The inclusive 1-based line range the finding recorded — the line(s)
+    /// syntax-highlighted in the appendix; the surrounding context is left
+    /// plain. `None` when the finding carries no line.
+    pub highlight: Option<(usize, usize)>,
+}
 
 // --- Embedded brand font (Red Hat Text, SIL OFL — see assets/fonts/LICENSE) ---
 const FONT_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/RedHatText-Regular.otf");
@@ -111,6 +143,10 @@ struct Span {
     text: String,
     bold: bool,
     italic: bool,
+    /// An explicit RGB fill colour. `None` uses the block's default colour
+    /// (brand for headings, black for body); set only for syntax-highlighted
+    /// appendix code so its runs carry their own colours.
+    color: Option<(f32, f32, f32)>,
 }
 
 impl Span {
@@ -119,6 +155,7 @@ impl Span {
             text: text.into(),
             bold: false,
             italic: false,
+            color: None,
         }
     }
 }
@@ -155,6 +192,7 @@ struct StyledChar {
     ch: char,
     bold: bool,
     italic: bool,
+    color: Option<(f32, f32, f32)>,
 }
 
 /// Export the console output window to a PDF in the workspace root.
@@ -177,6 +215,7 @@ pub fn export_console(
                 text,
                 bold,
                 italic: false,
+                color: None,
             }],
             size: BODY_SIZE,
             indent_mm: 0.0,
@@ -198,8 +237,16 @@ pub fn export_console(
 /// The first page is a summary: repository, branch, date/time, an entry count
 /// per category, and a green/red Approved/Rejected banner. The second page is a
 /// table of contents. Each category then starts on its own page, so the first
-/// category (`Overall`) opens on page 3.
-pub fn export_review(workspace: &Path, markdown: &str, model: &str) -> Result<PathBuf> {
+/// category (`Overall`) opens on page 3. A non-empty `appendix` (built for both
+/// `/review` and `/auto_review`) adds a final source appendix — the code around
+/// each finding, the recorded line syntax-highlighted and bold — on its own
+/// page, listed in the contents; an empty `appendix` adds none.
+pub fn export_review(
+    workspace: &Path,
+    markdown: &str,
+    model: &str,
+    appendix: &[AutoReviewAppendixEntry],
+) -> Result<PathBuf> {
     let sections = parse_sections(markdown);
     let verdict = overall_verdict(markdown);
     let repository = repository_display(workspace);
@@ -219,14 +266,30 @@ pub fn export_review(workspace: &Path, markdown: &str, model: &str) -> Result<Pa
         page += paginate(&section.blocks, &pdf.fonts);
     }
 
-    // Page 2 — table of contents.
-    pdf.new_page();
-    pdf.draw_toc(&sections, &starts);
+    // The appendix (when present) follows the categories on its own page.
+    let appendix_blocks = build_appendix_blocks(appendix);
+    let appendix_start = (!appendix_blocks.is_empty()).then_some(page);
 
-    // Pages 3+ — one category per page.
+    // Page 2 — table of contents: every category, then the appendix.
+    let mut toc_rows: Vec<(&str, usize)> = sections
+        .iter()
+        .map(|section| section.title.as_str())
+        .zip(starts.iter().copied())
+        .collect();
+    if let Some(start) = appendix_start {
+        toc_rows.push(("Appendix", start));
+    }
+    pdf.new_page();
+    pdf.draw_toc(&toc_rows);
+
+    // Pages 3+ — one category per page, then the appendix.
     for section in &sections {
         pdf.new_page();
         pdf.draw_blocks(&section.blocks);
+    }
+    if !appendix_blocks.is_empty() {
+        pdf.new_page();
+        pdf.draw_blocks(&appendix_blocks);
     }
 
     let path = export_file_path(workspace, "review");
@@ -629,6 +692,170 @@ fn render_table(node: &Node, level: usize, blocks: &mut Vec<Block>) {
     }
 }
 
+// --- Auto review source appendix ---
+
+/// Render the `/auto_review` source appendix: an `Appendix` page, then per
+/// category that has findings a heading, and under each finding its Markdown
+/// text followed by the syntax-highlighted source code around the finding (the
+/// `/show_file` view — 3 lines before and after). Empty when there are no
+/// entries, so the export adds no appendix for an interactive `/review`.
+fn build_appendix_blocks(appendix: &[AutoReviewAppendixEntry]) -> Vec<Block> {
+    if appendix.is_empty() {
+        return Vec::new();
+    }
+    // The assets are resolved once; the syntax is per file (so it varies by
+    // entry) and is resolved inside `highlight_code_blocks`.
+    let assets = syntax_highlight_assets();
+
+    let mut blocks = vec![heading("Appendix", BODY_SIZE + 5.0)];
+    let mut current: Option<&str> = None;
+    for entry in appendix {
+        if current != Some(entry.category.as_str()) {
+            blocks.push(heading(&entry.category, BODY_SIZE + 3.5));
+            current = Some(entry.category.as_str());
+        }
+        blocks.push(finding_block(&entry.finding));
+        blocks.extend(highlight_code_blocks(entry, assets));
+    }
+    blocks
+}
+
+/// A finding's Markdown text as a body paragraph block, so its `**path:line**`
+/// location renders bold like in the report.
+fn finding_block(finding: &str) -> Block {
+    paragraph_block_from_spans(inline_markdown_spans(finding), 0)
+}
+
+/// Parse one line of inline Markdown into styled spans, reusing the report's
+/// `collect_inline`. Falls back to a single plain span when it does not parse.
+fn inline_markdown_spans(text: &str) -> Vec<Span> {
+    match to_mdast(text, &ParseOptions::gfm()) {
+        Ok(Node::Root(root)) => {
+            let mut spans = Vec::new();
+            for node in &root.children {
+                if let Node::Paragraph(paragraph) = node {
+                    collect_inline(&paragraph.children, false, false, &mut spans);
+                }
+            }
+            if spans.is_empty() {
+                vec![Span::plain(text)]
+            } else {
+                spans
+            }
+        }
+        _ => vec![Span::plain(text)],
+    }
+}
+
+/// A light syntect theme for the appendix — dark, readable colours on the white
+/// page — loaded once. The shared `syntax_highlight_assets` theme is tuned for
+/// the dark terminal, so on paper its colours are too faint; this picks a light
+/// theme (GitHub-style) instead. `None` when no light theme can be loaded, in
+/// which case the recorded line falls back to bold black.
+fn appendix_theme() -> Option<&'static Theme> {
+    static THEME: OnceLock<Option<Theme>> = OnceLock::new();
+    THEME
+        .get_or_init(|| {
+            let themes = ThemeSet::load_defaults();
+            ["InspiredGitHub", "Solarized (light)", "base16-ocean.light"]
+                .iter()
+                .find_map(|name| themes.themes.get(*name).cloned())
+        })
+        .as_ref()
+}
+
+/// Syntax-highlight a finding's source-code window into code blocks, with a grey
+/// line-number gutter like `/show_file`. Only the recorded line is emphasised —
+/// drawn bold and, when a light theme is available, syntax-coloured in the
+/// file's language (otherwise bold black) — while the surrounding context is
+/// left plain. Each line is one hard-wrapped `CODE_SIZE` block, mirroring
+/// `render_code`. Empty when the entry has no code.
+fn highlight_code_blocks(
+    entry: &AutoReviewAppendixEntry,
+    assets: &SyntaxHighlightAssets,
+) -> Vec<Block> {
+    if entry.code.is_empty() {
+        return Vec::new();
+    }
+    let extension = Path::new(&entry.path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("");
+    // A light theme keeps the colours readable on the page; without one the
+    // recorded line is drawn bold black.
+    let mut highlighter = appendix_theme().map(|theme| {
+        let syntax = assets
+            .syntaxes
+            .find_syntax_by_extension(extension)
+            .unwrap_or_else(|| assets.syntaxes.find_syntax_plain_text());
+        HighlightLines::new(syntax, theme)
+    });
+
+    let last_line = entry.start_line + entry.code.len() - 1;
+    let gutter_width = last_line.to_string().len();
+    let base = INDENT_MM;
+    let last = entry.code.len().saturating_sub(1);
+    let mut blocks = Vec::with_capacity(entry.code.len());
+    for (index, line) in entry.code.iter().enumerate() {
+        let line_no = entry.start_line + index;
+        let recorded = entry
+            .highlight
+            .is_some_and(|(start, end)| line_no >= start && line_no <= end);
+        // The grey line-number gutter, then the source. Every line is fed to the
+        // highlighter so its parse state stays correct; only the recorded line
+        // keeps the (bold) syntax colours, the context is left plain.
+        let mut spans = vec![Span {
+            text: format!("{line_no:>gutter_width$}  "),
+            bold: false,
+            italic: false,
+            color: Some(GRID_COLOR),
+        }];
+        let ranges = highlighter
+            .as_mut()
+            .and_then(|highlighter| highlighter.highlight_line(line, &assets.syntaxes).ok());
+        match (recorded, ranges) {
+            // Recorded line with a light theme: bold, syntax-coloured.
+            (true, Some(ranges)) => spans.extend(ranges.iter().map(|(style, text)| Span {
+                text: (*text).to_string(),
+                bold: true,
+                italic: false,
+                color: Some(syntect_rgb(style.foreground)),
+            })),
+            // Recorded line without a theme: bold black so it still stands out.
+            (true, None) => spans.push(Span {
+                text: line.clone(),
+                bold: true,
+                italic: false,
+                color: None,
+            }),
+            // Context line: plain.
+            (false, _) => spans.push(Span::plain(line.clone())),
+        }
+        blocks.push(Block {
+            spans,
+            size: CODE_SIZE,
+            indent_mm: base,
+            hanging_mm: base,
+            word_wrap: false,
+            space_after_mm: if index == last {
+                CODE_SIZE * 0.5 * PT_TO_MM
+            } else {
+                0.0
+            },
+        });
+    }
+    blocks
+}
+
+/// A syntect highlight colour as a 0..1 RGB triple for printpdf.
+fn syntect_rgb(color: syntect::highlighting::Color) -> (f32, f32, f32) {
+    (
+        f32::from(color.r) / 255.0,
+        f32::from(color.g) / 255.0,
+        f32::from(color.b) / 255.0,
+    )
+}
+
 fn inline_spans_of(node: &Node) -> Vec<Span> {
     let mut spans = Vec::new();
     collect_inline(std::slice::from_ref(node), false, false, &mut spans);
@@ -691,6 +918,7 @@ fn push_span(out: &mut Vec<Span>, text: &str, bold: bool, italic: bool) {
             text: normalized,
             bold,
             italic,
+            color: None,
         }),
     }
 }
@@ -844,8 +1072,10 @@ impl Pdf {
 
     fn draw_block(&mut self, block: &Block) {
         let line_height = block.size * 1.35 * PT_TO_MM;
-        // Headings (the only blocks larger than the body) carry the brand colour.
-        let color = if block.size > BODY_SIZE {
+        // Headings (the only blocks larger than the body) carry the brand
+        // colour. A span with its own colour (syntax-highlighted appendix code)
+        // overrides this per run; everything else uses the block default.
+        let default_color = if block.size > BODY_SIZE {
             BRAND_COLOR
         } else {
             TEXT_COLOR
@@ -860,9 +1090,6 @@ impl Pdf {
             } else {
                 block.hanging_mm
             };
-            let (r, g, b) = color;
-            self.layer
-                .set_fill_color(Color::Rgb(Rgb::new(r, g, b, None)));
             draw_line(
                 &self.layer,
                 &line,
@@ -870,6 +1097,7 @@ impl Pdf {
                 block.size,
                 self.cursor_y,
                 &self.fonts,
+                default_color,
             );
         }
         self.cursor_y -= block.space_after_mm;
@@ -992,24 +1220,18 @@ impl Pdf {
         self.cursor_y = bottom - 8.0;
     }
 
-    /// Page 2: the table of contents — each category and its starting page.
-    fn draw_toc(&mut self, sections: &[Section], starts: &[usize]) {
+    /// Page 2: the table of contents — each entry (categories, then the
+    /// appendix) and its starting page.
+    fn draw_toc(&mut self, rows: &[(&str, usize)]) {
         self.draw_block(&heading("Table of Contents", BODY_SIZE + 5.0));
         let size = BODY_SIZE + 1.0;
         let row_height = size * 1.8 * PT_TO_MM;
-        for (section, page) in sections.iter().zip(starts) {
+        for &(title, page) in rows {
             if self.cursor_y - row_height < CONTENT_BOTTOM_MM {
                 self.new_page();
             }
             self.cursor_y -= row_height;
-            self.text(
-                &section.title,
-                false,
-                MARGIN_MM,
-                self.cursor_y,
-                size,
-                TEXT_COLOR,
-            );
+            self.text(title, false, MARGIN_MM, self.cursor_y, size, TEXT_COLOR);
             let number = page.to_string();
             let width = self.fonts.text_width_mm(&number, false, false, size);
             self.text(
@@ -1121,6 +1343,7 @@ fn heading(text: &str, size: f32) -> Block {
             text: text.to_string(),
             bold: true,
             italic: false,
+            color: None,
         }],
         size,
         indent_mm: 0.0,
@@ -1171,6 +1394,7 @@ fn block_chars(block: &Block) -> Vec<StyledChar> {
                 ch,
                 bold: span.bold,
                 italic: span.italic,
+                color: span.color,
             });
         }
     }
@@ -1231,6 +1455,10 @@ fn wrap(
     lines
 }
 
+/// The style of one drawn run: weight, slant, and resolved RGB fill colour.
+/// Runs break whenever any of these change.
+type RunStyle = (bool, bool, (f32, f32, f32));
+
 fn draw_line(
     layer: &PdfLayerReference,
     line: &[StyledChar],
@@ -1238,13 +1466,16 @@ fn draw_line(
     size: f32,
     y: f32,
     fonts: &DocFonts,
+    default_color: (f32, f32, f32),
 ) {
     let mut x = MARGIN_MM + indent_mm;
     let mut run = String::new();
-    let mut run_style: Option<(bool, bool)> = None;
+    let mut run_style: Option<RunStyle> = None;
 
     for sc in line {
-        let style = (sc.bold, sc.italic);
+        // A span's own colour (highlighted code) wins; everything else takes
+        // the block default resolved here, so the run carries a concrete colour.
+        let style = (sc.bold, sc.italic, sc.color.unwrap_or(default_color));
         if run_style != Some(style) {
             x = flush_run(layer, &mut run, x, y, size, run_style, fonts);
             run_style = Some(style);
@@ -1254,20 +1485,22 @@ fn draw_line(
     flush_run(layer, &mut run, x, y, size, run_style, fonts);
 }
 
-/// Draw `run` at `(x, y)` (mm) and return the x just past it.
+/// Draw `run` at `(x, y)` (mm) in its style's colour and return the x just past
+/// it.
 fn flush_run(
     layer: &PdfLayerReference,
     run: &mut String,
     x: f32,
     y: f32,
     size: f32,
-    style: Option<(bool, bool)>,
+    style: Option<RunStyle>,
     fonts: &DocFonts,
 ) -> f32 {
     if run.is_empty() {
         return x;
     }
-    let (bold, italic) = style.unwrap_or((false, false));
+    let (bold, italic, (r, g, b)) = style.unwrap_or((false, false, TEXT_COLOR));
+    layer.set_fill_color(Color::Rgb(Rgb::new(r, g, b, None)));
     let width = fonts.text_width_mm(run, bold, italic, size);
     layer.use_text(run.as_str(), size, Mm(x), Mm(y), fonts.font(bold, italic));
     run.clear();
@@ -1394,7 +1627,7 @@ mod tests {
     fn export_review_renders_markdown() {
         let workspace = tempdir().expect("workspace");
         let markdown = "# Title\n\nSome **bold** text.\n\n- one\n- two\n\n```\ncode\n```";
-        let path = export_review(workspace.path(), markdown, "gemma").expect("export");
+        let path = export_review(workspace.path(), markdown, "gemma", &[]).expect("export");
         assert!(path.exists());
         assert!(
             path.file_name()
@@ -1404,6 +1637,130 @@ mod tests {
         );
         let bytes = std::fs::read(&path).expect("read pdf");
         assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn export_review_with_appendix_writes_a_pdf() {
+        let workspace = tempdir().expect("workspace");
+        let markdown = "## Code\n\n- **a.rs:2**: boom\n\n## Conclusion\n\n\
+                        **orangu rejects this patch**";
+        let appendix = vec![AutoReviewAppendixEntry {
+            category: "Code".to_string(),
+            finding: "**a.rs:2**: boom".to_string(),
+            path: "a.rs".to_string(),
+            start_line: 1,
+            code: vec![
+                "fn a() {}".to_string(),
+                "fn b() {}".to_string(),
+                "fn c() {}".to_string(),
+            ],
+            highlight: Some((2, 2)),
+        }];
+        let path = export_review(workspace.path(), markdown, "model", &appendix).expect("export");
+        assert!(path.exists());
+        let bytes = std::fs::read(&path).expect("read pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn build_appendix_blocks_groups_by_category_with_heading() {
+        // No entries: no appendix at all (an interactive `/review`).
+        assert!(build_appendix_blocks(&[]).is_empty());
+
+        let appendix = vec![
+            AutoReviewAppendixEntry {
+                category: "Code".to_string(),
+                finding: "**a.rs:2**: boom".to_string(),
+                path: "a.rs".to_string(),
+                start_line: 1,
+                code: vec!["fn b() {}".to_string()],
+                highlight: Some((2, 2)),
+            },
+            AutoReviewAppendixEntry {
+                category: "Code".to_string(),
+                finding: "**a.rs:5**: bang".to_string(),
+                path: "a.rs".to_string(),
+                start_line: 4,
+                code: vec!["fn c() {}".to_string()],
+                highlight: Some((5, 5)),
+            },
+        ];
+        let blocks = build_appendix_blocks(&appendix);
+        // The "Appendix" title plus one "Code" heading (shared by both
+        // findings, not repeated), each finding, and each code line.
+        let headings: Vec<&str> = blocks
+            .iter()
+            .filter(|block| block.size > BODY_SIZE)
+            .flat_map(|block| block.spans.iter().map(|span| span.text.as_str()))
+            .collect();
+        assert_eq!(headings, vec!["Appendix", "Code"]);
+        // A code span carries an explicit colour (syntax highlighting).
+        assert!(
+            blocks
+                .iter()
+                .flat_map(|block| &block.spans)
+                .any(|span| span.color.is_some())
+        );
+    }
+
+    #[test]
+    fn build_appendix_blocks_highlights_only_the_recorded_line() {
+        // A window of `let` lines; only line 2 (the recorded line) is
+        // syntax-highlighted, the ±context lines stay plain.
+        let appendix = vec![AutoReviewAppendixEntry {
+            category: "Code".to_string(),
+            finding: "**a.rs:2**: boom".to_string(),
+            path: "a.rs".to_string(),
+            start_line: 1,
+            code: vec![
+                "let a = 1;".to_string(),
+                "let b = 2;".to_string(),
+                "let c = 3;".to_string(),
+            ],
+            highlight: Some((2, 2)),
+        }];
+        let blocks = build_appendix_blocks(&appendix);
+        // The code-line blocks are the `CODE_SIZE` ones (not the headings or the
+        // body-size finding line), in source order.
+        let code_blocks: Vec<&Block> = blocks
+            .iter()
+            .filter(|block| (block.size - CODE_SIZE).abs() < f32::EPSILON)
+            .collect();
+        assert_eq!(code_blocks.len(), 3);
+        // Each line carries a grey gutter span; a line is "highlighted" when its
+        // code spans (beyond that gutter) are coloured and bold.
+        let highlighted = |block: &Block| {
+            block
+                .spans
+                .iter()
+                .skip(1)
+                .any(|s| s.color.is_some() && s.bold)
+        };
+        assert!(!highlighted(code_blocks[0]), "context line 1 must be plain");
+        assert!(
+            highlighted(code_blocks[1]),
+            "recorded line 2 must be highlighted and bold"
+        );
+        assert!(!highlighted(code_blocks[2]), "context line 3 must be plain");
+        // Context lines stay non-bold.
+        assert!(
+            code_blocks[0].spans.iter().all(|s| !s.bold),
+            "context line 1 must not be bold"
+        );
+    }
+
+    #[test]
+    fn appendix_uses_a_light_theme_with_dark_text() {
+        // A light theme must load so the recorded line's colours are readable on
+        // the white page (the dark terminal theme would be too faint).
+        let theme = appendix_theme().expect("a light syntect theme is available");
+        // Its default foreground is dark (well under mid-grey), not light.
+        let fg = theme.settings.foreground.expect("theme has a foreground");
+        let brightness = (u32::from(fg.r) + u32::from(fg.g) + u32::from(fg.b)) / 3;
+        assert!(
+            brightness < 128,
+            "foreground should be dark, got {brightness}"
+        );
     }
 
     #[test]
@@ -1466,7 +1823,7 @@ mod tests {
 
         // The export still succeeds and writes a PDF.
         let workspace = tempdir().expect("workspace");
-        let path = export_review(workspace.path(), &markdown, "model").expect("export");
+        let path = export_review(workspace.path(), &markdown, "model", &[]).expect("export");
         assert!(path.exists());
         let bytes = std::fs::read(&path).expect("read pdf");
         assert!(bytes.starts_with(b"%PDF"));

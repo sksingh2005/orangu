@@ -34,6 +34,18 @@ pub struct AutoReviewRejectView<'a> {
     pub cursor: usize,
 }
 
+/// The Enter diff popup of `/auto_review`, drawn over the panes: a title bar
+/// and the colorized diff of the changes under review (the `/diff` view),
+/// scrolled with the Up/Down keys.
+pub struct AutoReviewDiffView<'a> {
+    /// The title shown in the bar (e.g. `Diff`).
+    pub title: &'a str,
+    /// The colorized diff lines (ANSI), drawn in the popup body.
+    pub lines: &'a [String],
+    pub scroll: usize,
+    pub x_offset: usize,
+}
+
 /// Inputs for the `/auto_review` screen: the categorized report in the left
 /// pane — topped by the status area — and the file checklist (with auto-set
 /// status dots) in the right pane.
@@ -73,6 +85,8 @@ pub struct AutoReviewScreenArgs<'a> {
     pub ignored: &'a [bool],
     /// When set, the Alt+r reject window is drawn over the panes.
     pub reject: Option<AutoReviewRejectView<'a>>,
+    /// When set, the Enter diff popup is drawn over the panes.
+    pub diff: Option<AutoReviewDiffView<'a>>,
     /// The input window contents. Empty while the run is in progress; once the
     /// run is done the browse loop fills it in so `/open_file <path>` and
     /// `open <path>` can open any project file in `$EDITOR`.
@@ -117,7 +131,9 @@ pub fn render_auto_review_screen(args: AutoReviewScreenArgs<'_>) -> String {
     let prompt_frame_height = input_lines.len() + 3;
     let pane_rows = height.saturating_sub(prompt_frame_height).max(2);
 
-    let content = if let Some(reject) = &args.reject {
+    let content = if let Some(diff) = &args.diff {
+        render_auto_review_diff_panel(diff, width, pane_rows)
+    } else if let Some(reject) = &args.reject {
         render_auto_review_reject_panel(reject, width, pane_rows)
     } else {
         render_auto_review_panes(&args, width, pane_rows)
@@ -168,7 +184,7 @@ fn render_auto_review_panes(
     let keys = if args.prestart {
         "Alt+s Start  Alt+j/k Switch file  Alt+m Mode  Alt+e Diff  Esc Esc Cancel  Alt+x Exit"
     } else if args.browsing {
-        "Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  PgUp/PgDn Category  - Remove  Alt+x Exit"
+        "Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  Enter Diff  PgUp/PgDn Category  - Remove  Alt+x Exit"
     } else {
         "Esc Esc Cancel  Alt+x Exit"
     };
@@ -312,6 +328,30 @@ fn render_auto_review_reject_panel(
         rows.push(review_pane_cell(&content, 0, width));
     }
 
+    rows.truncate(pane_rows);
+    rows
+}
+
+/// Render the `/auto_review` diff popup filling the pane region: a title bar,
+/// then the colorized diff scrolled to `scroll` and panned to `x_offset`. The
+/// panes are hidden while it is open.
+fn render_auto_review_diff_panel(
+    diff: &AutoReviewDiffView<'_>,
+    width: usize,
+    pane_rows: usize,
+) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::with_capacity(pane_rows);
+    let header = format!("{}  (↑/↓ Scroll · Esc Close)", diff.title);
+    rows.push(review_highlight(&review_pane_cell(&header, 0, width)));
+
+    let body_height = pane_rows.saturating_sub(1);
+    for row in 0..body_height {
+        let cell = match diff.lines.get(diff.scroll + row) {
+            Some(line) => review_pane_cell(line, diff.x_offset, width),
+            None => review_pane_cell("", 0, width),
+        };
+        rows.push(cell);
+    }
     rows.truncate(pane_rows);
     rows
 }
@@ -501,6 +541,31 @@ mod tests {
         assert!(!screen.contains("\u{1b}[48;2;38;48;38m"), "{screen:?}");
         assert!(!screen.contains('▕'), "{screen:?}");
         // The panes are hidden while the window is open.
+        assert!(!screen.contains("Files (1)"), "{screen:?}");
+    }
+
+    #[test]
+    fn auto_review_diff_view_covers_the_panes() {
+        let files = vec![review_entry("src/main.rs", ReviewStatus::Rejected, &[])];
+        let report: Vec<String> = vec!["Overall".to_string()];
+        let lines = vec!["@@ -1,2 +1,3 @@".to_string(), "+let x = 1;".to_string()];
+        let mut args = auto_review_args(&files, &report, 80, 12);
+        args.browsing = true;
+        args.diff = Some(super::AutoReviewDiffView {
+            title: "Diff",
+            lines: &lines,
+            scroll: 0,
+            x_offset: 0,
+        });
+        let screen = render_auto_review_screen(args);
+
+        // The title bar and the diff body show, with the close hint.
+        assert!(
+            screen.contains("Diff  (↑/↓ Scroll · Esc Close)"),
+            "{screen:?}"
+        );
+        assert!(screen.contains("let x = 1;"), "{screen:?}");
+        // The panes are hidden while the popup is open.
         assert!(!screen.contains("Files (1)"), "{screen:?}");
     }
 

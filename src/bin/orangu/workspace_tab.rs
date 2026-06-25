@@ -49,6 +49,11 @@ pub(crate) struct WorkspaceTab {
     /// review is of that tab's branch.
     pub(crate) last_review_report: Option<String>,
     pub(crate) last_auto_review_report: Option<String>,
+    /// The last `/review` and `/auto_review` source appendices (per-finding code
+    /// windows), kept alongside their reports so `/export [auto] review` can add
+    /// the appendix.
+    pub(crate) last_review_appendix: Option<Vec<crate::export::AutoReviewAppendixEntry>>,
+    pub(crate) last_auto_review_appendix: Option<Vec<crate::export::AutoReviewAppendixEntry>>,
     pub(crate) last_review_was_auto: bool,
     /// While set and in the future, the status bar shows "Resuming session …"
     /// for a freshly auto-resumed tab.
@@ -184,6 +189,8 @@ impl WorkspaceTab {
             current_branch,
             last_review_report: None,
             last_auto_review_report: None,
+            last_review_appendix: None,
+            last_auto_review_appendix: None,
             last_review_was_auto: false,
             startup_notice_until,
             pending_response: None,
@@ -379,6 +386,8 @@ mod tests {
             current_branch: None,
             last_review_report: None,
             last_auto_review_report: None,
+            last_review_appendix: None,
+            last_auto_review_appendix: None,
             last_review_was_auto: false,
             startup_notice_until: None,
             pending_response: None,

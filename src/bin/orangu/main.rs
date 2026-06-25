@@ -53,12 +53,12 @@ use orangu::{
     session::ChatSession,
     tools::ToolExecutor,
     tui::{
-        AutoReviewRejectView, AutoReviewScreenArgs, FEEDBACK_ERR, FEEDBACK_OK, ReviewCommentEditor,
-        ReviewEntry, ReviewFeedbackView, ReviewScreenArgs, ReviewStatus, ScreenRenderArgs,
-        StatusFragment, TabStatus, WorkspaceTabsView, auto_review_pane_body_height,
-        render_auto_review_screen, render_review_screen, render_screen, render_thinking_status,
-        render_tool_running_status, render_working_status, review_pane_body_height,
-        terminal_height, terminal_width,
+        AutoReviewDiffView, AutoReviewRejectView, AutoReviewScreenArgs, FEEDBACK_ERR, FEEDBACK_OK,
+        ReviewCommentEditor, ReviewEntry, ReviewFeedbackView, ReviewScreenArgs, ReviewStatus,
+        ScreenRenderArgs, StatusFragment, TabStatus, WorkspaceTabsView,
+        auto_review_pane_body_height, render_auto_review_screen, render_review_screen,
+        render_screen, render_thinking_status, render_tool_running_status, render_working_status,
+        review_pane_body_height, terminal_height, terminal_width,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -328,6 +328,8 @@ async fn run() -> Result<()> {
         mut current_branch,
         mut last_review_report,
         mut last_auto_review_report,
+        mut last_review_appendix,
+        mut last_auto_review_appendix,
         mut last_review_was_auto,
         mut startup_notice_until,
         mut pending_response,
@@ -397,6 +399,8 @@ async fn run() -> Result<()> {
                 current_branch,
                 last_review_report,
                 last_auto_review_report,
+                last_review_appendix,
+                last_auto_review_appendix,
                 last_review_was_auto,
                 startup_notice_until,
                 pending_response,
@@ -422,6 +426,8 @@ async fn run() -> Result<()> {
             current_branch = tab.current_branch;
             last_review_report = tab.last_review_report;
             last_auto_review_report = tab.last_auto_review_report;
+            last_review_appendix = tab.last_review_appendix;
+            last_auto_review_appendix = tab.last_auto_review_appendix;
             last_review_was_auto = tab.last_review_was_auto;
             startup_notice_until = tab.startup_notice_until;
             pending_response = tab.pending_response;
@@ -1380,6 +1386,14 @@ async fn run() -> Result<()> {
                 let (lines, markdown) =
                     review_exit_output(&review.files, &review.comments, &review.general_notes);
                 last_review_report = Some(markdown.clone());
+                // Capture the per-comment source code for the export's appendix
+                // (the `/show_file` view around each comment).
+                last_review_appendix = Some(review::review_export_appendix(
+                    &review.files,
+                    &review.comments,
+                    &review.general_notes,
+                    &workspace,
+                ));
                 last_review_was_auto = false;
                 completion::set_available_review_reports(
                     last_review_report.is_some(),
@@ -1440,6 +1454,10 @@ async fn run() -> Result<()> {
                 // is also kept for `/comment <n> with auto review`.
                 let (lines, clipboard) = auto_review_exit_output(&state);
                 last_auto_review_report = Some(clipboard.clone());
+                // Capture the per-finding source code for the export's appendix
+                // (the `/show_file` view around each finding), reflecting the
+                // post-browse report.
+                last_auto_review_appendix = Some(state.export_appendix(&workspace));
                 last_review_was_auto = true;
                 completion::set_available_review_reports(
                     last_review_report.is_some(),
@@ -1466,23 +1484,39 @@ async fn run() -> Result<()> {
                     }
                     ExportTarget::Review => {
                         // Export whichever review ran most recently, falling
-                        // back to the other when only one has run.
-                        let (first, second) = if last_review_was_auto {
-                            (&last_auto_review_report, &last_review_report)
+                        // back to the other when only one has run, each with its
+                        // own source appendix.
+                        let auto_appendix = last_auto_review_appendix.as_deref().unwrap_or(&[]);
+                        let review_appendix = last_review_appendix.as_deref().unwrap_or(&[]);
+                        let auto = last_auto_review_report.as_deref();
+                        let interactive = last_review_report.as_deref();
+                        let chosen = if last_review_was_auto {
+                            auto.map(|report| (report, auto_appendix))
+                                .or(interactive.map(|report| (report, review_appendix)))
                         } else {
-                            (&last_review_report, &last_auto_review_report)
+                            interactive
+                                .map(|report| (report, review_appendix))
+                                .or(auto.map(|report| (report, auto_appendix)))
                         };
-                        match first.as_deref().or(second.as_deref()) {
-                            Some(report) => {
-                                export::export_review(&workspace, report, &active_model_id)
-                            }
+                        match chosen {
+                            Some((report, appendix)) => export::export_review(
+                                &workspace,
+                                report,
+                                &active_model_id,
+                                appendix,
+                            ),
                             None => Err(anyhow!(
                                 "No review to export; run /review or /auto_review first"
                             )),
                         }
                     }
                     ExportTarget::AutoReview => match last_auto_review_report.as_deref() {
-                        Some(report) => export::export_review(&workspace, report, &active_model_id),
+                        Some(report) => export::export_review(
+                            &workspace,
+                            report,
+                            &active_model_id,
+                            last_auto_review_appendix.as_deref().unwrap_or(&[]),
+                        ),
                         None => Err(anyhow!("No auto review to export; run /auto_review first")),
                     },
                 };

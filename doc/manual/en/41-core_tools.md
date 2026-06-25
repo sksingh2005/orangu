@@ -597,7 +597,7 @@ The view opens with the tool header row at the top and under it the two panes, e
 - **Left pane** — below the status area, the **report**, rendered from Markdown with the syntax markers consumed: one bold heading per category (Overall, Code, Security, Memory, Performance, Test Suite, Documentation), each listing the findings collected so far as a bullet list with the file names in bold, ending with the **Conclusion**. A category that has produced nothing yet shows `(Press Alt+s)` before the run starts, `(pending)` while it is in progress, and `No issues found` once it is done. The pane scrolls and pans independently.
 - **Right pane** — the checklist of changed files, one per row, as in `/review`. The file currently being reviewed is highlighted and its status box blinks a white dot until its review resolves to green or red. A file marked **Ignore** (Alt+m, before the run) shows a **blue dot** and is skipped. Once the run ends (or the whole-change pass starts) the highlight is cleared — nothing is being reviewed anymore; `Alt+j`/`Alt+k` bring it back to move through the list while browsing.
 
-The header row offers different keys in each phase: **before the run starts** the pre-start keys (`Alt+s Start  Alt+j/k Switch file  Alt+m Mode  Alt+e Diff  Esc Esc Cancel  Alt+x Exit`); **while the run is in progress** the run keys (`Esc Esc Cancel  Alt+x Exit`); once the run has **ended** the browse keys (`Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  PgUp/PgDn Category  - Remove  Alt+x Exit`).
+The header row offers different keys in each phase: **before the run starts** the pre-start keys (`Alt+s Start  Alt+j/k Switch file  Alt+m Mode  Alt+e Diff  Esc Esc Cancel  Alt+x Exit`); **while the run is in progress** the run keys (`Esc Esc Cancel  Alt+x Exit`); once the run has **ended** the browse keys (`Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  Enter Diff  PgUp/PgDn Category  - Remove  Alt+x Exit`).
 
 ```
  Auto review: feature/x ...                          |Files (3)
@@ -656,7 +656,8 @@ To skip across a long report **category by category**, use `PageDown`/`PageUp`: 
 - **`Alt+a` — approve the highlighted file.** Its dot turns green and **every finding recorded against it is removed from the report** — the model's findings and your own rejection comments alike — so an approved file no longer appears in any category, in the exit report, or on the clipboard. The Conclusion follows the file statuses, so approving the last rejected file flips the verdict to `orangu approves this patch`.
 - **`Alt+r` — reject the highlighted file.** A reject window opens over the panes with a **category selector** (Overall, Code, Security, Memory, Performance, Test Suite, Documentation) and a **multi-line Markdown comment editor**. `Tab` moves the focus between the two; in the selector `Up`/`Down` pick the category (`Enter` moves on to the editor), and in the editor `Enter` inserts a newline while `Up`/`Down`, `Home`/`End`, and the usual editing keys move and edit. Press `Alt+Enter` to save — the file's dot turns red and the comment is appended to the chosen category, prefixed with the file path in bold — or `Esc` to discard the window. Saving with an empty comment still rejects the file without adding a finding. `Alt+r` can be repeated on the same file; each saved comment is kept.
 - **`Alt+e` — open the highlighted file** in your `$EDITOR`, exactly like `Alt+e` in `/review`: terminal editors open in a new window and GUI editors open their own, leaving the report on screen.
-- **`/open_file <path>` / `open <path>` + `Enter` — open any project file**, not only the changed ones. Once the run is done the input window at the bottom accepts an open command: type `/open_file <path>` (or `open <path>`), with `Tab` completing every workspace file just like `/open_file` at the main prompt, and press `Enter` to open it in your `$EDITOR`. This works **only after the run has finished** — during the run the input window stays empty. While the input is empty, `-` still removes the highlighted item; a `-` typed into a path is left for editing.
+- **`Enter` — show the selected file's diff.** With the input window empty, pressing `Enter` opens a **diff popup** over the panes showing the colorized `/diff` of the highlighted file. When that file is **not part of the diff** (for example a whole-file `/auto_review <file>` review of an unchanged file), it falls back to the `/show_file` tool, showing the file's syntax-highlighted code around the highlighted finding's line — **3 lines before and after**. `Up`/`Down` (and `PageUp`/`PageDown`) scroll it, `Alt+Left`/`Alt+Right` pan it for long lines, and `Esc` closes it. When the input window instead holds an `open <path>` line, `Enter` submits that instead (see below).
+- **`/open_file <path>` / `open <path>` + `Enter` — open any project file**, not only the changed ones. Once the run is done the input window at the bottom accepts an open command: type `/open_file <path>` (or `open <path>`), with `Tab` completing every workspace file just like `/open_file` at the main prompt, and press `Enter` to open it in your `$EDITOR`. This works **only after the run has finished** — during the run the input window stays empty. While the input is empty, `Enter` opens the diff popup and `-` still removes the highlighted item; a `-` typed into a path is left for editing.
 
 Rejection comments become part of the report: they are rendered in the matching category of the left pane (and the exit report), and land on the clipboard as Markdown bullets — a multi-line comment keeps its lines inside one bullet, indented under the first line.
 
@@ -679,6 +680,7 @@ The Markdown report is also kept for the rest of the session, so `/comment <numb
 | `Alt+a` | Approve the highlighted file and drop its findings from the report |
 | `Alt+r` | Reject the highlighted file: pick a category, write a Markdown comment |
 | `Alt+e` | Open the highlighted file in your configured editor |
+| `Enter` | Show the selected file's `/diff` (or its `/show_file` code, ±3 lines around the finding, when it is not part of the diff) in a scrollable popup (after the run, while the input window is empty) |
 | `/open_file <path>` / `open <path>` + `Enter` | Open any project file in your editor (after the run; `Tab` completes every workspace file) |
 | `Up` / `Down` | Move the item highlight through the report's findings and Conclusion entries (after the run) |
 | `PageUp` / `PageDown` | Jump the item highlight to the previous / next category that has findings (after the run) |
@@ -696,6 +698,15 @@ When the reject window is open it is modal:
 | `Enter` | Move on to the editor (selector) / insert a newline (editor) |
 | `Alt+Enter` | Save: mark the file rejected and add the comment to the category |
 | `Esc` | Discard the window without saving |
+
+When the diff popup is open it is modal:
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` | Scroll the diff |
+| `PageUp` / `PageDown` | Scroll the diff by a page |
+| `Alt+Left` / `Alt+Right` | Pan the diff horizontally for long lines |
+| `Esc` | Close the popup, returning to the report |
 
 ### Examples
 
@@ -728,7 +739,7 @@ It takes one optional argument selecting what to export:
 - `/export review` — the **review buffer**: the Markdown of the last `/review` (or, if none, the last `/auto_review`) report from this session. If no review has been run yet, the command reports that there is nothing to export.
 - `/export auto review` — the **auto-review buffer** specifically: the Markdown of the last `/auto_review` report. If no auto review has been run yet, the command reports that there is nothing to export.
 
-The argument **Tab-completes** (and shows the inline ghost hint): pressing Tab after `/export` offers `console`, `review`, and `auto review`, and the multi-word `auto review` completes from `auto`.
+The argument **Tab-completes** (and shows the inline ghost hint): pressing Tab after `/export` offers `console`, `review`, and `auto review`, and the multi-word `auto review` completes from as little as `a` (so `export a` → `export auto review`). The natural-language `export <target>` form (without the leading slash) completes the same way.
 
 The file is saved in the workspace root as `{repository}-{branch}-console.pdf` or `{repository}-{branch}-review.pdf`, where `{repository}` is the Git repository (or workspace) directory name and `{branch}` is the current branch (`nobranch` when not on one); both are sanitized for use in a filename, so a branch such as `feature/x` becomes `feature-x`. An existing file with the same name is overwritten. On success the saved path is printed to the output window.
 
@@ -741,8 +752,9 @@ The **console** export preserves the output window line for line (terminal colou
 The **review** export is organized for reading and sharing:
 
 - **Page 1 — summary.** A table of the repository, branch, and generation date/time, followed by one row per category with its number of entries (findings), and then an overall **Approved** (green) or **Rejected** (red) status banner read from the report's conclusion.
-- **Page 2 — table of contents.** Each category with the page it starts on.
+- **Page 2 — table of contents.** Each category with the page it starts on, then a final **Appendix** entry.
 - **Page 3 onward — the report.** Each category (`Overall`, `Code`, `Security`, `Memory`, `Performance`, `Test Suite`, `Documentation`, then `Conclusion`) starts on its own page, rendered from the report's Markdown with brand-coloured headings, **bold** and *italic* emphasis, ordered and unordered (including nested) lists, fenced code blocks, block quotes, and tables. So `Overall` opens on page 3.
+- **Appendix.** Both the `/review` and `/auto_review` exports add a **source appendix** following the categories on its own page: grouped by category, each finding (or comment) is listed with the **source code around its line** — the `/show_file` view, 3 lines before and after, with line numbers. Only the finding's **recorded line(s)** are **syntax-highlighted and drawn in bold**; the surrounding context lines are shown plain, so the line the finding points at stands out. (For `/review`, the comment's diff position is mapped to its real source line so the appendix matches the file.)
 
 ### Examples
 

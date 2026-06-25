@@ -111,6 +111,7 @@ pub(crate) mod test_fixtures {
             prestart: false,
             ignored: &[],
             reject: None,
+            diff: None,
             report_lines,
             selected_lines: None,
             scroll: 0,

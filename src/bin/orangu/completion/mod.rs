@@ -124,21 +124,28 @@ pub fn completion_ghost_suffix(
         .map(str::to_string)
 }
 
-/// Tab/ghost completion for the `/export <target>` argument, as
-/// `(token_start, candidates)`: the target words `console`, `review`, and
-/// `auto review` that extend what is typed. The whole argument (after
-/// `/export `) is matched as one prefix so the multi-word `auto review` option
-/// completes from `auto`. Returns `None` when `prefix` is not an `/export`
-/// argument.
+/// Tab/ghost completion for the `/export <target>` argument — and its
+/// natural-language `export <target>` form — as `(token_start, candidates)`:
+/// the target words `console`, `review`, and `auto review` that extend what is
+/// typed. The whole argument (after `export `/`/export `) is matched as one
+/// prefix so the multi-word `auto review` option completes from `a`/`auto`.
+/// Returns `None` when `prefix` is not an export argument.
 fn export_completion_candidates(prefix: &str) -> Option<(usize, Vec<String>)> {
-    let value = prefix.strip_prefix("/export ")?;
+    let (token_start, value) = prefix
+        .strip_prefix("/export ")
+        .map(|value| ("/export ".len(), value))
+        .or_else(|| {
+            prefix
+                .strip_prefix("export ")
+                .map(|value| ("export ".len(), value))
+        })?;
     let lower = value.to_ascii_lowercase();
     let candidates = crate::commands::EXPORT_TARGETS
         .iter()
         .filter(|target| target.starts_with(lower.as_str()))
         .map(|target| (*target).to_string())
         .collect();
-    Some(("/export ".len(), candidates))
+    Some((token_start, candidates))
 }
 
 /// The completion candidates tied to a recognised command (branch, tag, file,
@@ -480,9 +487,27 @@ mod tests {
             Some(" review".to_string())
         );
 
+        // The natural-language `export ` form completes the same targets — and
+        // `export a` completes straight to `auto review`.
+        let (start, all) = export_completion_candidates("export ").expect("natural argument");
+        assert_eq!(start, "export ".len());
+        assert_eq!(all, vec!["console", "review", "auto review"]);
+        assert_eq!(
+            export_completion_candidates("export a")
+                .expect("argument")
+                .1,
+            vec!["auto review".to_string()]
+        );
+        assert_eq!(
+            completion_ghost_suffix("export a", 8, std::path::Path::new("/"), &[], &[], &skills),
+            Some("uto review".to_string())
+        );
+
         // Not an export argument.
         assert!(export_completion_candidates("/export").is_none());
         assert!(export_completion_candidates("/exports x").is_none());
+        assert!(export_completion_candidates("export").is_none());
+        assert!(export_completion_candidates("exports x").is_none());
     }
 
     #[test]

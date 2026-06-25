@@ -364,6 +364,20 @@ pub(crate) struct AutoReviewReject {
     pub(crate) editor: InputState,
 }
 
+/// The diff popup of `/auto_review`: the colorized diff of the changes under
+/// review (the `/diff` view), shown over the panes during the browse phase and
+/// closed with Esc. Opened with Enter once the run is done.
+pub(crate) struct AutoReviewDiff {
+    /// The title shown in the bar (e.g. `Diff`).
+    pub(crate) title: String,
+    /// The colorized diff lines (ANSI), as drawn in the popup body.
+    pub(crate) lines: Vec<String>,
+    /// Index of the first diff line shown.
+    pub(crate) scroll: usize,
+    /// Horizontal pan offset for the diff body.
+    pub(crate) x_offset: usize,
+}
+
 /// One navigable item in the rendered report: which finding it is (so it can
 /// be removed) and the report line range it occupies (so it can be highlighted
 /// and scrolled to). Built by `AutoReviewState::build_report`, in the order the
@@ -436,6 +450,9 @@ pub(crate) struct AutoReviewState {
     /// When set, the Alt+r reject window is open over the panes (browse
     /// phase only).
     pub(crate) reject: Option<AutoReviewReject>,
+    /// When set, the Enter diff popup is open over the panes (browse phase
+    /// only), showing the colorized diff of the changes under review.
+    pub(crate) diff_view: Option<AutoReviewDiff>,
     /// The model performing the review, shown after the `Conclusion` verdict.
     pub(crate) model: String,
     /// A workspace-switch key pressed during streaming; applied by `main` after
@@ -463,6 +480,7 @@ impl AutoReviewState {
             ignored,
             cancelled: false,
             reject: None,
+            diff_view: None,
             model: String::new(),
             pending_tab: None,
         }
@@ -1026,6 +1044,81 @@ impl AutoReviewState {
         }
     }
 
+    /// Open the diff popup with `title` and the already-rendered `lines` (ANSI).
+    pub(crate) fn open_diff_view(&mut self, title: impl Into<String>, lines: Vec<String>) {
+        self.diff_view = Some(AutoReviewDiff {
+            title: title.into(),
+            lines,
+            scroll: 0,
+            x_offset: 0,
+        });
+    }
+
+    /// Enter while browsing: open the diff popup for the selected file's diff
+    /// (its `/diff`). Returns `false` when the selected file is not part of the
+    /// diff (its diff is empty) so the caller can fall back to `/show_file`; a
+    /// no-op returning `true` when nothing is selected.
+    pub(crate) fn open_selected_diff_view(&mut self) -> bool {
+        let Some(file) = self.selected.and_then(|index| self.files.get(index)) else {
+            return true;
+        };
+        if file.diff_lines.is_empty() {
+            return false;
+        }
+        let title = format!("Diff: {}", file.path);
+        let lines = file.diff_lines.clone();
+        self.open_diff_view(title, lines);
+        true
+    }
+
+    /// The new-file line of the highlighted finding, when one is highlighted for
+    /// the selected file — the anchor for the `/show_file` fallback's ±3-line
+    /// window. `None` when no finding (or no line) is highlighted.
+    pub(crate) fn selected_finding_line(&self) -> Option<usize> {
+        let items = self.report_items();
+        let item = self.selected_item.and_then(|index| items.get(index))?;
+        let AutoReviewItemKind::Finding { section, index } = &item.kind else {
+            return None;
+        };
+        let finding = self.sections[*section].get(*index)?;
+        auto_review_finding_location_parts(finding).1
+    }
+
+    /// Esc in the diff popup: close it, returning to the report.
+    pub(crate) fn close_diff_view(&mut self) {
+        self.diff_view = None;
+    }
+
+    /// Scroll the open diff popup by `delta` rows (negative scrolls up), clamped
+    /// so at least one line stays in view. A no-op when the popup is closed.
+    pub(crate) fn scroll_diff_view(&mut self, delta: isize) {
+        if let Some(diff) = self.diff_view.as_mut() {
+            let max = diff.lines.len().saturating_sub(1);
+            diff.scroll = diff.scroll.saturating_add_signed(delta).min(max);
+        }
+    }
+
+    /// Pan the open diff popup horizontally by `delta` columns. A no-op when the
+    /// popup is closed.
+    pub(crate) fn pan_diff_view(&mut self, delta: isize) {
+        if let Some(diff) = self.diff_view.as_mut() {
+            diff.x_offset = diff.x_offset.saturating_add_signed(delta);
+        }
+    }
+
+    /// The per-category source appendix for the PDF export: every finding still
+    /// in the report, in `AUTO_REVIEW_CATEGORIES` order, with its category, the
+    /// finding's Markdown text, and the source code around its line (the
+    /// `/show_file` view — 3 lines before and after), read from `workspace`.
+    /// Built from the post-browse state, so it reflects any findings the user
+    /// removed or approved away.
+    pub(crate) fn export_appendix(
+        &self,
+        workspace: &Path,
+    ) -> Vec<crate::export::AutoReviewAppendixEntry> {
+        build_appendix_entries(&self.sections, workspace)
+    }
+
     /// Alt+r: open the reject window for the highlighted file, starting on
     /// the category selector.
     pub(crate) fn open_reject(&mut self) {
@@ -1184,11 +1277,125 @@ pub(crate) fn auto_review_finding_location(path: &str, line: Option<&str>) -> St
     }
 }
 
+/// Parse a stored finding's leading location — written by
+/// `auto_review_finding_location` as `**path:line**` or `**path**` — into its
+/// file path and the new-file line number (the start of a `start-end` range).
+/// Either part is `None` when the finding carries no such location.
+pub(crate) fn auto_review_finding_location_parts(finding: &str) -> (Option<&str>, Option<usize>) {
+    let Some(rest) = finding.strip_prefix("**") else {
+        return (None, None);
+    };
+    let Some(end) = rest.find("**") else {
+        return (None, None);
+    };
+    let inner = &rest[..end];
+    match inner.split_once(':') {
+        Some((path, line)) => {
+            let start = line.split('-').next().unwrap_or(line).trim();
+            (Some(path), start.parse().ok())
+        }
+        None => (Some(inner), None),
+    }
+}
+
+/// Build the PDF source appendix from per-category finding strings (parallel to
+/// `AUTO_REVIEW_CATEGORIES`), each formatted as `**path:line**: text`. For every
+/// finding it records its category, Markdown text, and the source code window
+/// around its line (the `/show_file` view — 3 lines before and after) read from
+/// `workspace`, with the recorded line(s) marked for highlighting. `code` is
+/// empty when the finding has no file/line or its file cannot be read. Shared by
+/// `/auto_review` and `/review`.
+pub(crate) fn build_appendix_entries(
+    sections: &[Vec<String>],
+    workspace: &Path,
+) -> Vec<crate::export::AutoReviewAppendixEntry> {
+    let mut entries = Vec::new();
+    for (index, name) in AUTO_REVIEW_CATEGORIES.iter().enumerate() {
+        let Some(findings) = sections.get(index) else {
+            continue;
+        };
+        for finding in findings {
+            let (path, _) = auto_review_finding_location_parts(finding);
+            // The recorded line (or range) is highlighted; the window opens
+            // ±3 lines around its start.
+            let highlight = auto_review_finding_line_range(finding);
+            let (start_line, code) = match (path, highlight) {
+                (Some(path), Some((start, _))) => auto_review_code_window(workspace, path, start),
+                _ => (0, Vec::new()),
+            };
+            entries.push(crate::export::AutoReviewAppendixEntry {
+                category: name.to_string(),
+                finding: finding.clone(),
+                path: path.unwrap_or_default().to_string(),
+                start_line,
+                code,
+                highlight,
+            });
+        }
+    }
+    entries
+}
+
+/// The inclusive 1-based line range a finding recorded — `(start, end)` from a
+/// `**path:start-end**` location, `(line, line)` from a single `**path:line**`,
+/// or `None` when the finding carries no line. The recorded lines the appendix
+/// highlights.
+pub(crate) fn auto_review_finding_line_range(finding: &str) -> Option<(usize, usize)> {
+    let rest = finding.strip_prefix("**")?;
+    let end = rest.find("**")?;
+    let (_, line) = rest[..end].split_once(':')?;
+    let line = line.trim();
+    match line.split_once('-') {
+        Some((start, end)) => {
+            let start: usize = start.trim().parse().ok()?;
+            let end: usize = end.trim().parse().ok()?;
+            Some((start, end.max(start)))
+        }
+        None => {
+            let single: usize = line.parse().ok()?;
+            Some((single, single))
+        }
+    }
+}
+
+/// The source code window around new-file `line` (1-based) of the file at
+/// `workspace`/`path`: the plain lines 3 before and 3 after, with the 1-based
+/// line number the window starts at. Returns `(0, [])` when the file cannot be
+/// read or is empty. The on-disk file is the reviewed (new) version, so its line
+/// numbers match the findings'.
+fn auto_review_code_window(workspace: &Path, path: &str, line: usize) -> (usize, Vec<String>) {
+    let Ok(resolved) = orangu::tools::resolve_workspace_path(workspace, path) else {
+        return (0, Vec::new());
+    };
+    let Ok(content) = std::fs::read_to_string(&resolved) else {
+        return (0, Vec::new());
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return (0, Vec::new());
+    }
+    // Clamp the centre to the file (a finding's new-file line can exceed it if
+    // the file changed since the review), then take 3 lines on each side.
+    let center = line.saturating_sub(1).min(lines.len() - 1);
+    let start = center.saturating_sub(3);
+    let end = (center + 4).min(lines.len());
+    let window = lines[start..end]
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    (start + 1, window)
+}
+
 /// Whether `text` is a "no findings" placeholder rather than a real finding:
-/// empty, or a `None`/`no issues`/... word — possibly with a trailing
+/// empty, or a `None`/`no issues`/... affirmation — possibly with a trailing
 /// parenthetical justification (`None (no direct memory risk)`) or surrounding
-/// punctuation. The model emits these when a category is clean, and they must
-/// never reach the report.
+/// punctuation. As well as the bare phrases, a negation that runs only into
+/// filler words is caught (`None needed`, `No tests needed`, `Not applicable`,
+/// `None to report`), since the model emits these for a clean category —
+/// especially Test Suite and Documentation. A negation that runs into real
+/// content is kept (`None of the modules grow unbounded`, `No test covers the
+/// new path`). The model emits placeholders when a category is clean, and they
+/// must never reach the report.
 pub(crate) fn auto_review_is_placeholder(text: &str) -> bool {
     const PHRASES: [&str; 6] = [
         "none",
@@ -1198,6 +1405,10 @@ pub(crate) fn auto_review_is_placeholder(text: &str) -> bool {
         "nothing",
         "n/a",
     ];
+    // Look past a leading `line:` / `start-end:` reference so a finding the
+    // model filled the line slot of — `53: None` — is recognized as a
+    // placeholder, not stored as a line-53 finding reading `None`.
+    let (_, text) = auto_review_split_line(text);
     // Drop a trailing `(...)` justification, but only when something precedes
     // it — a finding that is wholly parenthesized is kept as content.
     let core = match text
@@ -1217,12 +1428,115 @@ pub(crate) fn auto_review_is_placeholder(text: &str) -> bool {
     // still a "nothing to report" affirmation, so the whole finding is dropped.
     // A word that merely starts with the phrase (`None of the changes …`) keeps
     // going, so it is not mistaken for one.
-    PHRASES.iter().any(|phrase| {
+    if PHRASES.iter().any(|phrase| {
         lower
             .strip_prefix(phrase)
             .is_some_and(|rest| rest.starts_with(['.', '!', ',', ';', ':']))
-    })
+    }) {
+        return true;
+    }
+    // A negation (`none`/`no`/`not`/`n/a`) followed only by filler words is an
+    // affirmation: `None needed`, `No new tests`, `Not applicable`, `None to
+    // report`. A negation that runs into substantive content — a real finding
+    // such as `No test covers the new path` or `None of the modules grow
+    // unbounded` — has a word outside the filler set and so is kept.
+    let mut words = lower
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '/'))
+        .filter(|word| !word.is_empty());
+    if matches!(words.next(), Some("none" | "no" | "not" | "n/a")) {
+        return words.all(|word| AUTO_REVIEW_PLACEHOLDER_FILLER.contains(&word));
+    }
+    false
 }
+
+/// Words that, following a leading negation, leave a "nothing to report"
+/// affirmation rather than a finding (see `auto_review_is_placeholder`):
+/// light stop-words plus review meta-nouns and affirmation verbs/adjectives.
+/// Deliberately excludes domain content (`coverage`, `handling`, `validation`,
+/// `modules`, …) so a terse real finding keeps a word outside this set.
+const AUTO_REVIEW_PLACEHOLDER_FILLER: &[&str] = &[
+    // Stop-words.
+    "a",
+    "an",
+    "the",
+    "this",
+    "that",
+    "these",
+    "those",
+    "of",
+    "in",
+    "on",
+    "for",
+    "with",
+    "to",
+    "and",
+    "or",
+    "are",
+    "were",
+    "is",
+    "was",
+    "be",
+    "been",
+    "any",
+    "all",
+    "here",
+    "there",
+    "at",
+    "as",
+    "it",
+    "its",
+    "new",
+    "further",
+    "additional",
+    "other",
+    "applicable",
+    "needed",
+    "required",
+    "necessary",
+    "found",
+    "identified",
+    "noted",
+    "detected",
+    "observed",
+    "apparent",
+    "present",
+    "reported",
+    "report",
+    "add",
+    "added",
+    "flag",
+    "flagged",
+    "raised",
+    "relevant",
+    "significant",
+    "major",
+    "minor",
+    "critical",
+    "obvious",
+    "missing",
+    "evident",
+    "notable", //
+    // Review meta-nouns.
+    "issue",
+    "issues",
+    "finding",
+    "findings",
+    "problem",
+    "problems",
+    "concern",
+    "concerns",
+    "comment",
+    "comments",
+    "note",
+    "notes",
+    "change",
+    "changes",
+    "test",
+    "tests",
+    "doc",
+    "docs",
+    "documentation",
+];
 
 /// The body of a finding line: bullet markers and list numbering stripped;
 /// `None` for blank lines and "no findings" placeholders.
@@ -1480,6 +1794,12 @@ pub(crate) fn print_auto_review_screen(
     let report_lines = state.report_lines();
     let status_text = state.status_text();
     let selected_path = state.selected_path();
+    let diff = state.diff_view.as_ref().map(|diff| AutoReviewDiffView {
+        title: &diff.title,
+        lines: &diff.lines,
+        scroll: diff.scroll,
+        x_offset: diff.x_offset,
+    });
     let reject = state
         .reject
         .as_ref()
@@ -1506,6 +1826,7 @@ pub(crate) fn print_auto_review_screen(
             prestart: !state.run_started && !state.done && !state.cancelled,
             ignored: &state.ignored,
             reject,
+            diff,
             report_lines: &report_lines,
             // Highlight the Up/Down item cursor only while browsing the report.
             selected_lines: if state.done || state.cancelled {
@@ -1852,6 +2173,69 @@ fn open_selected_file_diff(state: &AutoReviewState, terminal: &str) -> Result<()
     crate::git::open_path_in_editor(&path, terminal)
 }
 
+/// Enter while browsing: open the diff popup for the selected file. Show the
+/// file's `/diff` when it is part of the change set; otherwise fall back to the
+/// `/show_file` tool, showing the file's code around the highlighted finding's
+/// line (3 lines before and after). Errors are surfaced in the status area.
+fn open_auto_review_diff_popup(state: &mut AutoReviewState, workspace: &Path) {
+    // A changed file shows its own diff.
+    if state.open_selected_diff_view() {
+        return;
+    }
+    // The file is not part of the diff: show its code via `/show_file`, windowed
+    // around the finding's line when one is highlighted.
+    let Some(path) = state.selected_path() else {
+        return;
+    };
+    let line = state.selected_finding_line();
+    match auto_review_show_file_window(workspace, &path, line) {
+        Ok(lines) => {
+            let title = match line {
+                Some(line) => format!("{path}:{line}"),
+                None => format!("Source: {path}"),
+            };
+            state.open_diff_view(title, lines);
+        }
+        Err(err) => state.status = format!("Show {path} failed: {err:#}"),
+    }
+}
+
+/// Render `path` with `/show_file` (line numbers + syntax highlight) and return
+/// the ±3-line window around 1-based `line`, or the whole file when `line` is
+/// `None`.
+fn auto_review_show_file_window(
+    workspace: &Path,
+    path: &str,
+    line: Option<usize>,
+) -> Result<Vec<String>> {
+    let resolved = orangu::tools::resolve_workspace_path(workspace, path)?;
+    let content = std::fs::read_to_string(&resolved)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", resolved.display()))?;
+    let rendered = crate::render::render_show_file_content(
+        &resolved,
+        &content,
+        None,
+        crate::commands::ShowFileOptions::default(),
+    )?;
+    let lines: Vec<String> = rendered.lines().map(str::to_string).collect();
+    Ok(auto_review_source_window(lines, line))
+}
+
+/// The ±3-line window around 1-based `line` from `rendered` (one entry per
+/// source line). With no `line`, the whole file is returned.
+pub(crate) fn auto_review_source_window(rendered: Vec<String>, line: Option<usize>) -> Vec<String> {
+    let Some(line) = line else {
+        return rendered;
+    };
+    let center = line.saturating_sub(1);
+    let start = center.saturating_sub(3);
+    let end = (center + 4).min(rendered.len());
+    rendered
+        .get(start..end)
+        .map(<[String]>::to_vec)
+        .unwrap_or_default()
+}
+
 /// The pre-start status bar: how many files will be reviewed and how many are
 /// marked Ignore, with a reminder to start.
 fn auto_review_prestart_status(state: &AutoReviewState) -> String {
@@ -2162,6 +2546,29 @@ pub(crate) fn run_auto_review_browse(
             modifiers.contains(KeyModifiers::ALT) && !modifiers.contains(KeyModifiers::CONTROL);
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
 
+        // While the diff popup is open it is modal: Up/Down (and
+        // PageUp/PageDown) scroll the diff, Alt+Left/Right pan it, and Esc
+        // closes it. Esc here only closes the popup — it does not arm the
+        // double-Esc that leaves auto review.
+        if state.diff_view.is_some() {
+            escape_cancel.reset();
+            match (code, alt) {
+                (KeyCode::Esc, _) => state.close_diff_view(),
+                (KeyCode::Up, _) => state.scroll_diff_view(-1),
+                (KeyCode::Down, _) => state.scroll_diff_view(1),
+                (KeyCode::PageUp, _) => {
+                    state.scroll_diff_view(-(body_height as isize));
+                }
+                (KeyCode::PageDown, _) => {
+                    state.scroll_diff_view(body_height as isize);
+                }
+                (KeyCode::Left, true) => state.pan_diff_view(-1),
+                (KeyCode::Right, true) => state.pan_diff_view(1),
+                _ => {}
+            }
+            continue;
+        }
+
         // While the reject window is open it is modal: Tab moves the focus
         // between the category selector and the comment editor, Alt+Enter
         // saves the comment, Esc discards the window.
@@ -2246,11 +2653,17 @@ pub(crate) fn run_auto_review_browse(
                     state.status = format!("Open {path} failed: {err:#}");
                 }
             }
-            // Submitting `/open_file <path>` or `open <path>` opens any project
-            // file in `$EDITOR`; anything else is ignored (auto review has no
-            // chat to send it to).
+            // With an empty input window, Enter opens the diff popup for the
+            // selected file — its `/diff`, or its `/show_file` code (±3 lines
+            // around the highlighted finding) when it is not part of the diff.
+            // Otherwise it submits the input: `/open_file <path>` or
+            // `open <path>` opens any project file in `$EDITOR`, and anything
+            // else is ignored (auto review has no chat to send it to).
             (KeyCode::Enter, _, _) => {
-                if let Some(path) = crate::commands::parse_open_command_target(input_state.as_str())
+                if input_state.as_str().is_empty() {
+                    open_auto_review_diff_popup(state, workspace);
+                } else if let Some(path) =
+                    crate::commands::parse_open_command_target(input_state.as_str())
                 {
                     let path = path.to_string();
                     input_state.clear();
@@ -2337,6 +2750,12 @@ mod tests {
             // `None: None` (optionally with a justification).
             "VERDICT: APPROVE\nFINDINGS:\n- None: None\n",
             "VERDICT: APPROVE\nFINDINGS:\n- None: None (nothing to flag)\n",
+            // A `[Score: N]` confidence tag must not smuggle a `None` placeholder
+            // past the filter: once the tag is stripped, `53: None` is still a
+            // placeholder, not a line-53 finding.
+            "VERDICT: APPROVE\nFINDINGS:\n- 53: None [Score: 95]\n",
+            "VERDICT: APPROVE\nFINDINGS:\n- None [Score: 100]\n",
+            "VERDICT: APPROVE\nFINDINGS:\n- 12: None needed [Score: 90]\n",
         ] {
             let (approved, findings) = parse_auto_review_category_response(clean, 80);
             assert_eq!(approved, Some(true));
@@ -2437,14 +2856,41 @@ mod tests {
             "N/A",
             "None. Everything looks good.",
             "None; the patch is clean.",
+            // Negations that run only into filler words — the affirmations the
+            // model emits for a clean category (notably Test Suite and
+            // Documentation), which used to slip through.
+            "None needed",
+            "None required",
+            "None found",
+            "None identified",
+            "None noted",
+            "None to report",
+            "No new tests",
+            "No tests needed",
+            "No documentation changes needed",
+            "Not applicable",
+            "No additional documentation required",
+            "None applicable.",
+            // The model sometimes fills the leading line slot and still answers
+            // `None` — `53: None` is the placeholder, not a line-53 finding.
+            "53: None",
+            "53-54: None",
+            "12: None needed",
+            "7: N/A",
         ] {
             assert!(auto_review_is_placeholder(text), "{text:?}");
         }
-        // Real content that merely begins with the word `None` is kept.
+        // Real content that merely begins with the word `None`/`No` is kept.
         for text in [
             "None of the changes are risky",
+            "None of the modules grow unbounded",
             "Nonexistent field referenced",
+            "No test covers the new path",
+            "No error handling for the new branch",
+            "No test coverage for the parser",
             "unwrap may panic",
+            // A real finding carrying a line reference is kept.
+            "53: unwrap may panic",
         ] {
             assert!(!auto_review_is_placeholder(text), "{text:?}");
         }
@@ -2531,6 +2977,138 @@ mod tests {
             vec!["**b.rs:7**: another issue".to_string()]
         );
         assert!(state.sections[2].is_empty());
+    }
+
+    #[test]
+    fn auto_review_finding_location_parts_reads_path_and_line() {
+        use crate::review::auto_review_finding_location_parts;
+
+        // A `**path:line**` location yields both; a range gives the start line.
+        assert_eq!(
+            auto_review_finding_location_parts("**src/main.rs:42**: boom"),
+            (Some("src/main.rs"), Some(42))
+        );
+        assert_eq!(
+            auto_review_finding_location_parts("**src/main.rs:42-48**: boom"),
+            (Some("src/main.rs"), Some(42))
+        );
+        // A line-less `**path**` location (an Alt+r comment) gives no line.
+        assert_eq!(
+            auto_review_finding_location_parts("**src/main.rs**: comment"),
+            (Some("src/main.rs"), None)
+        );
+        // A finding with no bold location yields neither part.
+        assert_eq!(
+            auto_review_finding_location_parts("whole-change observation"),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn auto_review_open_selected_diff_view_shows_the_files_diff() {
+        use crate::commands::ReviewLaunch;
+        use crate::review::AutoReviewState;
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
+            files: vec![ReviewEntry {
+                path: "a.rs".to_string(),
+                status: ReviewStatus::Rejected,
+                diff_lines: vec!["@@ -1,2 +1,3 @@".to_string(), "+fn b() {}".to_string()],
+                patch: String::new(),
+            }],
+        });
+        state.finish();
+        state.selected = Some(0);
+
+        // Enter on a changed file shows that file's diff; Esc closes it.
+        assert!(state.open_selected_diff_view());
+        let view = state.diff_view.as_ref().expect("popup opens");
+        assert_eq!(view.title, "Diff: a.rs");
+        assert!(view.lines.iter().any(|line| line == "+fn b() {}"));
+        state.close_diff_view();
+        assert!(state.diff_view.is_none());
+
+        // A file with no diff is not handled here — the caller falls back to
+        // `/show_file`.
+        state.files[0].diff_lines.clear();
+        assert!(!state.open_selected_diff_view());
+        assert!(state.diff_view.is_none());
+    }
+
+    #[test]
+    fn auto_review_source_window_takes_three_lines_each_side() {
+        use crate::review::auto_review_source_window;
+
+        let rendered: Vec<String> = (1..=20).map(|n| format!("line {n}")).collect();
+
+        // ±3 lines around line 10 → lines 7..=13 (seven rows).
+        let window = auto_review_source_window(rendered.clone(), Some(10));
+        assert_eq!(window.first().map(String::as_str), Some("line 7"));
+        assert_eq!(window.last().map(String::as_str), Some("line 13"));
+        assert_eq!(window.len(), 7);
+
+        // The window clamps at the file's start and end.
+        let head = auto_review_source_window(rendered.clone(), Some(2));
+        assert_eq!(head.first().map(String::as_str), Some("line 1"));
+        // No line returns the whole file.
+        assert_eq!(auto_review_source_window(rendered.clone(), None), rendered);
+    }
+
+    #[test]
+    fn auto_review_export_appendix_windows_the_source_around_the_finding() {
+        use crate::commands::ReviewLaunch;
+        use crate::review::AutoReviewState;
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        // A workspace with the reviewed file on disk; the appendix reads it.
+        let workspace = tempfile::tempdir().expect("workspace");
+        let body: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(workspace.path().join("a.rs"), body).expect("write file");
+
+        let mut state = AutoReviewState::new(ReviewLaunch {
+            immediate: false,
+            files: vec![ReviewEntry {
+                path: "a.rs".to_string(),
+                status: ReviewStatus::Rejected,
+                diff_lines: vec!["+x".to_string()],
+                patch: String::new(),
+            }],
+        });
+        state.sections[1].push("**a.rs:10**: boom".to_string());
+        state.finish();
+
+        let appendix = state.export_appendix(workspace.path());
+        assert_eq!(appendix.len(), 1);
+        assert_eq!(appendix[0].category, "Code");
+        assert_eq!(appendix[0].finding, "**a.rs:10**: boom");
+        assert_eq!(appendix[0].path, "a.rs");
+        // 3 lines before and after line 10 → lines 7..=13, starting at 7.
+        assert_eq!(appendix[0].start_line, 7);
+        assert_eq!(appendix[0].code.first().map(String::as_str), Some("line 7"));
+        assert_eq!(appendix[0].code.last().map(String::as_str), Some("line 13"));
+        assert_eq!(appendix[0].code.len(), 7);
+        // The recorded line (10) is the one highlighted.
+        assert_eq!(appendix[0].highlight, Some((10, 10)));
+    }
+
+    #[test]
+    fn auto_review_finding_line_range_reads_single_and_range() {
+        use crate::review::auto_review_finding_line_range;
+
+        assert_eq!(
+            auto_review_finding_line_range("**a.rs:42**: boom"),
+            Some((42, 42))
+        );
+        assert_eq!(
+            auto_review_finding_line_range("**a.rs:42-48**: boom"),
+            Some((42, 48))
+        );
+        // A line-less location (an Alt+r comment) and a non-location finding
+        // carry no range.
+        assert_eq!(auto_review_finding_line_range("**a.rs**: comment"), None);
+        assert_eq!(auto_review_finding_line_range("whole-change note"), None);
     }
 
     #[test]

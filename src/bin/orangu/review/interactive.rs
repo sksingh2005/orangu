@@ -309,8 +309,12 @@ pub(crate) fn build_review_prompt(
 /// by file then line and formatted like an auto review finding —
 /// `**file:line**: text`, so the location renders bold — with the general
 /// `# <note>` notes folded into the first bucket (`Overall`) as whole-patch
-/// commentary.
+/// commentary. The line shown is the comment's **source-file** line, mapped
+/// from its diff position through the file's patch (so the report and the export
+/// appendix agree); it falls back to the diff position when the source line
+/// cannot be determined.
 fn review_findings_by_category(
+    files: &[ReviewEntry],
     comments: &[ReviewComment],
     general_notes: &[String],
 ) -> Vec<Vec<String>> {
@@ -330,11 +334,89 @@ fn review_findings_by_category(
         buckets[index].push(format!(
             "**{}:{}**: {}",
             comment.file,
-            comment.line + 1,
+            review_comment_display_line(files, comment),
             comment.text
         ));
     }
     buckets
+}
+
+/// The 1-based line a comment is shown at: its **source-file** line, mapped from
+/// the diff position it was recorded against through the file's patch, or the
+/// diff position itself (`line + 1`) when the source line cannot be determined
+/// (e.g. no matching file, or a paged diff the position cannot be traced in).
+fn review_comment_display_line(files: &[ReviewEntry], comment: &ReviewComment) -> usize {
+    files
+        .iter()
+        .find(|file| file.path == comment.file)
+        .and_then(|file| review_comment_source_line(&file.patch, comment.line))
+        .unwrap_or(comment.line + 1)
+}
+
+/// The new-file source line for diff-line index `index` into a file's unified
+/// `patch` (the right side of the diff). New-file lines are counted across `@@`
+/// hunk headers, context, and `+` lines (a `-` line removes content and so
+/// occupies no new-file line). `None` when the index is before the first hunk or
+/// past the end of the patch.
+pub(crate) fn review_comment_source_line(patch: &str, index: usize) -> Option<usize> {
+    let mut new_line = 0usize;
+    let mut in_hunk = false;
+    for (position, line) in patch.lines().enumerate() {
+        if let Some(start) = review_hunk_new_start(line) {
+            new_line = start;
+            in_hunk = true;
+            if position == index {
+                return Some(new_line);
+            }
+            continue;
+        }
+        if !in_hunk {
+            if position == index {
+                return None;
+            }
+            continue;
+        }
+        match line.as_bytes().first() {
+            // A removed line has no new-file line; anchor to the next one.
+            Some(b'-') if position == index => return Some(new_line.max(1)),
+            Some(b'-') => {}
+            // Context, added, or any other body line occupies a new-file line.
+            _ => {
+                if position == index {
+                    return Some(new_line.max(1));
+                }
+                new_line += 1;
+            }
+        }
+    }
+    None
+}
+
+/// The new-file start line of a unified-diff hunk header (`@@ -a,b +c,d @@`),
+/// read from the `+c` field, or `None` when `line` is not a hunk header.
+fn review_hunk_new_start(line: &str) -> Option<usize> {
+    let rest = line.strip_prefix("@@")?;
+    let plus = rest.find('+')?;
+    rest[plus + 1..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+/// The `/review` source appendix for the PDF export: the recorded comments
+/// (and general notes), bucketed by category like the report, each paired with
+/// the source code around its line — the same appendix the `/auto_review` export
+/// produces. Empty when there are no comments or notes.
+pub(crate) fn review_export_appendix(
+    files: &[ReviewEntry],
+    comments: &[ReviewComment],
+    general_notes: &[String],
+    workspace: &Path,
+) -> Vec<crate::export::AutoReviewAppendixEntry> {
+    let buckets = review_findings_by_category(files, comments, general_notes);
+    crate::review::build_appendix_entries(&buckets, workspace)
 }
 
 /// The body of a `# <note>` general comment, with the leading `#` removed.
@@ -362,7 +444,7 @@ pub(crate) fn review_exit_output(
     comments: &[ReviewComment],
     general_notes: &[String],
 ) -> (Vec<String>, String) {
-    let buckets = review_findings_by_category(comments, general_notes);
+    let buckets = review_findings_by_category(files, comments, general_notes);
 
     // The two variants stay in lockstep: `lines` goes to the output window,
     // `markdown` is kept for the report (and copied to the clipboard).
@@ -1151,6 +1233,68 @@ mod tests {
              - Rejected: **b.txt**\n\
              - Not reviewed: **c.txt**"
         );
+    }
+
+    #[test]
+    fn review_comment_source_line_maps_through_the_patch() {
+        use crate::review::review_comment_source_line;
+
+        let patch = "diff --git a/a.rs b/a.rs\n\
+                     index 0000000..1111111 100644\n\
+                     --- a/a.rs\n\
+                     +++ b/a.rs\n\
+                     @@ -1,3 +5,4 @@\n\
+                      ctx1\n\
+                      ctx2\n\
+                     +added\n\
+                      ctx3";
+        // The hunk starts at new-file line 5; the `+added` line sits at index 7.
+        assert_eq!(review_comment_source_line(patch, 5), Some(5)); // ctx1
+        assert_eq!(review_comment_source_line(patch, 6), Some(6)); // ctx2
+        assert_eq!(review_comment_source_line(patch, 7), Some(7)); // +added
+        assert_eq!(review_comment_source_line(patch, 8), Some(8)); // ctx3
+        // A position before the first hunk has no source line; an empty patch too.
+        assert_eq!(review_comment_source_line(patch, 0), None);
+        assert_eq!(review_comment_source_line("", 0), None);
+    }
+
+    #[test]
+    fn review_export_appendix_windows_source_around_the_mapped_line() {
+        use crate::review::{ReviewComment, review_export_appendix};
+        use orangu::tui::{ReviewEntry, ReviewStatus};
+
+        // A workspace with the reviewed file on disk; the appendix reads it.
+        let workspace = tempfile::tempdir().expect("workspace");
+        let body: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(workspace.path().join("a.rs"), body).expect("write file");
+
+        // A patch whose `+` line at diff index 7 is new-file line 7.
+        let patch = "@@ -1,3 +5,4 @@\n line 5\n line 6\n+line 7\n line 8";
+        let files = vec![ReviewEntry {
+            path: "a.rs".to_string(),
+            status: ReviewStatus::Rejected,
+            diff_lines: vec!["@@".to_string()],
+            patch: patch.to_string(),
+        }];
+        // The comment is recorded against diff index 3 (the `+line 7` line is the
+        // 4th line of this patch, index 3).
+        let comments = vec![ReviewComment {
+            file: "a.rs".to_string(),
+            line: 3,
+            category: 1, // Code
+            text: "boom".to_string(),
+        }];
+
+        let appendix = review_export_appendix(&files, &comments, &[], workspace.path());
+        assert_eq!(appendix.len(), 1);
+        assert_eq!(appendix[0].category, "Code");
+        // The finding and window use the mapped source line (7), not the diff
+        // index (4): ±3 lines around line 7 → lines 4..=10, starting at 4.
+        assert_eq!(appendix[0].finding, "**a.rs:7**: boom");
+        assert_eq!(appendix[0].highlight, Some((7, 7)));
+        assert_eq!(appendix[0].start_line, 4);
+        assert_eq!(appendix[0].code.first().map(String::as_str), Some("line 4"));
+        assert_eq!(appendix[0].code.last().map(String::as_str), Some("line 10"));
     }
 
     #[test]
