@@ -147,9 +147,9 @@ pub enum CommandOutcome {
     /// Switch the active tab's workspace to the given path in-place, or switch
     /// to the existing tab that already has it open (`/workspace <path>`).
     ChangeWorkspace(PathBuf),
-    /// Open the given directory in a new workspace tab (`create workspace <dir>`).
+    /// Open the given directory in a new workspace tab (`/create_workspace <dir>`).
     OpenWorkspaceTab(PathBuf),
-    /// Close the current workspace tab (`delete workspace`).
+    /// Close the current workspace tab (`/delete_workspace`).
     CloseWorkspaceTab,
     Blocking(Box<dyn FnOnce() -> anyhow::Result<String> + Send + 'static>),
     /// A long-running command that streams its output line by line through the
@@ -385,9 +385,9 @@ pub enum LocalCommand<'a> {
     /// (or switch to) that directory. The number-vs-path split happens in
     /// dispatch, mirroring how `Session` disambiguates its argument.
     Workspace(Option<Cow<'a, str>>),
-    /// `create workspace <dir>`: open a new tab for the given directory.
+    /// `/create_workspace <dir>`: open a new tab for the given directory.
     CreateWorkspace(Cow<'a, str>),
-    /// `delete workspace`: close the current workspace tab.
+    /// `/delete_workspace`: close the current workspace tab.
     DeleteWorkspace,
     Export(ExportTarget),
     Manual,

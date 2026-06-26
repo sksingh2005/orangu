@@ -503,9 +503,10 @@ pub(crate) fn handle_command(
                 }
                 let mut llm_msg = String::new();
                 match commit.as_deref() {
-                    Some(commit) => {
-                        llm_msg.push_str(&format!("The user executed `/show {}`. Output:\n\n", commit))
-                    }
+                    Some(commit) => llm_msg.push_str(&format!(
+                        "The user executed `/show {}`. Output:\n\n",
+                        commit
+                    )),
                     None => llm_msg.push_str("The user executed `/show`. Output:\n\n"),
                 }
                 if let Some(note) = context.note {
@@ -828,7 +829,7 @@ pub(crate) fn handle_command(
             let dir = dir.trim();
             if dir.is_empty() {
                 return Ok(CommandOutcome::OutputError(
-                    "Usage: create workspace <directory>".to_string(),
+                    "Usage: /create_workspace <directory>".to_string(),
                 ));
             }
             match resolve_existing_dir_arg(dir) {
@@ -1272,7 +1273,7 @@ mod tests {
         };
 
         // An existing directory opens a new workspace tab.
-        match run(&format!("/create workspace {}", other.path().display())) {
+        match run(&format!("/create_workspace {}", other.path().display())) {
             CommandOutcome::OpenWorkspaceTab(dir) => {
                 assert_eq!(dir, crate::normalize_path(other.path()));
             }
@@ -1289,16 +1290,19 @@ mod tests {
 
         // A non-existent directory is rejected.
         assert!(matches!(
-            run("/create workspace /no/such/orangu/dir"),
+            run("/create_workspace /no/such/orangu/dir"),
             CommandOutcome::OutputError(_)
         ));
 
-        // Bare `/create` (no directory) shows a usage error.
-        assert!(matches!(run("/create"), CommandOutcome::OutputError(_)));
-
-        // `/delete workspace` closes the current tab.
+        // Bare `/create_workspace` (no directory) shows a usage error.
         assert!(matches!(
-            run("/delete workspace"),
+            run("/create_workspace"),
+            CommandOutcome::OutputError(_)
+        ));
+
+        // `/delete_workspace` closes the current tab.
+        assert!(matches!(
+            run("/delete_workspace"),
             CommandOutcome::CloseWorkspaceTab
         ));
 

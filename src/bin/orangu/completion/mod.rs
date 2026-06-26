@@ -225,13 +225,10 @@ fn structured_completion_candidates(
         return Some((start, cursor, candidates));
     }
 
-    // `/create workspace <dir>`: mirror the same completion logic as `/workspace
+    // `/create_workspace <dir>`: mirror the same completion logic as `/workspace
     // <dir>` — previously-seen workspace paths first, then filesystem directory
     // completion for paths starting with `~`, `/`, or `.`.
-    if prefix == "/create " {
-        return Some(("/create ".len(), cursor, vec!["workspace".to_string()]));
-    }
-    if let Some(arg_prefix) = prefix.strip_prefix("/create workspace ") {
+    if let Some(arg_prefix) = prefix.strip_prefix("/create_workspace ") {
         let mut candidates: Vec<String> = session_workspaces_newest_first()
             .into_iter()
             .filter(|w| w.starts_with(arg_prefix))
@@ -239,7 +236,7 @@ fn structured_completion_candidates(
         if candidates.is_empty() {
             candidates = session_path_completion_candidates(arg_prefix);
         }
-        return Some(("/create workspace ".len(), cursor, candidates));
+        return Some(("/create_workspace ".len(), cursor, candidates));
     }
 
     if let Some((start, candidates)) = close_completion_candidates(prefix) {
@@ -345,21 +342,12 @@ fn structured_completion_candidates(
     }
 
     if let Some((start, branch_prefix)) = delete_branch_completion_prefix(prefix) {
-        let mut branches: Vec<String> = discover_git_root(workspace)
+        let branches: Vec<String> = discover_git_root(workspace)
             .map(|root| git_local_branch_names(&root))
             .unwrap_or_default()
             .into_iter()
             .filter(|b| !is_protected_branch(b) && b.starts_with(branch_prefix))
             .collect();
-        // The slash form `/delete workspace` also deletes the active workspace
-        // tab, so offer the `workspace` literal — leading it once a matching
-        // prefix is typed so it ghosts (`/delete w` -> `workspace`).
-        if prefix.starts_with("/delete ")
-            && !branch_prefix.is_empty()
-            && "workspace".starts_with(branch_prefix)
-        {
-            branches.insert(0, "workspace".to_string());
-        }
         return Some((start, cursor, branches));
     }
 

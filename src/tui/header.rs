@@ -140,8 +140,8 @@ pub fn help_text() -> &'static str {
 /prune [<uuid>|-w <path>|-o <days>|all]       Remove sessions
 /session [uuid|workspace]                     List/switch sessions, or open a workspace directory (Tab completes UUIDs, workspaces, then filesystem paths)
 /workspace [number|path]                      Show the active workspace, switch to a tab by number, or open a directory (Tab completes workspaces, then filesystem paths)
-/create workspace <dir>                       Open a new workspace tab on an existing directory (like Alt+Insert + /workspace)
-/delete workspace                             Close the active workspace tab (like Alt+Delete)
+/create_workspace <dir>                       Open a new workspace tab on an existing directory (like Alt+Insert + /workspace)
+/delete_workspace                             Close the active workspace tab (like Alt+Delete)
 /list_files                                   List workspace files as a tree
 /open_file <path>                             Open a workspace file in $EDITOR
 /show_file [--hash] [--author] <path> [<ref>] Show a file; optional ref uses git show

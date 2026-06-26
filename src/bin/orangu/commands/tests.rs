@@ -1404,58 +1404,36 @@ fn parses_pending_commands() {
     }
 }
 
-/// `create workspace <dir>` and `delete workspace` parse into the correct
+/// `/create_workspace <dir>` and `/delete_workspace` parse into the correct
 /// variants and do not shadow branch deletion for any other argument.
 #[test]
 fn parses_create_and_delete_workspace_commands() {
-    // Bare /create (no argument yet) triggers the CreateWorkspace ghost.
+    // Bare /create_workspace (no argument yet) triggers the CreateWorkspace ghost.
     assert!(matches!(
-        parse_local_command("/create"),
+        parse_local_command("/create_workspace"),
         Some(LocalCommand::CreateWorkspace(ref dir)) if dir.is_empty()
     ));
 
-    // /create workspace with and without a path.
-    assert!(matches!(
-        parse_local_command("/create workspace"),
-        Some(LocalCommand::CreateWorkspace(ref dir)) if dir.is_empty()
-    ));
-    match parse_local_command("/create workspace ~/project") {
+    // /create_workspace with a path.
+    match parse_local_command("/create_workspace ~/project") {
         Some(LocalCommand::CreateWorkspace(dir)) => assert_eq!(dir.as_ref(), "~/project"),
-        _ => panic!("expected /create workspace ~/project"),
+        _ => panic!("expected /create_workspace ~/project"),
     }
-    match parse_local_command("/create workspace /abs/path") {
+    match parse_local_command("/create_workspace /abs/path") {
         Some(LocalCommand::CreateWorkspace(dir)) => assert_eq!(dir.as_ref(), "/abs/path"),
-        _ => panic!("expected /create workspace /abs/path"),
+        _ => panic!("expected /create_workspace /abs/path"),
     }
 
-    // /create with an unrecognised subcommand must not match.
-    assert!(parse_local_command("/create session").is_none());
-
-    // /delete workspace (case-insensitive) closes the current tab.
-    for input in [
-        "/delete workspace",
-        "/delete WORKSPACE",
-        "/delete Workspace",
-    ] {
-        assert!(
-            matches!(
-                parse_local_command(input),
-                Some(LocalCommand::DeleteWorkspace)
-            ),
-            "expected {input:?} to parse as DeleteWorkspace"
-        );
-    }
+    // /delete_workspace closes the current tab.
+    assert!(matches!(
+        parse_local_command("/delete_workspace"),
+        Some(LocalCommand::DeleteWorkspace)
+    ));
 
     // /delete <branch> still routes to branch deletion, never workspace close.
     assert!(matches!(
         parse_local_command("/delete feature/foo"),
         Some(LocalCommand::Branch(BranchSubcommand::Delete(_)))
-    ));
-    // The literal string "workspace" as a branch name would be odd, but /delete
-    // must intercept it as DeleteWorkspace rather than branch-delete.
-    assert!(matches!(
-        parse_local_command("/delete workspace"),
-        Some(LocalCommand::DeleteWorkspace)
     ));
 
     // Natural-language: `create workspace <dir>`.
