@@ -292,6 +292,7 @@ pub(crate) fn handle_command(
                         args.as_ref(),
                         &output,
                         compression,
+                        Some(&*tools.compression_store),
                     );
                     if let Ok(mut metrics) = tools.compression_metrics.lock() {
                         metrics.record(&stats);
@@ -396,6 +397,7 @@ pub(crate) fn handle_command(
                     &output,
                     compression,
                     tools.diff_file_cap(),
+                    Some(&*tools.compression_store),
                 );
                 if let Ok(mut metrics) = tools.compression_metrics.lock() {
                     metrics.record(&stats);
@@ -422,6 +424,7 @@ pub(crate) fn handle_command(
                     &output,
                     compression,
                     tools.diff_file_cap(),
+                    Some(&*tools.compression_store),
                 );
                 if let Ok(mut metrics) = tools.compression_metrics.lock() {
                     metrics.record(&stats);
@@ -466,6 +469,7 @@ pub(crate) fn handle_command(
                     &pattern,
                     &output,
                     compression,
+                    Some(&*tools.compression_store),
                 );
                 if let Ok(mut metrics) = tools.compression_metrics.lock() {
                     metrics.record(&stats);
@@ -497,6 +501,7 @@ pub(crate) fn handle_command(
                     &output,
                     compression,
                     tools.diff_file_cap(),
+                    Some(&*tools.compression_store),
                 );
                 if let Ok(mut metrics) = tools.compression_metrics.lock() {
                     metrics.record(&stats);

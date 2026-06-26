@@ -247,14 +247,16 @@ pub fn prepare_llm_diff_context(
     diff: &str,
     compression_enabled: bool,
     diff_file_cap: usize,
+    store: Option<&crate::compression_cache::CompressionStore>,
 ) -> LlmContext {
-    prepare_llm_diff_context_with_stats(diff, compression_enabled, diff_file_cap).0
+    prepare_llm_diff_context_with_stats(diff, compression_enabled, diff_file_cap, store).0
 }
 
 pub fn prepare_llm_diff_context_with_stats(
     diff: &str,
     compression_enabled: bool,
     diff_file_cap: usize,
+    store: Option<&crate::compression_cache::CompressionStore>,
 ) -> (LlmContext, CompressionStats) {
     let original_lines = diff.lines().count();
 
@@ -275,10 +277,15 @@ pub fn prepare_llm_diff_context_with_stats(
     let compressed = compress_git_diff(diff, diff_file_cap);
     let compressed_lines = compressed.lines().count();
     let note = (compressed_lines < original_lines).then(|| {
-        format!(
+        let mut msg = format!(
             "Context note: orangu shortened this diff before sending it to the model ({} -> {} lines). Omitted sections are marked inline.",
             original_lines, compressed_lines
-        )
+        );
+        if let Some(store) = store
+            && let Some(hash) = store.store(diff) {
+                msg.push_str(&format!(" Run expand_context(id=\"{}\") to view the full original diff.", hash));
+            }
+        msg
     });
 
     (
@@ -302,14 +309,16 @@ pub fn prepare_llm_file_context(
     path: &str,
     content: &str,
     compression_enabled: bool,
+    store: Option<&crate::compression_cache::CompressionStore>,
 ) -> LlmContext {
-    prepare_llm_file_context_with_stats(path, content, compression_enabled).0
+    prepare_llm_file_context_with_stats(path, content, compression_enabled, store).0
 }
 
 pub fn prepare_llm_file_context_with_stats(
     _path: &str,
     content: &str,
     compression_enabled: bool,
+    store: Option<&crate::compression_cache::CompressionStore>,
 ) -> (LlmContext, CompressionStats) {
     let original_lines = content.lines().count();
 
@@ -330,10 +339,15 @@ pub fn prepare_llm_file_context_with_stats(
     let compressed = compress_generic(content);
     let compressed_lines = compressed.lines().count();
     let note = (compressed_lines < original_lines).then(|| {
-        format!(
+        let mut msg = format!(
             "Context note: orangu shortened this file output before sending it to the model ({} -> {} lines). Omitted sections are marked inline.",
             original_lines, compressed_lines
-        )
+        );
+        if let Some(store) = store
+            && let Some(hash) = store.store(content) {
+                msg.push_str(&format!(" Run expand_context(id=\"{}\") to view the full original file.", hash));
+            }
+        msg
     });
 
     (
@@ -360,14 +374,16 @@ pub fn prepare_llm_grep_context(
     pattern: &str,
     output: &str,
     compression_enabled: bool,
+    store: Option<&crate::compression_cache::CompressionStore>,
 ) -> LlmContext {
-    prepare_llm_grep_context_with_stats(pattern, output, compression_enabled).0
+    prepare_llm_grep_context_with_stats(pattern, output, compression_enabled, store).0
 }
 
 pub fn prepare_llm_grep_context_with_stats(
     pattern: &str,
     output: &str,
     compression_enabled: bool,
+    store: Option<&crate::compression_cache::CompressionStore>,
 ) -> (LlmContext, CompressionStats) {
     let original_lines = output.lines().count();
 
@@ -424,10 +440,19 @@ pub fn prepare_llm_grep_context_with_stats(
             "\n... {} more matches omitted (use /grep with a narrower pattern to see all)\n",
             omitted
         ));
-        Some(format!(
+        let mut msg = format!(
             "Context note: orangu truncated these grep results ({} matches found, sending first {} to the model).",
             total_matches, MAX_MATCHES
-        ))
+        );
+        if let Some(store) = store
+            && let Some(hash) = store.store(output)
+        {
+            msg.push_str(&format!(
+                " Run expand_context(id=\"{}\") to view the full grep output.",
+                hash
+            ));
+        }
+        Some(msg)
     } else {
         None
     };
@@ -1048,7 +1073,7 @@ test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n
     #[test]
     fn llm_diff_context_keeps_small_diffs_raw() {
         let diff = "diff --git a/a b/a\n+one\n";
-        let context = prepare_llm_diff_context(diff, true, 20);
+        let context = prepare_llm_diff_context(diff, true, 20, None);
         assert_eq!(context.content, diff);
         assert!(context.note.is_none());
     }
@@ -1062,7 +1087,7 @@ test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n
             diff.push_str(&format!(" line {i}\n"));
         }
         diff.push_str("+new line\n");
-        let context = prepare_llm_diff_context(&diff, true, 20);
+        let context = prepare_llm_diff_context(&diff, true, 20, None);
         assert!(!context.content.contains(" line 10\n"));
         assert!(context.note.expect("note").contains(" -> "));
     }
@@ -1073,7 +1098,7 @@ test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n
             .map(|line| format!("+line {line}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let context = prepare_llm_diff_context(&diff, false, 20);
+        let context = prepare_llm_diff_context(&diff, false, 20, None);
         assert_eq!(context.content, diff);
         assert!(context.note.is_none());
     }

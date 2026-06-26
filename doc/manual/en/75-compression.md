@@ -88,7 +88,7 @@ Current patterns include:
 
 For any unrecognised or extremely large generic output (e.g., custom shell scripts or Makefiles), orangu uses a sophisticated "Hot-Line Context Extractor". Instead of blindly truncating the middle of a log, it scans for universal failure markers (`error:`, `Exception`, `Traceback`, `panic:`, etc.) and perfectly preserves those specific lines along with their surrounding context (+/- 3 lines). All surrounding noise is dynamically collapsed. This ensures the LLM never misses a stack trace, regardless of the language.
 
-**Disk Diversion:** As an absolute safety net, if the generic fallback is triggered and the log is compressed, Orangu automatically diverts the full raw `stdout` and `stderr` streams to `.orangu/tmp/cmd_stdout.log` and `.orangu/tmp/cmd_stderr.log` inside your workspace. The LLM is given an explicit marker pointing to this file, granting it reversible access to the raw data on demand.
+**Reverse Compression (Context Expansion):** As an absolute safety net, whenever *any* massive blob of text (a giant diff, a massive file read, or a huge shell output) is severely truncated, `orangu` automatically persists the original uncompressed text to a session-scoped disk cache using a SHA-256 hash. It injects a tiny marker into the LLM's prompt (e.g., `[Note: Output truncated. Run expand_context(id="abc1234567")]`). This grants the LLM the ability to dynamically "reverse" the compression and retrieve the exact missing data on demand using the `expand_context` tool.
 ### Advanced Diff Engine
 
 When processing `git diff` outputs, orangu bypasses raw text truncation and uses a structured AST diff parser:

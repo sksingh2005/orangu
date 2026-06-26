@@ -40,6 +40,8 @@ pub struct ToolExecutor {
     pub compression_metrics: Arc<Mutex<crate::compression::CompressionMetrics>>,
     auto_downsample_lines: usize,
     diff_file_cap: usize,
+    pub session_dir: Option<PathBuf>,
+    pub compression_store: Arc<crate::compression_cache::CompressionStore>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -92,11 +94,11 @@ struct ShellCommandResult {
 
 impl ToolExecutor {
     pub fn new(workspace: &Path) -> Self {
-        Self::with_config(workspace, true, 300, 20)
+        Self::with_config(workspace, true, 300, 20, None)
     }
 
     pub fn new_read_only(workspace: &Path) -> Self {
-        let mut executor = Self::with_config(workspace, true, 300, 20);
+        let mut executor = Self::with_config(workspace, true, 300, 20, None);
         executor.read_only = true;
         executor
     }
@@ -106,6 +108,7 @@ impl ToolExecutor {
         compression_enabled: bool,
         auto_downsample_lines: usize,
         diff_file_cap: usize,
+        session_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             workspace: workspace.to_path_buf(),
@@ -119,6 +122,10 @@ impl ToolExecutor {
             )),
             auto_downsample_lines,
             diff_file_cap,
+            compression_store: Arc::new(crate::compression_cache::CompressionStore::new(
+                session_dir.clone(),
+            )),
+            session_dir,
         }
     }
 
@@ -215,6 +222,17 @@ impl ToolExecutor {
                 "required": ["command"]
             }),
         ));
+        defs.push(tool(
+            "expand_context",
+            "Retrieve the full uncompressed text using an id from a truncation marker.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"}
+                },
+                "required": ["id"]
+            }),
+        ));
 
         defs
     }
@@ -249,12 +267,24 @@ impl ToolExecutor {
             "list_directory" => self.list_directory(arguments).await,
             "fetch_url" => self.fetch_url(arguments).await,
             "run_shell_command" => self.run_shell_command(arguments).await,
+            "expand_context" => self.expand_context(arguments).await,
             _ => Err(anyhow!("unknown tool '{}'", name)),
         };
         if let Ok(mut d) = self.tool_duration.lock() {
             *d += start.elapsed();
         }
         result
+    }
+
+    async fn expand_context(&self, arguments: &Map<String, Value>) -> Result<String> {
+        let id = arguments
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing 'id' argument"))?;
+        match self.compression_store.retrieve(id) {
+            Ok(content) => Ok(content),
+            Err(e) => Err(anyhow!("Error retrieving content: {}", e)),
+        }
     }
 
     async fn read_file(&self, arguments: &Map<String, Value>) -> Result<String> {
@@ -879,7 +909,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let path = workspace.path().join("README.md");
         fs::write(&path, "one\ntwo\n").unwrap();
-        let executor = ToolExecutor::with_config(workspace.path(), false, 300, 20);
+        let executor = ToolExecutor::with_config(workspace.path(), false, 300, 20, None);
 
         let mut args = Map::new();
         args.insert("path".into(), json!("README.md"));
@@ -902,7 +932,7 @@ mod tests {
         .unwrap();
         #[cfg(unix)]
         fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let executor = ToolExecutor::with_config(workspace.path(), false, 300, 20);
+        let executor = ToolExecutor::with_config(workspace.path(), false, 300, 20, None);
 
         let mut args = Map::new();
         args.insert("command".into(), json!("./cargo test"));
@@ -986,7 +1016,7 @@ pub fn standalone() {}
     fn grep_context_is_compact_under_limit() {
         use crate::compression::prepare_llm_grep_context;
         let output = "src/foo.rs:10:    pub fn foo() {}\nsrc/bar.rs:20:    pub fn bar() {}";
-        let ctx = prepare_llm_grep_context("fn foo", output, true);
+        let ctx = prepare_llm_grep_context("fn foo", output, true, None);
         // Under 40 matches — all should appear, no omission note.
         assert!(ctx.content.contains("src/foo.rs"));
         assert!(ctx.note.is_none());
@@ -1000,7 +1030,7 @@ pub fn standalone() {}
             .map(|i| format!("src/x.rs:{i}: fn item_{i}() {{}}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let ctx = prepare_llm_grep_context("item", &output, true);
+        let ctx = prepare_llm_grep_context("item", &output, true, None);
         assert!(ctx.note.is_some(), "should have truncation note");
         let note = ctx.note.unwrap();
         assert!(note.contains("50 matches found"), "should mention counts");

@@ -1340,6 +1340,7 @@ async fn run() -> Result<()> {
                                 &patch,
                                 config.compression,
                                 config.diff_file_cap,
+                                Some(&*tools.compression_store),
                             );
                             if let Ok(mut metrics) = tools.compression_metrics.lock() {
                                 metrics.record(&stats);
@@ -1456,6 +1457,7 @@ async fn run() -> Result<()> {
                     config.compression,
                     config.diff_file_cap,
                     tools.compression_metrics.clone(),
+                    tools.compression_store.clone(),
                     &skills,
                 )
                 .await?;
