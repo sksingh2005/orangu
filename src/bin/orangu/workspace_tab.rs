@@ -96,15 +96,7 @@ impl WorkspaceTab {
         } else {
             false
         };
-        let tools = ToolExecutor::with_config(
-            &workspace,
-            compression_enabled,
-            auto_downsample_lines,
-            diff_file_cap,
-        );
-        let skills = orangu::skills::SkillRegistry::discover(&workspace);
         let current_branch = workspace_branch_name(&workspace);
-
         let (session_id, is_resumed) = match resume {
             Some(id) => (id.to_string(), true),
             None if auto_resume => {
@@ -120,12 +112,22 @@ impl WorkspaceTab {
             None => (Uuid::new_v4().to_string(), false),
         };
         let session_dir = session_dir_path(&session_id)?;
+
         std::fs::create_dir_all(&session_dir).with_context(|| {
             format!(
                 "failed to create session directory {}",
                 session_dir.display()
             )
         })?;
+
+        let tools = ToolExecutor::with_config(
+            &workspace,
+            compression_enabled,
+            auto_downsample_lines,
+            diff_file_cap,
+            Some(session_dir.clone()),
+        );
+        let skills = orangu::skills::SkillRegistry::discover(&workspace);
         let session_hist_path = session_dir.join("history");
         let session_messages_path = session_dir.join("messages");
         let session_metadata_path = session_dir.join("metadata");

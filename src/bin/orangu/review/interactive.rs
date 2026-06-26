@@ -286,6 +286,7 @@ pub(crate) fn build_review_prompt_with_stats(
     patch: &str,
     compression_enabled: bool,
     diff_file_cap: usize,
+    store: Option<&orangu::compression_cache::CompressionStore>,
 ) -> (String, orangu::compression::CompressionStats) {
     let request = request.trim();
     let instruction = if request.is_empty() {
@@ -299,6 +300,7 @@ pub(crate) fn build_review_prompt_with_stats(
         patch,
         compression_enabled,
         diff_file_cap,
+        store,
     );
     let note = context
         .note

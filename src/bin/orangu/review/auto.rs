@@ -1661,11 +1661,13 @@ pub(crate) fn build_auto_review_category_prompt_with_stats(
     patch: &str,
     compression_enabled: bool,
     diff_file_cap: usize,
+    store: Option<&orangu::compression_cache::CompressionStore>,
 ) -> (String, orangu::compression::CompressionStats) {
     let (context, stats) = orangu::compression::prepare_llm_diff_context_with_stats(
         patch,
         compression_enabled,
         diff_file_cap,
+        store,
     );
     let note = context
         .note
@@ -1873,6 +1875,7 @@ pub(crate) async fn run_auto_review_mode(
     compression_enabled: bool,
     diff_file_cap: usize,
     compression_metrics: std::sync::Arc<std::sync::Mutex<orangu::compression::CompressionMetrics>>,
+    compression_store: std::sync::Arc<orangu::compression_cache::CompressionStore>,
     skills: &orangu::skills::SkillRegistry,
 ) -> Result<AutoReviewState> {
     let immediate = launch.immediate;
@@ -1952,6 +1955,7 @@ pub(crate) async fn run_auto_review_mode(
                 &patch,
                 compression_enabled,
                 diff_file_cap,
+                Some(compression_store.as_ref()),
             );
             if let Ok(mut metrics) = compression_metrics.lock() {
                 metrics.record(&stats);
@@ -3455,6 +3459,7 @@ mod tests {
             patch,
             false,
             20,
+            None,
         );
         let (security, _) = build_auto_review_category_prompt_with_stats(
             "src/main.rs",
@@ -3463,6 +3468,7 @@ mod tests {
             patch,
             false,
             20,
+            None,
         );
 
         let diff_end = code.find("```\n\n").expect("diff block") + "```".len();

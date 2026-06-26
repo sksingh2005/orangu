@@ -13,6 +13,7 @@
 | `list_directory` | List files and directories below the workspace | optional `path`, optional `max_depth` |
 | `fetch_url` | Fetch an external URL and return readable text | `url`, optional `max_chars` |
 | `run_shell_command` | Run a shell command inside the workspace | `command`, optional `cwd`, optional `timeout_seconds` |
+| `expand_context` | Retrieve previously compressed/truncated output using its hash ID | `id` |
 
 ## Workspace restrictions
 
@@ -106,6 +107,24 @@ Behavior:
 - HTML responses are converted into readable text
 - Non-HTML responses are returned as plain text
 - Long responses are truncated and end with `[truncated]`
+
+## `expand_context`
+
+`expand_context` retrieves massive text blobs (like large file diffs or lengthy command outputs) that `orangu` automatically truncated before they reached your context window to save tokens.
+
+```json
+{
+  "id": "abc1234567"
+}
+```
+
+Behavior:
+
+- `id` is required and must be a 10-character cache ID.
+- You will find these IDs injected into your context as markers (e.g. `[Note: Output truncated. Run expand_context(id="abc1234567")]`).
+- The tool returns the full, uncompressed, raw text of the original output.
+- The cache ID is a SHA-256 hash prefix of the content, meaning it is mathematically guaranteed to perfectly match the truncated payload.
+- Cache files are strictly scoped to the active session and automatically deleted when the session ends.
 
 ## `run_shell_command`
 
