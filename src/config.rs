@@ -243,7 +243,7 @@ where
 /// and `;` full-line comments and blank lines ignored. Section names and
 /// values are taken literally, so model identifiers containing `.` or `:`
 /// (e.g. `Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M`) round-trip unchanged.
-fn parse_ini_sections(contents: &str) -> Result<HashMap<String, HashMap<String, String>>> {
+pub fn parse_ini_sections(contents: &str) -> Result<HashMap<String, HashMap<String, String>>> {
     let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut current: Option<String> = None;
 

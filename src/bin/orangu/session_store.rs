@@ -16,6 +16,47 @@
 use crate::*;
 
 pub(crate) const SESSIONS_DIRECTORY: &str = ".orangu/sessions";
+pub(crate) const SESSION_SETTINGS_FILE: &str = "settings";
+
+/// Load the server and model pinned to this session, if any.
+/// Returns `(server, model)` — either or both may be `None`.
+pub(crate) fn load_session_settings(session_dir: &Path) -> (Option<String>, Option<String>) {
+    let path = session_dir.join(SESSION_SETTINGS_FILE);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return (None, None);
+    };
+    let mut sections = match orangu::config::parse_ini_sections(&contents) {
+        Ok(s) => s,
+        Err(_) => return (None, None),
+    };
+    let client = match sections.remove(orangu::config::CLIENT_SECTION) {
+        Some(s) => s,
+        None => return (None, None),
+    };
+    let server = client
+        .get("server")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let model = client
+        .get("model")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    (server, model)
+}
+
+/// Persist the active server and model into the session's `settings` file so
+/// they are restored when the session is resumed.  Either value may be omitted
+/// to leave it unset (which means the global default applies on next resume).
+pub(crate) fn save_session_settings(session_dir: &Path, server: Option<&str>, model: Option<&str>) {
+    let mut body = format!("[{}]\n", orangu::config::CLIENT_SECTION);
+    if let Some(s) = server {
+        body.push_str(&format!("server = {s}\n"));
+    }
+    if let Some(m) = model {
+        body.push_str(&format!("model = {m}\n"));
+    }
+    let _ = std::fs::write(session_dir.join(SESSION_SETTINGS_FILE), body);
+}
 /// Scratch directory used by `/restart` to stage a runnable copy of the binary
 /// when the original on-disk path has been replaced (e.g. rebuilt while
 /// running). Cleared on every startup.

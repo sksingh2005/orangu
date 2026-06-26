@@ -18,13 +18,24 @@
 //! Each tab is its own session: its own conversation, scrollback, pending
 //! queue, command history and usage. The active tab's fields are used by the
 //! run loop exactly like the single-workspace locals were before tabs existed;
-//! switching tabs swaps which [`WorkspaceTab`] is active. The model and server
-//! are shared across tabs (per-workspace `/server`/`/model` come later).
+//! switching tabs swaps which [`WorkspaceTab`] is active. Each tab carries its
+//! own `active_model`, `active_model_id`, and `current_endpoint` so that
+//! `/server` and `/model` changes are isolated to the tab they are issued in.
 
 use crate::*;
 use orangu::workspaces::WorkspacePath;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+/// The server/model state passed into [`WorkspaceTab::open`]. The workspace
+/// config (`.orangu/orangu.conf`) may override `server` and `model_id` for
+/// the new tab; `endpoint` and `llms` are used to resolve the override.
+pub(crate) struct TabServerConfig<'a> {
+    pub(crate) server: String,
+    pub(crate) model_id: String,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) llms: &'a std::collections::HashMap<String, orangu::config::LlmConfiguration>,
+}
 
 /// Everything that belongs to one workspace tab. The run loop reads and mutates
 /// the active tab's fields; the [`WorkspaceManager`](orangu::workspaces::WorkspaceManager)
@@ -61,6 +72,15 @@ pub(crate) struct WorkspaceTab {
     /// An LLM response running in a background tokio task because the user
     /// switched tabs mid-stream. `session` is a placeholder while this is `Some`.
     pub(crate) pending_response: Option<PendingResponse>,
+    /// The named LLM profile (server section name) active in this tab.
+    /// Initialised from the global default but isolated per-tab after the first
+    /// `/server` command.
+    pub(crate) active_model: String,
+    /// The wire model id sent to the server for this tab (`/model` changes this).
+    pub(crate) active_model_id: String,
+    /// The HTTP endpoint for the active server in this tab, or `None` when
+    /// disconnected.
+    pub(crate) current_endpoint: Option<String>,
 }
 
 impl WorkspacePath for WorkspaceTab {
@@ -80,6 +100,7 @@ impl WorkspaceTab {
     /// new session is always started rather than auto-resuming the matching one
     /// — used by `Alt+Insert`, which opens a fresh tab the user then points
     /// somewhere with `/workspace`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open(
         workspace: PathBuf,
         resume: Option<&str>,
@@ -88,7 +109,14 @@ impl WorkspaceTab {
         compression_enabled: bool,
         auto_downsample_lines: usize,
         diff_file_cap: usize,
+        server_config: TabServerConfig<'_>,
     ) -> Result<Self> {
+        let TabServerConfig {
+            server: default_server,
+            model_id: default_model_id,
+            endpoint: default_endpoint,
+            llms: config_llms,
+        } = server_config;
         let workspace_created = if !workspace.exists() {
             std::fs::create_dir_all(&workspace)
                 .with_context(|| format!("Failed to create workspace {}", workspace.display()))?;
@@ -96,6 +124,7 @@ impl WorkspaceTab {
         } else {
             false
         };
+
         let current_branch = workspace_branch_name(&workspace);
         let (session_id, is_resumed) = match resume {
             Some(id) => (id.to_string(), true),
@@ -119,6 +148,20 @@ impl WorkspaceTab {
                 session_dir.display()
             )
         })?;
+
+        // Restore the server/model pinned to this session, if any. On a fresh
+        // session there is no settings file and the global defaults apply.
+        let (active_model, active_model_id, current_endpoint) = {
+            let (ses_server, ses_model) = load_session_settings(&session_dir);
+            let server = ses_server.unwrap_or(default_server);
+            let (model_id, endpoint) = if let Some(profile) = config_llms.get(&server) {
+                let mid = ses_model.unwrap_or_else(|| profile.model.clone());
+                (mid, Some(profile.endpoint.clone()))
+            } else {
+                (ses_model.unwrap_or(default_model_id), default_endpoint)
+            };
+            (server, model_id, endpoint)
+        };
 
         let tools = ToolExecutor::with_config(
             &workspace,
@@ -196,6 +239,9 @@ impl WorkspaceTab {
             last_review_was_auto: false,
             startup_notice_until,
             pending_response: None,
+            active_model,
+            active_model_id,
+            current_endpoint,
         })
     }
 
@@ -388,6 +434,9 @@ mod tests {
             last_review_was_auto: false,
             startup_notice_until: None,
             pending_response: None,
+            active_model: String::new(),
+            active_model_id: String::new(),
+            current_endpoint: None,
         }
     }
 

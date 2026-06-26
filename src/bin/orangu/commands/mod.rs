@@ -406,6 +406,7 @@ pub struct CommandContext<'a> {
     pub llms: &'a HashMap<String, LlmConfiguration>,
     pub tools: &'a ToolExecutor,
     pub workspace: &'a Path,
+    pub session_dir: &'a std::path::Path,
     pub usage_stats: &'a crate::UsageStats,
     pub available_models: &'a [String],
     pub virtual_width: usize,

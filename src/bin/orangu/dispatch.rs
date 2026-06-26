@@ -233,6 +233,7 @@ pub(crate) fn handle_command(
         llms,
         tools,
         workspace,
+        session_dir,
         usage_stats,
         available_models,
         virtual_width,
@@ -337,6 +338,7 @@ pub(crate) fn handle_command(
                 ));
             }
             *active_model_id = name.to_string();
+            save_session_settings(session_dir, Some(active_model), Some(active_model_id));
             Ok(CommandOutcome::Quiet)
         }
         LocalCommand::ServerInfo => {
@@ -374,6 +376,7 @@ pub(crate) fn handle_command(
             session.set_system_prompt(&build_workspace_system_prompt(
                 profile, skills, workspace, None,
             ));
+            save_session_settings(session_dir, Some(active_model), Some(active_model_id));
             // Re-run the startup-style model detection against the selected
             // server, even when it is the server we were already on.
             *detect_model = true;

@@ -62,6 +62,25 @@ available after `--init`:
 See the Skills chapter for how to write instruction-only skills, skills with
 helper files, and skills that compile helper code.
 
+## Per-session server and model
+
+Each workspace tab keeps its own active server, model, and endpoint. A `/server`
+or `/model` command in one tab does not affect any other tab, and switching tabs
+restores the server and model that were active there.
+
+These choices are persisted automatically. When you run `/server` or `/model`,
+the selected values are written to the session's settings file:
+
+```
+~/.orangu/sessions/<UUID>/settings
+```
+
+The next time that session is resumed — whether in a new run or after a tab
+switch away and back — orangu restores the server and model from there. No
+manual config files are needed.
+
+\newpage
+
 ## `[orangu]`
 
 The main section selects the default server and client-wide limits. The

@@ -109,7 +109,7 @@ use session_store::*;
 use stats::*;
 use terminal::*;
 use wait::*;
-use workspace_tab::{TabAction, WorkspaceRing, WorkspaceTab};
+use workspace_tab::{TabAction, TabServerConfig, WorkspaceRing, WorkspaceTab};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -262,6 +262,12 @@ async fn run() -> Result<()> {
         config.compression,
         config.auto_downsample_lines,
         config.diff_file_cap,
+        TabServerConfig {
+            server: active_model.clone(),
+            model_id: active_model_id.clone(),
+            endpoint: current_endpoint.clone(),
+            llms: &config.llms,
+        },
     )?;
     // Load the initial tab's branch from session metadata so that Alt+./, and
     // checkout_tab_branch! can restore the right branch on next tab switch.
@@ -287,6 +293,12 @@ async fn run() -> Result<()> {
                     config.compression,
                     config.auto_downsample_lines,
                     config.diff_file_cap,
+                    TabServerConfig {
+                        server: active_model.clone(),
+                        model_id: active_model_id.clone(),
+                        endpoint: current_endpoint.clone(),
+                        llms: &config.llms,
+                    },
                 )
             {
                 if let Some(branch) = load_session_branch(&tab.session_id) {
@@ -340,7 +352,13 @@ async fn run() -> Result<()> {
         mut last_review_was_auto,
         mut startup_notice_until,
         mut pending_response,
+        active_model: initial_active_model,
+        active_model_id: initial_active_model_id,
+        current_endpoint: initial_current_endpoint,
     } = initial_tab;
+    active_model = initial_active_model;
+    active_model_id = initial_active_model_id;
+    current_endpoint = initial_current_endpoint;
 
     // If the active server isn't serving the configured model at startup, switch
     // to a model it does advertise.
@@ -411,6 +429,9 @@ async fn run() -> Result<()> {
                 last_review_was_auto,
                 startup_notice_until,
                 pending_response,
+                active_model: active_model.clone(),
+                active_model_id: active_model_id.clone(),
+                current_endpoint: current_endpoint.clone(),
             }
         };
     }
@@ -438,6 +459,9 @@ async fn run() -> Result<()> {
             last_review_was_auto = tab.last_review_was_auto;
             startup_notice_until = tab.startup_notice_until;
             pending_response = tab.pending_response;
+            active_model = tab.active_model;
+            active_model_id = tab.active_model_id;
+            current_endpoint = tab.current_endpoint;
         }};
     }
     macro_rules! apply_tab_action {
@@ -477,6 +501,12 @@ async fn run() -> Result<()> {
                         config.compression,
                         config.auto_downsample_lines,
                         config.diff_file_cap,
+                        TabServerConfig {
+                            server: active_model.clone(),
+                            model_id: active_model_id.clone(),
+                            endpoint: current_endpoint.clone(),
+                            llms: &config.llms,
+                        },
                     ) {
                         Ok(new_tab) => {
                             let target = ring.open(current_tab!(), new_tab);
@@ -944,6 +974,7 @@ async fn run() -> Result<()> {
                 llms: &config.llms,
                 tools: &tools,
                 workspace: &workspace,
+                session_dir: &session_dir,
                 usage_stats: &usage_stats,
                 available_models: &available_models,
                 virtual_width: viewport.virtual_width,
@@ -1028,6 +1059,12 @@ async fn run() -> Result<()> {
                     config.compression,
                     config.auto_downsample_lines,
                     config.diff_file_cap,
+                    TabServerConfig {
+                        server: active_model.clone(),
+                        model_id: active_model_id.clone(),
+                        endpoint: current_endpoint.clone(),
+                        llms: &config.llms,
+                    },
                 ) {
                     Ok(new_tab) => {
                         let target = ring.open(current_tab!(), new_tab);
@@ -1066,6 +1103,12 @@ async fn run() -> Result<()> {
                         config.compression,
                         config.auto_downsample_lines,
                         config.diff_file_cap,
+                        TabServerConfig {
+                            server: active_model.clone(),
+                            model_id: active_model_id.clone(),
+                            endpoint: current_endpoint.clone(),
+                            llms: &config.llms,
+                        },
                     ) {
                         Ok(new_tab) => {
                             load_tab!(new_tab);
