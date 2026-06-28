@@ -291,6 +291,14 @@ fn parse_export_target_handles_buffers_and_rejects_unknown() {
         parse_export_target("CONSOLE"),
         Some(ExportTarget::Console)
     ));
+    assert!(matches!(
+        parse_export_target("duplicates"),
+        Some(ExportTarget::Duplicates)
+    ));
+    assert!(matches!(
+        parse_export_target("  Duplicates "),
+        Some(ExportTarget::Duplicates)
+    ));
     // The auto-review buffer is selected by `auto review` (and its punctuation
     // variants), case-insensitively.
     for arg in ["auto review", "Auto Review", "auto_review", "auto-review"] {
@@ -340,6 +348,47 @@ fn parses_export_commands() {
     assert!(matches!(
         parse_local_command("export auto review"),
         Some(LocalCommand::Export(ExportTarget::AutoReview))
+    ));
+    assert!(matches!(
+        parse_local_command("/export duplicates"),
+        Some(LocalCommand::Export(ExportTarget::Duplicates))
+    ));
+    assert!(matches!(
+        parse_local_command("export duplicates"),
+        Some(LocalCommand::Export(ExportTarget::Duplicates))
+    ));
+}
+
+#[test]
+fn parses_duplicates_commands() {
+    // The bare command uses the default threshold.
+    assert!(matches!(
+        parse_local_command("/duplicates"),
+        Some(LocalCommand::Duplicates(None))
+    ));
+    // Natural-language forms.
+    for input in ["duplicates", "find duplicates", "find duplicate code"] {
+        assert!(
+            matches!(
+                parse_local_command(input),
+                Some(LocalCommand::Duplicates(None))
+            ),
+            "{input:?}"
+        );
+    }
+    // A percentage argument is read as a 0.0–1.0 fraction; a trailing percent
+    // sign and a bare fraction are both accepted.
+    let threshold_of = |input| match parse_local_command(input) {
+        Some(LocalCommand::Duplicates(threshold)) => threshold,
+        _ => panic!("expected a /duplicates command for {input:?}"),
+    };
+    assert!((threshold_of("/duplicates 80").unwrap() - 0.80).abs() < 1e-9);
+    assert!((threshold_of("/duplicates 90%").unwrap() - 0.90).abs() < 1e-9);
+    assert!((threshold_of("/duplicates 0.5").unwrap() - 0.50).abs() < 1e-9);
+    // An unparseable argument falls back to the default (None).
+    assert!(matches!(
+        parse_local_command("/duplicates lots"),
+        Some(LocalCommand::Duplicates(None))
     ));
 }
 

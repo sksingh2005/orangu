@@ -237,6 +237,105 @@ pub fn review_changed_paths(workspace: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The lines a non-default branch adds versus its merge base with main/master,
+/// grouped by workspace-relative file. Used by `/duplicates` to restrict the
+/// analysis to the functions a branch introduces or changes.
+pub struct BranchChanges {
+    /// The base ref the diff was taken against (e.g. `origin/main`).
+    pub base: String,
+    /// Each changed file under the workspace, with the 1-based inclusive line
+    /// ranges added on the branch (new-file coordinates).
+    pub files: Vec<(std::path::PathBuf, Vec<(usize, usize)>)>,
+}
+
+/// Compute the [`BranchChanges`] for `workspace`, or `None` when the analysis
+/// should run against the whole project instead: outside a Git repository, when
+/// no base branch (main/master) is found, when `HEAD` is detached, or when the
+/// current branch *is* the default branch. Any git error also yields `None`.
+pub fn branch_added_lines(workspace: &Path) -> Option<BranchChanges> {
+    let repo_root = discover_git_root(workspace)?;
+    let base_ref = git_find_base_ref(&repo_root).ok()?;
+    let current = workspace_branch_name(workspace)?;
+    if current.is_empty() {
+        return None;
+    }
+    // `origin/main` -> `main`; on the default branch we want the whole project.
+    let default_name = base_ref.rsplit('/').next().unwrap_or(&base_ref);
+    if current == default_name {
+        return None;
+    }
+
+    let merge_base = git_merge_base(&repo_root, &base_ref).unwrap_or_else(|| base_ref.clone());
+    // `--unified=0` so each hunk's `+` range is exactly the added lines.
+    let diff = run_git_diff_capture(&repo_root, &["--unified=0", &merge_base]).ok()?;
+
+    let mut files: Vec<(std::path::PathBuf, Vec<(usize, usize)>)> = Vec::new();
+    let mut tracked = false;
+    for line in diff.lines() {
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            tracked = match repo_relative_under_workspace(&repo_root, workspace, path.trim()) {
+                Some(relative) => {
+                    files.push((relative, Vec::new()));
+                    true
+                }
+                None => false,
+            };
+        } else if line.starts_with("+++ ") {
+            // `+++ /dev/null` (a deletion) or an unparseable header.
+            tracked = false;
+        } else if let Some(hunk) = line.strip_prefix("@@ ")
+            && tracked
+            && let Some(range) = parse_added_range(hunk)
+            && let Some((_, ranges)) = files.last_mut()
+        {
+            ranges.push(range);
+        }
+    }
+    files.retain(|(_, ranges)| !ranges.is_empty());
+    // A branch that adds nothing (e.g. rebased onto the base with no commits on
+    // top and a clean tree) has nothing new to analyse, so fall back to a
+    // whole-project report rather than an empty patch one.
+    if files.is_empty() {
+        return None;
+    }
+    Some(BranchChanges {
+        base: base_ref,
+        files,
+    })
+}
+
+/// Map a repository-relative diff path to a workspace-relative path, or `None`
+/// when the file lies outside the scanned workspace (so it is ignored).
+fn repo_relative_under_workspace(
+    repo_root: &Path,
+    workspace: &Path,
+    repo_relative: &str,
+) -> Option<std::path::PathBuf> {
+    repo_root
+        .join(repo_relative)
+        .strip_prefix(workspace)
+        .ok()
+        .map(Path::to_path_buf)
+}
+
+/// Parse a unified-diff hunk header's `+` side (the text after `@@ `) into the
+/// 1-based inclusive line range it adds, e.g. `-1,0 +5,3 @@` -> `(5, 7)`. `None`
+/// for a pure deletion (`+c,0`) or an unparseable header.
+fn parse_added_range(hunk: &str) -> Option<(usize, usize)> {
+    let plus = hunk
+        .split_whitespace()
+        .find(|token| token.starts_with('+'))?;
+    let numbers = &plus[1..];
+    let (start, count) = match numbers.split_once(',') {
+        Some((start, count)) => (start.parse().ok()?, count.parse().ok()?),
+        None => (numbers.parse().ok()?, 1usize),
+    };
+    if count == 0 {
+        return None;
+    }
+    Some((start, start + count - 1))
+}
+
 fn git_merge_base(repo_root: &Path, base_ref: &str) -> Option<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -409,6 +508,58 @@ mod tests {
     use super::*;
     use crate::process_env_lock;
     use tempfile::tempdir;
+
+    #[test]
+    fn parse_added_range_reads_the_plus_side() {
+        // `+c,d` -> c..=c+d-1; a bare `+c` is one line; `+c,0` (pure deletion)
+        // and malformed headers yield None.
+        assert_eq!(parse_added_range("-1,0 +5,3 @@ fn f()"), Some((5, 7)));
+        assert_eq!(parse_added_range("-10 +12 @@"), Some((12, 12)));
+        assert_eq!(parse_added_range("-3,2 +4,0 @@"), None);
+        assert_eq!(parse_added_range("nonsense"), None);
+    }
+
+    #[test]
+    fn branch_added_lines_falls_back_when_branch_adds_nothing() {
+        let _env_lock = process_env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let workspace = tempdir().expect("workspace");
+        let home = tempdir().expect("home");
+        let _home_guard = EnvVarGuard::set_path("HOME", home.path());
+        init_git_for_test(workspace.path());
+
+        // A base commit on main.
+        git_run(workspace.path(), &["checkout", "-B", "main"]);
+        std::fs::write(
+            workspace.path().join("lib.rs"),
+            "fn alpha() -> i32 {\n    let mut t = 0;\n    t += 1;\n    t\n}\n",
+        )
+        .expect("write base");
+        git_run(workspace.path(), &["add", "."]);
+        git_run(workspace.path(), &["commit", "-m", "base"]);
+
+        // A branch with no commits on top of main adds nothing — so the scan
+        // should run against the whole project (`None`), not as a patch.
+        git_run(workspace.path(), &["checkout", "-b", "feature/x"]);
+        assert!(branch_added_lines(workspace.path()).is_none());
+
+        // Once the branch commits a new function, it has added lines again.
+        std::fs::write(
+            workspace.path().join("lib.rs"),
+            "fn alpha() -> i32 {\n    let mut t = 0;\n    t += 1;\n    t\n}\n\n\
+             fn beta() -> i32 {\n    let mut s = 0;\n    s += 2;\n    s\n}\n",
+        )
+        .expect("write change");
+        git_run(workspace.path(), &["add", "."]);
+        git_run(workspace.path(), &["commit", "-m", "add beta"]);
+        let changes = branch_added_lines(workspace.path()).expect("branch changes");
+        assert_eq!(changes.base, "main");
+        assert!(
+            changes
+                .files
+                .iter()
+                .any(|(path, _)| path == std::path::Path::new("lib.rs"))
+        );
+    }
 
     #[test]
     fn git_workspace_diff_is_colorized_and_unified() {

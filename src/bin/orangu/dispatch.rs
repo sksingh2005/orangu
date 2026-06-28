@@ -38,6 +38,34 @@ fn behind_default_branch_guard(workspace: &Path) -> Option<CommandOutcome> {
     }
 }
 
+/// Run a duplicate-code scan over `workspace`, choosing the mode from the Git
+/// state: on a branch other than the default (main/master), compare only the
+/// functions the branch adds or changes against the whole project; otherwise (on
+/// the default branch, or outside a repository) compare the whole project
+/// against itself.
+pub(crate) fn run_duplicates_scan(
+    workspace: &Path,
+    threshold: f64,
+) -> anyhow::Result<orangu::duplicates::DuplicatesReport> {
+    match git::branch_added_lines(workspace) {
+        Some(changes) => {
+            let mut regions = orangu::duplicates::ChangedRegions::new();
+            for (path, ranges) in &changes.files {
+                for &(start, end) in ranges {
+                    regions.add_range(path.clone(), start, end);
+                }
+            }
+            orangu::duplicates::scan_duplicates_in_patch(
+                workspace,
+                threshold,
+                &regions,
+                &changes.base,
+            )
+        }
+        None => orangu::duplicates::scan_duplicates(workspace, threshold),
+    }
+}
+
 /// Collect the launch data shared by `/review` and `/auto_review`, wrapped in
 /// the caller's `CommandOutcome` variant. A review only starts on an
 /// up-to-date branch: when the branch is behind main/master the review would
@@ -459,6 +487,9 @@ pub(crate) fn handle_command(
         LocalCommand::AutoReview(Some(file), immediate) => {
             Ok(auto_review_file_outcome(workspace, file.trim(), immediate))
         }
+        LocalCommand::Duplicates(threshold) => Ok(CommandOutcome::Duplicates(
+            threshold.unwrap_or(orangu::duplicates::DEFAULT_THRESHOLD),
+        )),
         LocalCommand::Status => match status_output(workspace) {
             Ok(output) => Ok(CommandOutcome::Output(output)),
             Err(err) => Ok(local_command_error(err)),
@@ -1008,6 +1039,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,
@@ -1065,6 +1097,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,
@@ -1130,6 +1163,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,
@@ -1184,6 +1218,7 @@ mod tests {
                     llms: &llms,
                     tools: &tools,
                     workspace: &here,
+                    session_dir: &here,
                     usage_stats: &super::UsageStats::new(),
                     available_models: &[],
                     virtual_width: 512,
@@ -1266,6 +1301,7 @@ mod tests {
                     llms: &llms,
                     tools: &tools,
                     workspace: &here,
+                    session_dir: &here,
                     usage_stats: &super::UsageStats::new(),
                     available_models: &[],
                     virtual_width: 512,
@@ -1373,6 +1409,7 @@ mod tests {
                     llms: &llms,
                     tools: &tools,
                     workspace: workspace.path(),
+                    session_dir: workspace.path(),
                     usage_stats: &super::UsageStats::new(),
                     available_models: &[],
                     virtual_width: 512,
@@ -1442,6 +1479,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,
@@ -1501,6 +1539,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,
@@ -1562,6 +1601,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,
@@ -1618,6 +1658,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &available,
                 virtual_width: 512,
@@ -1680,6 +1721,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,
@@ -1747,6 +1789,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,
@@ -1796,6 +1839,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,
@@ -1841,6 +1885,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,
@@ -1886,6 +1931,7 @@ mod tests {
                 llms: &llms,
                 tools: &tools,
                 workspace: workspace.path(),
+                session_dir: workspace.path(),
                 usage_stats: &super::UsageStats::new(),
                 available_models: &[],
                 virtual_width: 512,

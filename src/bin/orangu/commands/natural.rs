@@ -421,6 +421,15 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
     if matches_ci(input, &["export auto review"]) {
         return Some(LocalCommand::Export(ExportTarget::AutoReview));
     }
+    if matches_ci(input, &["export duplicates"]) {
+        return Some(LocalCommand::Export(ExportTarget::Duplicates));
+    }
+    if matches_ci(
+        input,
+        &["duplicates", "find duplicates", "find duplicate code"],
+    ) {
+        return Some(LocalCommand::Duplicates(None));
+    }
     if matches_ci(input, &["export review"]) {
         return Some(LocalCommand::Export(ExportTarget::Review));
     }

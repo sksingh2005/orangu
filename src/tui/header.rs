@@ -130,59 +130,60 @@ pub fn render_header(
 }
 
 pub fn help_text() -> &'static str {
-    r#"/help                                         Show available commands
-/server [name]                                List configured servers (active green), or switch to a specific one
-/disconnect                                   Disconnect from the current server
-/reload                                       Restore the configured model and server
-/restart                                      Restart orangu, resuming the same workspace and session
-/tools                                        List tools
-/model [name]                                 List the server's models (active green), or switch to a specific one
-/prune [<uuid>|-w <path>|-o <days>|all]       Remove sessions
-/session [uuid|workspace]                     List/switch sessions, or open a workspace directory (Tab completes UUIDs, workspaces, then filesystem paths)
-/workspace [number|path]                      Show the active workspace, switch to a tab by number, or open a directory (Tab completes workspaces, then filesystem paths)
-/create_workspace <dir>                       Open a new workspace tab on an existing directory (like Alt+Insert + /workspace)
-/delete_workspace                             Close the active workspace tab (like Alt+Delete)
-/list_files                                   List workspace files as a tree
-/open_file <path>                             Open a workspace file in $EDITOR
-/show_file [--hash] [--author] <path> [<ref>] Show a file; optional ref uses git show
-/build                                        Build the project
-/export [console|review|auto review]          Export the output window (console), the last review report (review), or the last auto-review report (auto review) to a PDF in the workspace root
-/add_file <path>                              Stage a file or directory with git add
-/auto_review [<file>] [immediate]             LLM auto review in a split view: the whole branch, or one Tab-completed file (the full file on main/master, its changes on a branch); add immediate to start the run at once
-/amend <message>                              Rewrite the last commit message with git commit --amend
-/bisect [start|good|bad|skip|reset|log]       Binary-search history for the commit that introduced a bug (git bisect); bare /bisect shows the session status
-/branch [<name>|-a|-b|-m|-d <name>]           List, switch, create, rename or delete a branch
-/cherry_pick <commit>                         Cherry-pick a commit onto the current branch
-/comment <number> "<comment>"|<file>          Add a comment to a GitHub/GitLab issue; inline body, file from ~/.orangu/comments/, or `with [auto] review` to post the last /review or /auto_review report
-/close -i <number>|-p <number>                Close a GitHub/GitLab issue or pull request with gh/glab
-/commit <message>                             Commit all tracked changes with git commit -a -m
-/diff                                         Show a color unified diff against the current branch
-/fetch [remote]                               Fetch from a remote with git fetch (Tab completes git remotes; defaults to the first remote)
-/get_comments -i <number>|-p <number>         List comments on a GitHub/GitLab issue or pull request with gh/glab
-/grep <pattern>                               Search the workspace with git grep
-/init_repo                                    Initialize a Git repository in the workspace
-/log [number]                                 Show commit log (optionally the latest number of commits) plus a count of uncommitted/untracked changes
-/merge <branch>                               Merge a branch into the current branch
-/move_file <source> <destination>             Rename or move a tracked file with git mv
-/pending [delete <n>]                         List queued commands, or delete one by number
-/pull <number>                                Check out a GitHub/GitLab pull/merge request on a dedicated branch
-/pull_request                                 Create a pull request for the current branch
-/push [--force]                               Push the current branch to origin
-/rebase [target]                              Rebase the current branch onto master/main, or onto a given target (Tab completes local branches, then remotes, then remote branches)
-/remove_file <path>                           Remove a file or directory from Git tracking
-/restore [--staged] <file>                    Restore a file or unstage it (git restore)
-/review                                       Review branch changes against main/master in a split view
-/show [<commit>]                              Show a single commit (its header and diff) with git show; defaults to HEAD (Tab completes the latest 25 commits)
-/squash                                       Squash all branch commits into one
-/stash [pop|list|drop]                        Save uncommitted changes (git stash push), restore, list or discard
-/status                                       Show working tree status with color highlighting
-/manual                                       Open the built-in manual in a full-screen viewer
-/usage                                        Show usage statistics for this session
-/skills                                       List discovered Agent Skills; invoke one with /skill-name
-/clear                                        Clear the current conversation
-/quit                                         Exit the client
+    r#"/help                                           Show available commands
+/server [name]                                  List configured servers (active green), or switch to a specific one
+/disconnect                                     Disconnect from the current server
+/reload                                         Restore the configured model and server
+/restart                                        Restart orangu, resuming the same workspace and session
+/tools                                          List tools
+/model [name]                                   List the server's models (active green), or switch to a specific one
+/prune [<uuid>|-w <path>|-o <days>|all]         Remove sessions
+/session [uuid|workspace]                       List/switch sessions, or open a workspace directory (Tab completes UUIDs, workspaces, then filesystem paths)
+/workspace [number|path]                        Show the active workspace, switch to a tab by number, or open a directory (Tab completes workspaces, then filesystem paths)
+/create_workspace <dir>                         Open a new workspace tab on an existing directory (like Alt+Insert + /workspace)
+/delete_workspace                               Close the active workspace tab (like Alt+Delete)
+/list_files                                     List workspace files as a tree
+/open_file <path>                               Open a workspace file in $EDITOR
+/show_file [--hash] [--author] <path> [<ref>]   Show a file; optional ref uses git show
+/build                                          Build the project
+/export [console|review|auto review|duplicates] Export the output window (console), the last review report (review), the last auto-review report (auto review), or a fresh duplicate-code report (duplicates) to a PDF in the workspace root
+/duplicates [<threshold>]                       Scan source functions (Rust, C/C++, Go, Python, JS/TS, and ~20 more languages) for duplicates; on a non-default branch only the functions it adds/changes are compared against the project; optional threshold is a percentage (default 80%)
+/add_file <path>                                Stage a file or directory with git add
+/auto_review [<file>] [immediate]               LLM auto review in a split view: the whole branch, or one Tab-completed file (the full file on main/master, its changes on a branch); add immediate to start the run at once
+/amend <message>                                Rewrite the last commit message with git commit --amend
+/bisect [start|good|bad|skip|reset|log]         Binary-search history for the commit that introduced a bug (git bisect); bare /bisect shows the session status
+/branch [<name>|-a|-b|-m|-d <name>]             List, switch, create, rename or delete a branch
+/cherry_pick <commit>                           Cherry-pick a commit onto the current branch
+/comment <number> "<comment>"|<file>            Add a comment to a GitHub/GitLab issue; inline body, file from ~/.orangu/comments/, or `with [auto] review` to post the last /review or /auto_review report
+/close -i <number>|-p <number>                  Close a GitHub/GitLab issue or pull request with gh/glab
+/commit <message>                               Commit all tracked changes with git commit -a -m
+/diff                                           Show a color unified diff against the current branch
+/fetch [remote]                                 Fetch from a remote with git fetch (Tab completes git remotes; defaults to the first remote)
+/get_comments -i <number>|-p <number>           List comments on a GitHub/GitLab issue or pull request with gh/glab
+/grep <pattern>                                 Search the workspace with git grep
+/init_repo                                      Initialize a Git repository in the workspace
+/log [number]                                   Show commit log (optionally the latest number of commits) plus a count of uncommitted/untracked changes
+/merge <branch>                                 Merge a branch into the current branch
+/move_file <source> <destination>               Rename or move a tracked file with git mv
+/pending [delete <n>]                           List queued commands, or delete one by number
+/pull <number>                                  Check out a GitHub/GitLab pull/merge request on a dedicated branch
+/pull_request                                   Create a pull request for the current branch
+/push [--force]                                 Push the current branch to origin
+/rebase [target]                                Rebase the current branch onto master/main, or onto a given target (Tab completes local branches, then remotes, then remote branches)
+/remove_file <path>                             Remove a file or directory from Git tracking
+/restore [--staged] <file>                      Restore a file or unstage it (git restore)
+/review                                         Review branch changes against main/master in a split view
+/show [<commit>]                                Show a single commit (its header and diff) with git show; defaults to HEAD (Tab completes the latest 25 commits)
+/squash                                         Squash all branch commits into one
+/stash [pop|list|drop]                          Save uncommitted changes (git stash push), restore, list or discard
+/status                                         Show working tree status with color highlighting
+/manual                                         Open the built-in manual in a full-screen viewer
+/usage                                          Show usage statistics for this session
+/skills                                         List discovered Agent Skills; invoke one with /skill-name
+/clear                                          Clear the current conversation
+/quit                                           Exit the client
 
-Natural-language forms such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `git show abc1234`, `fetch`, `fetch upstream`, `status`, `rebase`, `rebase origin/main`, `squash`, `merge feature/foo`, `grep <pattern>`, `find <pattern>`, `branch`, `list branches`, `checkout main`, `switch to main`, `create branch feature/x`, `rename to new-name`, `delete feature/foo`, `restore README.md`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `amend "[#42] My feature"`, `push`, `force push`, `add comment on 51 "My comment"`, `comment on 48 with review`, `comment on 48 with auto review`, `get comments for issue 51`, `get comments for pull request 58`, `review`, `auto review`, `export console`, `export review`, `export auto review`, `create pull request`, `stash`, `stash pop`, `stash list`, `stash drop`, `bisect start`, `mark good`, `mark bad`, `bisect reset`, `init repo`, `prune session <uuid>`, `prune all`, `prune sessions older than <days>`, `prune sessions in <path>`, `restart`, `pending`, `workspace`, `workspace 1`, `switch workspace ~/project`, `create workspace ~/project`, `delete workspace`, `show manual`, and `show help` are also handled locally.
+Natural-language forms such as `open README.md`, `list models`, `list files`, `pull 58`, `log`, `git show abc1234`, `fetch`, `fetch upstream`, `status`, `rebase`, `rebase origin/main`, `squash`, `merge feature/foo`, `grep <pattern>`, `find <pattern>`, `branch`, `list branches`, `checkout main`, `switch to main`, `create branch feature/x`, `rename to new-name`, `delete feature/foo`, `restore README.md`, `add README.md`, `remove README.md`, `move old.rs new.rs`, `cherry pick abc1234`, `commit "[#42] My feature"`, `amend "[#42] My feature"`, `push`, `force push`, `add comment on 51 "My comment"`, `comment on 48 with review`, `comment on 48 with auto review`, `get comments for issue 51`, `get comments for pull request 58`, `review`, `auto review`, `find duplicates`, `export console`, `export review`, `export auto review`, `export duplicates`, `create pull request`, `stash`, `stash pop`, `stash list`, `stash drop`, `bisect start`, `mark good`, `mark bad`, `bisect reset`, `init repo`, `prune session <uuid>`, `prune all`, `prune sessions older than <days>`, `prune sessions in <path>`, `restart`, `pending`, `workspace`, `workspace 1`, `switch workspace ~/project`, `create workspace ~/project`, `delete workspace`, `show manual`, and `show help` are also handled locally.
 
 The prompt uses standard Unix shell keys, including Ctrl+Left, Ctrl+Right, Ctrl+A, Ctrl+E, Ctrl+K, Ctrl+U, Ctrl+W, Alt+Backspace, Alt+D, and Tab completion.
 

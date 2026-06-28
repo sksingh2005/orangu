@@ -18,6 +18,7 @@ pub mod compression_cache;
 pub mod config;
 pub mod context;
 pub mod diff;
+pub mod duplicates;
 pub mod explorer;
 pub mod llm;
 pub mod session;

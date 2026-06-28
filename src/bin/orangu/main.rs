@@ -350,6 +350,7 @@ async fn run() -> Result<()> {
         mut last_review_appendix,
         mut last_auto_review_appendix,
         mut last_review_was_auto,
+        mut last_duplicates_report,
         mut startup_notice_until,
         mut pending_response,
         active_model: initial_active_model,
@@ -427,6 +428,7 @@ async fn run() -> Result<()> {
                 last_review_appendix,
                 last_auto_review_appendix,
                 last_review_was_auto,
+                last_duplicates_report,
                 startup_notice_until,
                 pending_response,
                 active_model: active_model.clone(),
@@ -457,6 +459,7 @@ async fn run() -> Result<()> {
             last_review_appendix = tab.last_review_appendix;
             last_auto_review_appendix = tab.last_auto_review_appendix;
             last_review_was_auto = tab.last_review_was_auto;
+            last_duplicates_report = tab.last_duplicates_report;
             startup_notice_until = tab.startup_notice_until;
             pending_response = tab.pending_response;
             active_model = tab.active_model;
@@ -1249,6 +1252,72 @@ async fn run() -> Result<()> {
                 output_state.reset_scroll();
                 continue;
             }
+            CommandOutcome::Duplicates(threshold) => {
+                // Run the scan off the UI thread (with a spinner), like Blocking,
+                // but keep the typed report: show its console form and cache its
+                // Markdown so a later /export duplicates reuses it (no re-scan).
+                let root = workspace.to_path_buf();
+                let handle =
+                    tokio::task::spawn_blocking(move || run_duplicates_scan(&root, threshold));
+                let blocking_render = RenderContext {
+                    current_model: &active_model_id,
+                    endpoint: current_endpoint.as_deref().unwrap_or("(disconnected)"),
+                    workspace: tools.workspace(),
+                    prompt_branch: prompt_branch.as_deref(),
+                    header_status,
+                    virtual_width: viewport.virtual_width,
+                    actual_width: viewport.actual_width,
+                    actual_height: viewport.actual_height,
+                    x_offset: viewport.x_offset,
+                    banner: config.banner,
+                    drop_down: config.drop_down,
+                    feedback: config.feedback,
+                    server_names: &server_names,
+                    available_models: &available_models,
+                    skills: &skills,
+                    tab_bar,
+                    tab_statuses: &tab_statuses_working,
+                };
+                let mut deferred_tab_during_wait: Option<TabAction> = None;
+                let result = wait_for_local_command(
+                    WaitContext {
+                        render: blocking_render,
+                        history: &mut history,
+                        history_path: &session_hist_path,
+                        server_names: &server_names,
+                        available_models: &available_models,
+                        interrupt_state: &mut interrupt_state,
+                        output_state: &mut output_state,
+                        input_state: &mut input_state,
+                        pending_commands: &mut pending_commands,
+                        thinking_quote: None,
+                        viewport: &mut viewport,
+                        skills: &skills,
+                        deferred_tab: &mut deferred_tab_during_wait,
+                        parked_tabs: ring.parked(),
+                    },
+                    handle,
+                )
+                .await?;
+                match result {
+                    Ok(report) => {
+                        output_state.push_text(&report.to_console());
+                        last_duplicates_report = Some(report);
+                        if config.feedback {
+                            output_state.push_text(FEEDBACK_OK);
+                        }
+                    }
+                    Err(err) => {
+                        output_state.push_text(&format!("Error: {err:#}"));
+                        if config.feedback {
+                            output_state.push_text(FEEDBACK_ERR);
+                        }
+                    }
+                }
+                pending_tab_action = deferred_tab_during_wait;
+                output_state.reset_scroll();
+                continue;
+            }
             CommandOutcome::Streaming(f) => {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
                 let handle = tokio::task::spawn_blocking(move || f(tx));
@@ -1574,6 +1643,28 @@ async fn run() -> Result<()> {
                             last_auto_review_appendix.as_deref().unwrap_or(&[]),
                         ),
                         None => Err(anyhow!("No auto review to export; run /auto_review first")),
+                    },
+                    ExportTarget::Duplicates => match &last_duplicates_report {
+                        // Reuse the report cached by the most recent /duplicates
+                        // run — no second scan.
+                        Some(report) => {
+                            export::export_duplicates(&workspace, report, &active_model_id)
+                        }
+                        // None yet this session: scan once at the default
+                        // threshold so the export still works without a prior
+                        // /duplicates, then cache it for any later export.
+                        None => {
+                            run_duplicates_scan(&workspace, orangu::duplicates::DEFAULT_THRESHOLD)
+                                .and_then(|report| {
+                                    let path = export::export_duplicates(
+                                        &workspace,
+                                        &report,
+                                        &active_model_id,
+                                    );
+                                    last_duplicates_report = Some(report);
+                                    path
+                                })
+                        }
                     },
                 };
                 match result {

@@ -66,6 +66,11 @@ pub(crate) struct WorkspaceTab {
     pub(crate) last_review_appendix: Option<Vec<crate::export::AutoReviewAppendixEntry>>,
     pub(crate) last_auto_review_appendix: Option<Vec<crate::export::AutoReviewAppendixEntry>>,
     pub(crate) last_review_was_auto: bool,
+    /// The most recent `/duplicates` report in this tab, cached so
+    /// `/export duplicates` can render it to a PDF without re-scanning the
+    /// workspace. Per tab, since the scan is of that tab's workspace. `None`
+    /// until `/duplicates` has run.
+    pub(crate) last_duplicates_report: Option<orangu::duplicates::DuplicatesReport>,
     /// While set and in the future, the status bar shows "Resuming session …"
     /// for a freshly auto-resumed tab.
     pub(crate) startup_notice_until: Option<Instant>,
@@ -237,6 +242,7 @@ impl WorkspaceTab {
             last_review_appendix: None,
             last_auto_review_appendix: None,
             last_review_was_auto: false,
+            last_duplicates_report: None,
             startup_notice_until,
             pending_response: None,
             active_model,
@@ -432,6 +438,7 @@ mod tests {
             last_review_appendix: None,
             last_auto_review_appendix: None,
             last_review_was_auto: false,
+            last_duplicates_report: None,
             startup_notice_until: None,
             pending_response: None,
             active_model: String::new(),

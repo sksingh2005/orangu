@@ -73,6 +73,7 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
         "/pull_request" => Some(LocalCommand::CreatePullRequest),
         "/review" => Some(LocalCommand::Review),
         "/auto_review" => Some(LocalCommand::AutoReview(None, false)),
+        "/duplicates" => Some(LocalCommand::Duplicates(None)),
         "/export" => Some(LocalCommand::Export(ExportTarget::Console)),
         "/push" => Some(LocalCommand::Push(false)),
         "/rebase" => Some(LocalCommand::Rebase(None)),
@@ -141,6 +142,11 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
             }
             if let Some(args) = input.strip_prefix("/export ") {
                 return parse_export_target(args.trim()).map(LocalCommand::Export);
+            }
+            if let Some(args) = input.strip_prefix("/duplicates ") {
+                return Some(LocalCommand::Duplicates(parse_similarity_threshold(
+                    args.trim(),
+                )));
             }
             if let Some(args) = input.strip_prefix("/log ") {
                 return Some(LocalCommand::Log(args.trim().parse::<u64>().ok()));

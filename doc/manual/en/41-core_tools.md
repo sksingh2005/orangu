@@ -729,6 +729,80 @@ auto review src/tui.rs
 
 \newpage
 
+## /duplicates
+
+`/duplicates` scans the workspace for **duplicated code** across many languages and reports the function pairs that are structurally similar, so you can review them and decide whether they should be unified. It is handled locally and never sent to the model, and needs no Git repository.
+
+Run it with the `/duplicates` command, or the natural-language forms `find duplicates` or `find duplicate code`.
+
+### Supported languages
+
+A file is analysed when its extension matches one of the built-in languages:
+
+| Language | Extensions | Language | Extensions |
+|---|---|---|---|
+| Rust | `.rs` | Scala | `.scala`, `.sc` |
+| C | `.c`, `.h` | OCaml | `.ml` |
+| C++ | `.cc`, `.cpp`, `.cxx`, `.c++`, `.hpp`, `.hh`, `.hxx` | Haskell | `.hs` |
+| C# | `.cs` | Julia | `.jl` |
+| Go | `.go` | Lua | `.lua` |
+| Java | `.java` | R | `.r` |
+| Python | `.py`, `.pyi` | Zig | `.zig` |
+| JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx` | Swift | `.swift` |
+| TypeScript | `.ts`, `.mts`, `.cts` | Dart | `.dart` |
+| TSX | `.tsx` | Erlang | `.erl` |
+| Ruby | `.rb` | PHP | `.php` |
+| Bash | `.sh`, `.bash` | | |
+
+Functions are only ever compared **within the same language**, never across two — even where two languages share a file family (a `.ts` is never compared against a `.tsx`, nor a `.c` against a `.cpp`). Each language is a self-contained entry in orangu's grammar registry, so support for a new one is a small, isolated addition.
+
+### How it works
+
+Every matching file in the workspace is walked (honouring `.gitignore`) and parsed into an [abstract syntax tree](https://en.wikipedia.org/wiki/Abstract_syntax_tree) with [tree-sitter](https://tree-sitter.github.io/tree-sitter/). Each function or method definition — including nested ones — is reduced to the multiset of **bigrams** (adjacent pairs) of its AST node kinds, visited in pre-order. Because only the node *kinds* are compared, two functions that differ only in their names, variables, or literal values still match: the comparison is about *shape*, not text.
+
+Every pair of functions **in the same language** is then scored with the **Sørensen–Dice coefficient** over those bigram multisets:
+
+```text
+similarity = 2 × (shared bigrams) / (bigrams in A + bigrams in B)
+```
+
+The result runs from 0% (nothing in common) to 100% (identical structure). Functions in different languages are never compared against each other. Very small functions (fewer than 20 AST nodes) are skipped, since trivial one-liners are structurally interchangeable and would only add noise.
+
+Pairs scoring at or above the **threshold** are reported, sorted most-similar first. The default threshold is **80%**; pass a different one as the argument — a percentage such as `90` or `90%`, or a fraction such as `0.9` (an unrecognised argument falls back to the default).
+
+The report is a **starting point for human review, not a verdict**: a high score says two functions have the same shape, which is a strong hint they may be duplicated — but you should open each pair and confirm before refactoring.
+
+### On a branch: only what the branch adds
+
+When the workspace is a Git repository checked out on a branch **other than the default** (`main`/`master`), `/duplicates` narrows the analysis to the change the branch introduces. It diffs the branch against its merge base with the default branch (`origin/main`, `origin/master`, `main`, then `master`, in that order — the same base `/review` uses), takes the **functions the branch adds or changes** (any function whose lines overlap an added line), and compares **each of those against the whole project**.
+
+So on a branch the report answers *"does my branch duplicate code that already exists?"* — every reported pair has the new or changed function first. On the default branch (or outside a Git repository) the whole project is compared against itself as usual. If the branch **adds nothing** — for example it has been rebased onto the base with no commits of its own and a clean working tree — there is nothing branch-specific to analyse, so the whole-project report runs instead. The summary line and the PDF's first page state which mode ran, the base it compared against, and how many new/changed functions were analysed.
+
+### Output
+
+The output window prints a summary (files scanned, functions analysed, the threshold, and the number of candidate pairs) followed by each pair: its similarity percentage, the two function names, and for each function its `path:start–end` location. To save the same report as a PDF, use `/export duplicates` (see the `/export` tool).
+
+### Examples
+
+Scan with the default 80% threshold:
+
+```text
+/duplicates
+```
+
+Only report pairs that are at least 90% similar:
+
+```text
+/duplicates 90
+```
+
+Natural-language forms:
+
+```text
+find duplicates
+find duplicate code
+```
+
 ## /export
 
 `/export` writes a buffer to a PDF file in the root of the workspace, so a session's output or a review can be saved and shared outside the terminal.
@@ -738,16 +812,23 @@ It takes one optional argument selecting what to export:
 - `/export` or `/export console` — the **console output window**: everything currently in the main output window (prompts, command output, and model responses), with the terminal ANSI styling removed and the lines printed verbatim.
 - `/export review` — the **review buffer**: the Markdown of the last `/review` (or, if none, the last `/auto_review`) report from this session. If no review has been run yet, the command reports that there is nothing to export.
 - `/export auto review` — the **auto-review buffer** specifically: the Markdown of the last `/auto_review` report. If no auto review has been run yet, the command reports that there is nothing to export.
+- `/export duplicates` — a **duplicate-code report**: the report from the most recent `/duplicates` run in this tab, rendered to a PDF. The report is cached when `/duplicates` runs, so the export reuses it directly — including that run's threshold (run `/duplicates 0.8` and `/export duplicates` writes an 80% report) — without scanning the workspace a second time. If `/duplicates` has not been run this session, the export scans once at the default 80% threshold and caches the result, so it still works with no prior command.
 
-The argument **Tab-completes** (and shows the inline ghost hint): pressing Tab after `/export` offers `console`, `review`, and `auto review`, and the multi-word `auto review` completes from as little as `a` (so `export a` → `export auto review`). The natural-language `export <target>` form (without the leading slash) completes the same way.
+The argument **Tab-completes** (and shows the inline ghost hint): pressing Tab after `/export` offers `console`, `review`, `auto review`, and `duplicates`, and the multi-word `auto review` completes from as little as `a` (so `export a` → `export auto review`). The natural-language `export <target>` form (without the leading slash) completes the same way.
 
-The file is saved in the workspace root as `{repository}-{branch}-console.pdf` or `{repository}-{branch}-review.pdf`, where `{repository}` is the Git repository (or workspace) directory name and `{branch}` is the current branch (`nobranch` when not on one); both are sanitized for use in a filename, so a branch such as `feature/x` becomes `feature-x`. An existing file with the same name is overwritten. On success the saved path is printed to the output window.
+The file is saved in the workspace root as `{repository}-{branch}-console.pdf`, `{repository}-{branch}-review.pdf`, or `{repository}-{branch}-duplicates.pdf`, where `{repository}` is the Git repository (or workspace) directory name and `{branch}` is the current branch (`nobranch` when not on one); both are sanitized for use in a filename, so a branch such as `feature/x` becomes `feature-x`. An existing file with the same name is overwritten. On success the saved path is printed to the output window.
 
 Every page carries a **header band** centered on `{repository}-{branch}` and a **footer band** centered on `orangu {version} ({model})` (the active model), both in white on the orangu brand colour to match the terminal banner; in the footer the word `orangu` links to the project site.
 
 The PDF keeps the Markdown formatting as much as a self-contained file can. Text is set in **Red Hat Text**, embedded into the binary (SIL Open Font License), so no system fonts are needed; if for any reason the embedded font cannot be loaded the export falls back to the closest built-in face, Helvetica. Headings use the orangu brand colour. Long lines wrap to the page width using the font's real glyph metrics — prose on word boundaries, code lines hard at the margin — and the content flows across as many pages as needed.
 
 The **console** export preserves the output window line for line (terminal colours removed).
+
+The **duplicates** export is organized like the review export:
+
+- **Page 1 — summary.** A table of the repository, branch, generation date/time, the similarity threshold the scan used, and the file, function, and candidate-pair counts.
+- **Page 2 — table of contents.** Each similarity chapter with the page it starts on; the entries are **clickable links** that jump to their chapter.
+- **Page 3 onward — the chapters.** The candidate pairs are grouped by their similarity percentage; each `{n}% similar` chapter starts on its own page and lists its pairs, every pair showing the two function names and each function's location as `path:start–end`. When the repository's `origin` remote is on **GitHub or GitLab**, each location is a **link to that file on the forge with the lines highlighted** (at the current branch, or the default branch when detached); on any other host the location is plain text. (A report with no pairs is the summary page followed by a short note instead.)
 
 The **review** export is organized for reading and sharing:
 
@@ -772,6 +853,12 @@ Export the last review report (or the auto-review report specifically):
 /export auto review
 ```
 
+Export a fresh duplicate-code report:
+
+```text
+/export duplicates
+```
+
 Natural-language forms:
 
 ```text
@@ -779,4 +866,5 @@ export
 export console
 export review
 export auto review
+export duplicates
 ```

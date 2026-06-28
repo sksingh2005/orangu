@@ -24,8 +24,24 @@ pub fn parse_export_target(arg: &str) -> Option<ExportTarget> {
         "" | "console" => Some(ExportTarget::Console),
         "review" => Some(ExportTarget::Review),
         "auto review" | "auto_review" | "auto-review" => Some(ExportTarget::AutoReview),
+        "duplicates" => Some(ExportTarget::Duplicates),
         _ => None,
     }
+}
+
+/// Parse the optional `/duplicates` threshold argument into a `0.0`–`1.0`
+/// fraction. A bare number is read as a percentage when greater than `1`
+/// (`80` → `0.80`) and as a fraction otherwise (`0.8` → `0.80`); a trailing `%`
+/// is allowed (`80%`). The result is clamped to `0.0`–`1.0`. An empty or
+/// unparseable argument yields `None`, leaving the default threshold in place.
+pub fn parse_similarity_threshold(arg: &str) -> Option<f64> {
+    let trimmed = arg.trim().trim_end_matches('%').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let value = trimmed.parse::<f64>().ok()?;
+    let fraction = if value > 1.0 { value / 100.0 } else { value };
+    Some(fraction.clamp(0.0, 1.0))
 }
 
 pub fn parse_open_file_target<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {

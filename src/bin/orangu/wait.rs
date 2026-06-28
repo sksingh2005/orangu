@@ -372,10 +372,10 @@ async fn drive_handle(
     }
 }
 
-pub(crate) async fn wait_for_local_command(
+pub(crate) async fn wait_for_local_command<T: Send + 'static>(
     wait_context: WaitContext<'_>,
-    mut handle: tokio::task::JoinHandle<anyhow::Result<String>>,
-) -> anyhow::Result<anyhow::Result<String>> {
+    mut handle: tokio::task::JoinHandle<anyhow::Result<T>>,
+) -> anyhow::Result<anyhow::Result<T>> {
     let WaitContext {
         mut render,
         history,

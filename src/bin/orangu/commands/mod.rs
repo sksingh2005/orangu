@@ -165,6 +165,11 @@ pub enum CommandOutcome {
     Review(ReviewLaunch),
     /// Enter the LLM-driven `/auto_review` mode with a collected branch diff.
     AutoReview(ReviewLaunch),
+    /// Scan the workspace for duplicated functions at the given similarity
+    /// threshold (`0.0`–`1.0`), then show the report and cache it so a later
+    /// `/export duplicates` can reuse it without re-scanning. Run off the UI
+    /// thread (like [`CommandOutcome::Blocking`]) since the scan can be slow.
+    Duplicates(f64),
     /// Write the console output window or the last review report to a PDF in
     /// the workspace root.
     Export(ExportTarget),
@@ -290,11 +295,14 @@ pub enum ExportTarget {
     Review,
     /// The last `/auto_review` report specifically (`export auto review`).
     AutoReview,
+    /// A fresh duplicate-code report for the workspace (`export duplicates`),
+    /// computed at export time.
+    Duplicates,
 }
 
 /// The `/export` target words, in offer order, used for Tab completion and the
 /// inline ghost. Kept in step with [`parse_export_target`].
-pub const EXPORT_TARGETS: [&str; 3] = ["console", "review", "auto review"];
+pub const EXPORT_TARGETS: [&str; 4] = ["console", "review", "auto review", "duplicates"];
 
 /// A `/bisect` subcommand, wrapping `git bisect`. The `Start`, `Good`, `Bad`,
 /// and `Skip` variants carry an optional commit/rev argument; when it is `None`
@@ -347,6 +355,12 @@ pub enum LocalCommand<'a> {
     /// `/auto_review [<file>] [immediate]`: an optional single-file target and
     /// whether to start the run at once (the `immediate` keyword).
     AutoReview(Option<Cow<'a, str>>, bool),
+    /// `/duplicates [<threshold>]`: scan the workspace for duplicated functions
+    /// (across every language in [`orangu::duplicates::LANGUAGES`]) and print a
+    /// similarity report. The optional argument overrides
+    /// the default similarity threshold (a percentage `1`–`100`, or a fraction
+    /// `0.0`–`1.0`); `None` uses [`orangu::duplicates::DEFAULT_THRESHOLD`].
+    Duplicates(Option<f64>),
     Status,
     Log(Option<u64>),
     /// `/show [<commit>]`: show a single commit (header plus diff). `None`

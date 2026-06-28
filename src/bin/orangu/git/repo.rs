@@ -146,6 +146,87 @@ pub fn git_repository_name(repo_root: &Path) -> Option<String> {
     repository_name_from_url(url.trim())
 }
 
+/// A repository's web home on a known forge, derived from its `origin` remote.
+pub struct ForgeWeb {
+    /// The repository's web base, e.g. `https://github.com/owner/repo` (no
+    /// trailing slash, no `.git`).
+    pub base: String,
+    /// `true` for GitLab (whose blob path is `/-/blob/…` and whose multi-line
+    /// fragment is `#L10-20`), `false` for GitHub (`/blob/…`, `#L10-L20`).
+    pub gitlab: bool,
+}
+
+impl ForgeWeb {
+    /// The web URL for `path` (repository-root-relative, forward slashes) at
+    /// `git_ref`, highlighting lines `start`–`end` (1-based). A single line when
+    /// `start == end`.
+    pub fn blob_url(&self, git_ref: &str, path: &str, start: usize, end: usize) -> String {
+        let fragment = if start == end {
+            format!("#L{start}")
+        } else if self.gitlab {
+            format!("#L{start}-{end}")
+        } else {
+            format!("#L{start}-L{end}")
+        };
+        let blob = if self.gitlab { "/-/blob/" } else { "/blob/" };
+        format!("{}{blob}{git_ref}/{path}{fragment}", self.base)
+    }
+}
+
+/// The GitHub/GitLab web home for the repository at `repo_root`, parsed from its
+/// `origin` remote URL. Returns `None` when there is no `origin`, the URL cannot
+/// be parsed, or the host is neither `github.com` nor `gitlab.com` (self-hosted
+/// instances are not assumed) — callers then leave source references as plain
+/// text.
+pub fn forge_web_from_origin(repo_root: &Path) -> Option<ForgeWeb> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    forge_web_from_url(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+/// Parse a remote URL into a [`ForgeWeb`]. Handles HTTPS (`https://host/owner/repo`),
+/// scp-style SSH (`git@host:owner/repo`), and `ssh://git@host/owner/repo` forms,
+/// each optionally `.git`-suffixed. Only `github.com` and `gitlab.com` are
+/// recognised.
+pub fn forge_web_from_url(url: &str) -> Option<ForgeWeb> {
+    let url = url.trim();
+    // Reduce every form to `host/owner/repo…` (no scheme, no user@).
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("ssh://"))
+        .unwrap_or(url);
+    let without_user = without_scheme
+        .rsplit_once('@')
+        .map(|(_, rest)| rest)
+        .unwrap_or(without_scheme);
+    // scp syntax uses `host:owner/repo`; normalise the first `:` to `/`.
+    let normalised = without_user.replacen(':', "/", 1);
+    let path = normalised.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+
+    let (host, owner_repo) = path.split_once('/')?;
+    if owner_repo.is_empty() || !owner_repo.contains('/') {
+        return None;
+    }
+    let gitlab = match host {
+        "github.com" => false,
+        "gitlab.com" => true,
+        _ => return None,
+    };
+    Some(ForgeWeb {
+        base: format!("https://{host}/{owner_repo}"),
+        gitlab,
+    })
+}
+
 /// Extract the repository name from a remote URL: drop any trailing slashes and
 /// `.git` suffix, then take the segment after the last `/` or `:`.
 fn repository_name_from_url(url: &str) -> Option<String> {

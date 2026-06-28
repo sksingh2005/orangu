@@ -48,6 +48,8 @@ orangu is the lean, private, Git-centric coding companion for the terminal — b
 
 **Advanced Context Compression Engine.** orangu protects the LLM's context window and minimizes latency using a state-of-the-art compression pipeline. Features include AST-aware file downsampling, an intelligent Git diff engine, session fingerprinting, secret redaction, and automatic transcript compaction. See the [Compression](doc/manual/en/75-compression.md) manual for details.
 
+**Duplicate-code detection.** `/duplicates` parses every function in the workspace — across more than 20 languages (Rust, C/C++, C#, Go, Java, Python, JavaScript/TypeScript, Ruby, PHP, and more) — into a tree-sitter AST and scores each same-language pair with the Sørensen–Dice coefficient over their AST node bigrams, so functions that share a *shape* — even with different names and values — surface as similarity-ranked candidates for you to review. Save the report to a PDF with `/export duplicates`. See the [`/duplicates`](doc/manual/en/41-core_tools.md) tool.
+
 **Multiple workspaces as tabs.** Open several projects at once in one orangu instead of one instance per project. Each workspace is a tab with its own session, scrollback, pending queue, and command history; switch with `Alt+,`/`Alt+.` or the `/workspace` command, open and close tabs with `/create_workspace <dir>` / `/delete_workspace` (or `Alt+Insert`/`Alt+Delete`), and reopen the last set of tabs at startup with `-a`/`--all`. See the [Workspaces](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/31-workspaces.md) chapter.
 
 **Agent Skills & Workspace Memory.** orangu discovers skills from four locations: `~/.orangu/skills/`, `~/.agents/skills/`, `<workspace>/.orangu/skills/`, and `<workspace>/.agents/skills/`. At startup it discloses only each skill's name, description, and `SKILL.md` location to the model. Additionally, `orangu` automatically scans for `AGENTS.md` files in your home directory and workspace root, injecting persistent project instructions and long-term memory into every chat and review session.
@@ -61,7 +63,7 @@ orangu is the lean, private, Git-centric coding companion for the terminal — b
 - Queued local commands while a response is in flight, plus double-`Esc` request cancellation
 - Markdown rendering in the console (bold, italic, headings, lists, links, code) with syntax highlighting for fenced code blocks
 
-**Share what you produce.** Export the output window or the last review report to a PDF in the workspace root (`/export console`, `/export review`), or post a review straight onto an issue or pull request with `/comment <number> with review` / `with auto review`.
+**Share what you produce.** Export the output window, the last review report, or a duplicate-code report to a PDF in the workspace root (`/export console`, `/export review`, `/export duplicates`), or post a review straight onto an issue or pull request with `/comment <number> with review` / `with auto review`.
 
 **Works offline, end to end.** Even the built-in user manual (`/manual`) — a two-pane viewer with full-text search (`Alt+S`) — is embedded in the binary at compile time, so the docs are there with no network.
 

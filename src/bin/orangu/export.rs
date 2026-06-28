@@ -46,9 +46,9 @@ use markdown::{
     to_mdast,
 };
 use printpdf::{
-    Actions, BorderArray, BuiltinFont, Color, Line, LinePoint, LinkAnnotation, Mm, Op, PaintMode,
-    ParsedFont, PdfDocument, PdfFontHandle, PdfPage, PdfSaveOptions, Point, Pt, Rect, Rgb,
-    TextItem,
+    Actions, BorderArray, BuiltinFont, Color, Destination, Line, LinePoint, LinkAnnotation, Mm, Op,
+    PaintMode, ParsedFont, PdfDocument, PdfFontHandle, PdfPage, PdfSaveOptions, Point, Pt, Rect,
+    Rgb, TextItem,
 };
 use std::{
     fs::File,
@@ -61,10 +61,13 @@ use std::{
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 
+use orangu::duplicates::{DuplicatesReport, FunctionLocation};
 use orangu::tui::TranscriptLine;
 
 use crate::VERSION;
-use crate::git::{discover_git_root, git_repository_name, workspace_branch_name};
+use crate::git::{
+    ForgeWeb, discover_git_root, forge_web_from_origin, git_repository_name, workspace_branch_name,
+};
 use crate::render::{SyntaxHighlightAssets, syntax_highlight_assets};
 
 /// One finding in the `/auto_review` source appendix: the category it belongs
@@ -173,6 +176,10 @@ struct Block {
     hanging_mm: f32,
     word_wrap: bool,
     space_after_mm: f32,
+    /// When set, every drawn line of this block is underlined and made a
+    /// clickable hyperlink to this URL (used for the duplicates export's source
+    /// links). `None` for ordinary text.
+    link: Option<String>,
 }
 
 impl Block {
@@ -184,6 +191,7 @@ impl Block {
             hanging_mm: 0.0,
             word_wrap: true,
             space_after_mm: BODY_SIZE * 0.5 * PT_TO_MM,
+            link: None,
         }
     }
 }
@@ -224,6 +232,7 @@ pub fn export_console(
             // Mirror the terminal: hard-wrap long lines instead of reflowing words.
             word_wrap: false,
             space_after_mm: 0.0,
+            link: None,
         });
     }
     let mut pdf = Pdf::new(&header_label(workspace), model)?;
@@ -296,6 +305,184 @@ pub fn export_review(
     let path = export_file_path(workspace, "review");
     pdf.save(&path)?;
     Ok(path)
+}
+
+/// Export a duplicate-code report to a PDF in the workspace root as
+/// `{repository}-{branch}-duplicates.pdf`.
+///
+/// Laid out like the review export:
+///
+/// - **Page 1 — summary.** A table of the repository, branch, generation
+///   date/time, the threshold used, and the file/function/pair counts.
+/// - **Page 2 — table of contents.** One entry per similarity chapter with the
+///   page it starts on.
+/// - **Page 3 onward — the chapters.** The candidate pairs are grouped by their
+///   similarity percentage; each `{n}% similar` chapter starts on its own page
+///   and lists its pairs (the two function names and their source locations).
+///
+/// A report with no pairs is a summary page followed by a short note.
+pub fn export_duplicates(
+    workspace: &Path,
+    report: &DuplicatesReport,
+    model: &str,
+) -> Result<PathBuf> {
+    let repository = repository_display(workspace);
+    let branch = branch_display(workspace);
+    let mut pdf = Pdf::new(&header_label(workspace), model)?;
+
+    // Page 1 — summary statistics.
+    pdf.draw_duplicates_info_page(&repository, &branch, report);
+
+    if report.pairs.is_empty() {
+        pdf.new_page();
+        pdf.draw_blocks(&[Block::paragraph(vec![Span::plain(format!(
+            "No function pairs met the {}% similarity threshold.",
+            report.threshold_percent()
+        ))])]);
+        let path = export_file_path(workspace, "duplicates");
+        pdf.save(&path)?;
+        return Ok(path);
+    }
+
+    // One chapter (title + blocks) per similarity percentage, each on its own
+    // page. Source locations link to the forge when one is known.
+    let linker = SourceLinker::new(workspace);
+    let chapters = build_duplicate_chapters(report, &linker);
+
+    // The chapters start on page 3, each on its own page; compute where each one
+    // lands so the table of contents (page 2) can point at it.
+    let mut starts = Vec::with_capacity(chapters.len());
+    let mut page = 3;
+    for (_, blocks) in &chapters {
+        starts.push(page);
+        page += paginate(blocks, &pdf.fonts);
+    }
+
+    // Page 2 — table of contents (each entry links to its chapter).
+    let toc_rows: Vec<(&str, usize)> = chapters
+        .iter()
+        .map(|(title, _)| title.as_str())
+        .zip(starts.iter().copied())
+        .collect();
+    pdf.new_page();
+    pdf.draw_toc(&toc_rows);
+
+    // Pages 3+ — one chapter per page.
+    for (_, blocks) in &chapters {
+        pdf.new_page();
+        pdf.draw_blocks(blocks);
+    }
+
+    let path = export_file_path(workspace, "duplicates");
+    pdf.save(&path)?;
+    Ok(path)
+}
+
+/// Resolves source locations to forge (GitHub/GitLab) web URLs. Built once per
+/// export: the forge web base, the ref to link at, and the workspace's path
+/// relative to the repository root (so locations relative to the scan root map
+/// to repository-relative paths).
+struct SourceLinker {
+    forge: Option<ForgeWeb>,
+    git_ref: String,
+    /// The workspace relative to the git root, forward-slashed, with a trailing
+    /// `/` (empty when the workspace is the git root).
+    prefix: String,
+}
+
+impl SourceLinker {
+    fn new(workspace: &Path) -> Self {
+        let git_root = discover_git_root(workspace);
+        let forge = git_root.as_deref().and_then(forge_web_from_origin);
+        // Link at the current branch; `HEAD` (the default branch on both forges)
+        // when not on one.
+        let git_ref = workspace_branch_name(workspace)
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or_else(|| "HEAD".to_string());
+        let prefix = git_root
+            .as_deref()
+            .and_then(|root| workspace.strip_prefix(root).ok())
+            .map(|relative| {
+                let text = relative.to_string_lossy().replace('\\', "/");
+                if text.is_empty() {
+                    String::new()
+                } else {
+                    format!("{text}/")
+                }
+            })
+            .unwrap_or_default();
+        SourceLinker {
+            forge,
+            git_ref,
+            prefix,
+        }
+    }
+
+    /// The forge URL for a scan-root-relative location, or `None` when there is
+    /// no recognised forge.
+    fn url(&self, location: &FunctionLocation) -> Option<String> {
+        let forge = self.forge.as_ref()?;
+        let path = format!(
+            "{}{}",
+            self.prefix,
+            location.path.to_string_lossy().replace('\\', "/")
+        );
+        Some(forge.blob_url(&self.git_ref, &path, location.start_line, location.end_line))
+    }
+}
+
+/// Group a report's pairs (already sorted most-similar first, so equal
+/// percentages are contiguous) into `(title, blocks)` chapters — one per
+/// distinct similarity percentage. Each chapter opens with its `{n}% similar`
+/// heading, then per pair a `a <-> b` sub-heading and the two source-location
+/// lines (`path:start–end`, linked to the forge when available).
+fn build_duplicate_chapters(
+    report: &DuplicatesReport,
+    linker: &SourceLinker,
+) -> Vec<(String, Vec<Block>)> {
+    let mut chapters: Vec<(String, Vec<Block>)> = Vec::new();
+    for pair in &report.pairs {
+        let title = format!("{}% similar", pair.percent());
+        if chapters.last().is_none_or(|(last, _)| last != &title) {
+            let heading = heading(&title, BODY_SIZE + 3.5);
+            chapters.push((title, vec![heading]));
+        }
+        let blocks = &mut chapters.last_mut().expect("chapter pushed above").1;
+        blocks.push(heading(
+            &format!("{}  <->  {}", pair.a.name, pair.b.name),
+            BODY_SIZE + 1.0,
+        ));
+        blocks.push(location_block(&pair.a, linker));
+        blocks.push(location_block(&pair.b, linker));
+    }
+    chapters
+}
+
+/// A single source-location line: `path:start–end` (a single line number when
+/// the range is one line), drawn in the brand colour and linked to the forge
+/// when `linker` resolves a URL, otherwise plain text.
+fn location_block(location: &FunctionLocation, linker: &SourceLinker) -> Block {
+    let range = if location.start_line == location.end_line {
+        location.start_line.to_string()
+    } else {
+        format!("{}–{}", location.start_line, location.end_line)
+    };
+    let text = format!("{}:{}", location.path.display(), range);
+    let url = linker.url(location);
+    Block {
+        spans: vec![Span {
+            text,
+            bold: false,
+            italic: false,
+            color: url.as_ref().map(|_| BRAND_COLOR),
+        }],
+        size: BODY_SIZE,
+        indent_mm: 0.0,
+        hanging_mm: 0.0,
+        word_wrap: false,
+        space_after_mm: BODY_SIZE * 0.25 * PT_TO_MM,
+        link: url,
+    }
 }
 
 /// The `{repository}-{branch}` shown in the page header band, using the real
@@ -535,6 +722,7 @@ fn render_block_node(node: &Node, level: usize, blocks: &mut Vec<Block>) {
             hanging_mm: level as f32 * INDENT_MM,
             word_wrap: false,
             space_after_mm: BODY_SIZE * 0.5 * PT_TO_MM,
+            link: None,
         }),
         Node::Table(_) => render_table(node, level, blocks),
         // Definitions carry no printable text; anything else is treated as inline.
@@ -565,6 +753,7 @@ fn heading_block(heading: &Heading, level: usize) -> Block {
         hanging_mm: level as f32 * INDENT_MM,
         word_wrap: true,
         space_after_mm: size * 0.45 * PT_TO_MM,
+        link: None,
     }
 }
 
@@ -621,6 +810,7 @@ fn render_list_item(item: &ListItem, marker: &str, level: usize, blocks: &mut Ve
                     hanging_mm: indent_mm + marker_allowance,
                     word_wrap: true,
                     space_after_mm: BODY_SIZE * 0.3 * PT_TO_MM,
+                    link: None,
                 });
             }
             Node::List(sub) => render_list(sub, level + 1, blocks),
@@ -635,6 +825,7 @@ fn render_list_item(item: &ListItem, marker: &str, level: usize, blocks: &mut Ve
             hanging_mm: indent_mm + marker_allowance,
             word_wrap: true,
             space_after_mm: BODY_SIZE * 0.3 * PT_TO_MM,
+            link: None,
         });
     }
 }
@@ -659,6 +850,7 @@ fn render_code(code: &Code, level: usize, blocks: &mut Vec<Block>) {
             } else {
                 0.0
             },
+            link: None,
         });
     }
 }
@@ -684,6 +876,7 @@ fn render_table(node: &Node, level: usize, blocks: &mut Vec<Block>) {
             hanging_mm: base,
             word_wrap: false,
             space_after_mm: 0.0,
+            link: None,
         });
     }
     if !rendered.is_empty()
@@ -843,6 +1036,7 @@ fn highlight_code_blocks(
             } else {
                 0.0
             },
+            link: None,
         });
     }
     blocks
@@ -1109,6 +1303,29 @@ impl Pdf {
                 &self.fonts,
                 default_color,
             );
+            // A linked block attaches a clickable URI annotation over the drawn
+            // text (the brand colour already marks it as a link).
+            if let Some(url) = &block.link {
+                let text: String = line.iter().map(|styled| styled.ch).collect();
+                let width = self.fonts.text_width_mm(&text, false, false, block.size);
+                let baseline = self.cursor_y;
+                self.ops.push(Op::LinkAnnotation {
+                    link: LinkAnnotation::new(
+                        Rect {
+                            x: Mm(MARGIN_MM + indent).into(),
+                            y: Mm(baseline - 1.5).into(),
+                            width: Mm(width).into(),
+                            height: Mm(block.size * PT_TO_MM + 2.5).into(),
+                            mode: None,
+                            winding_order: None,
+                        },
+                        Actions::uri(url.clone()),
+                        Some(BorderArray::Solid([0.0, 0.0, 0.0])),
+                        None,
+                        None,
+                    ),
+                });
+            }
         }
         self.cursor_y -= block.space_after_mm;
     }
@@ -1181,6 +1398,51 @@ impl Pdf {
         self.draw_status_banner(verdict);
     }
 
+    /// Page 1 of the duplicates export: the repository/branch/date and the scan
+    /// statistics (threshold, files, functions, candidate pairs).
+    fn draw_duplicates_info_page(
+        &mut self,
+        repository: &str,
+        branch: &str,
+        report: &DuplicatesReport,
+    ) {
+        self.draw_block(&heading("Duplicate code report", BODY_SIZE + 5.0));
+        let mut rows = vec![
+            ("Repository".to_string(), repository.to_string()),
+            ("Branch".to_string(), branch.to_string()),
+            ("Generated".to_string(), format_timestamp()),
+            (
+                "Threshold".to_string(),
+                format!("{}%", report.threshold_percent()),
+            ),
+            (
+                "Files scanned".to_string(),
+                report.files_scanned.to_string(),
+            ),
+            (
+                "Functions analysed".to_string(),
+                report.functions_analyzed.to_string(),
+            ),
+        ];
+        // On a branch, record what the analysis was restricted to.
+        if let orangu::duplicates::Scope::Patch {
+            base,
+            new_functions,
+        } = &report.scope
+        {
+            rows.push(("Compared against".to_string(), base.clone()));
+            rows.push((
+                "New/changed functions".to_string(),
+                new_functions.to_string(),
+            ));
+        }
+        rows.push((
+            "Candidate pairs".to_string(),
+            report.pairs.len().to_string(),
+        ));
+        self.draw_kv_table(&rows);
+    }
+
     /// A two-column table: bold labels on the left, values on the right.
     fn draw_kv_table(&mut self, rows: &[(String, String)]) {
         let x0 = MARGIN_MM;
@@ -1243,7 +1505,9 @@ impl Pdf {
                 self.new_page();
             }
             self.cursor_y -= row_height;
-            self.text(title, false, MARGIN_MM, self.cursor_y, size, TEXT_COLOR);
+            // The entry (title and page number) links to the start of its
+            // chapter, drawn in the brand colour to read as a link.
+            self.text(title, false, MARGIN_MM, self.cursor_y, size, BRAND_COLOR);
             let number = page.to_string();
             let width = self.fonts.text_width_mm(&number, false, false, size);
             self.text(
@@ -1252,9 +1516,39 @@ impl Pdf {
                 PAGE_WIDTH_MM - MARGIN_MM - width,
                 self.cursor_y,
                 size,
-                TEXT_COLOR,
+                BRAND_COLOR,
             );
+            self.link_to_page(page, self.cursor_y - 1.0, size * PT_TO_MM + 2.0);
         }
+    }
+
+    /// Attach an internal "go to page" link spanning the content width at the
+    /// given baseline (`page` is 1-based). Used by the table of contents.
+    fn link_to_page(&mut self, page: usize, y_mm: f32, height_mm: f32) {
+        // The destination's `top` is the page height in points so the target
+        // page is shown from its top edge.
+        let top = PAGE_HEIGHT_MM / PT_TO_MM;
+        self.ops.push(Op::LinkAnnotation {
+            link: LinkAnnotation::new(
+                Rect {
+                    x: Mm(MARGIN_MM).into(),
+                    y: Mm(y_mm).into(),
+                    width: Mm(USABLE_WIDTH_MM).into(),
+                    height: Mm(height_mm).into(),
+                    mode: None,
+                    winding_order: None,
+                },
+                Actions::go_to(Destination::Xyz {
+                    page,
+                    left: Some(0.0),
+                    top: Some(top),
+                    zoom: None,
+                }),
+                Some(BorderArray::Solid([0.0, 0.0, 0.0])),
+                None,
+                None,
+            ),
+        });
     }
 
     /// Draw the header and footer bands (brand fill, centered white text) on the
@@ -1366,6 +1660,7 @@ fn heading(text: &str, size: f32) -> Block {
         hanging_mm: 0.0,
         word_wrap: true,
         space_after_mm: size * 0.6 * PT_TO_MM,
+        link: None,
     }
 }
 
@@ -1694,6 +1989,138 @@ mod tests {
         );
         let bytes = std::fs::read(&path).expect("read pdf");
         assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    fn duplicate_location(
+        path: &str,
+        name: &str,
+        start: usize,
+    ) -> orangu::duplicates::FunctionLocation {
+        orangu::duplicates::FunctionLocation {
+            path: PathBuf::from(path),
+            name: name.to_string(),
+            language: "Rust",
+            start_line: start,
+            end_line: start + 8,
+        }
+    }
+
+    #[test]
+    fn export_duplicates_renders_chapters() {
+        let workspace = tempdir().expect("workspace");
+        // Two percentage groups, so the export must build chapters and a TOC.
+        let report = DuplicatesReport {
+            root: workspace.path().to_path_buf(),
+            threshold: 0.80,
+            files_scanned: 3,
+            functions_analyzed: 6,
+            scope: orangu::duplicates::Scope::Project,
+            pairs: vec![
+                orangu::duplicates::DuplicatePair {
+                    a: duplicate_location("a.rs", "foo", 1),
+                    b: duplicate_location("b.rs", "bar", 20),
+                    similarity: 1.0,
+                },
+                orangu::duplicates::DuplicatePair {
+                    a: duplicate_location("c.rs", "baz", 5),
+                    b: duplicate_location("d.rs", "qux", 40),
+                    similarity: 0.92,
+                },
+            ],
+        };
+        let path = export_duplicates(workspace.path(), &report, "gemma").expect("export");
+        assert!(path.exists());
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("-duplicates.pdf")
+        );
+        let bytes = std::fs::read(&path).expect("read pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn export_duplicates_with_no_pairs_writes_a_pdf() {
+        let workspace = tempdir().expect("workspace");
+        let report = DuplicatesReport {
+            root: workspace.path().to_path_buf(),
+            threshold: 0.80,
+            files_scanned: 1,
+            functions_analyzed: 2,
+            scope: orangu::duplicates::Scope::Project,
+            pairs: vec![],
+        };
+        let path = export_duplicates(workspace.path(), &report, "gemma").expect("export");
+        let bytes = std::fs::read(&path).expect("read pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn duplicate_chapters_group_by_percentage() {
+        let workspace = tempdir().expect("workspace");
+        let report = DuplicatesReport {
+            root: workspace.path().to_path_buf(),
+            threshold: 0.80,
+            files_scanned: 4,
+            functions_analyzed: 8,
+            scope: orangu::duplicates::Scope::Project,
+            pairs: vec![
+                orangu::duplicates::DuplicatePair {
+                    a: duplicate_location("a.rs", "foo", 1),
+                    b: duplicate_location("b.rs", "bar", 20),
+                    similarity: 1.0,
+                },
+                orangu::duplicates::DuplicatePair {
+                    a: duplicate_location("c.rs", "qux", 5),
+                    b: duplicate_location("d.rs", "quux", 40),
+                    similarity: 1.0,
+                },
+                orangu::duplicates::DuplicatePair {
+                    a: duplicate_location("e.rs", "baz", 5),
+                    b: duplicate_location("f.rs", "corge", 40),
+                    similarity: 0.90,
+                },
+            ],
+        };
+        // No git repo in the tempdir, so locations are plain (unlinked) text.
+        let linker = SourceLinker::new(workspace.path());
+        let chapters = build_duplicate_chapters(&report, &linker);
+        // Two distinct percentages → two chapters, titled by percentage.
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].0, "100% similar");
+        assert_eq!(chapters[1].0, "90% similar");
+        // First chapter: heading + 2 pairs × (sub-heading + 2 locations) = 5 blocks.
+        assert_eq!(chapters[0].1.len(), 1 + 2 * 3);
+        // The location text uses the `path:start–end` form.
+        let location_texts: Vec<&str> = chapters[1].1[1..]
+            .iter()
+            .flat_map(|block| block.spans.iter())
+            .map(|span| span.text.as_str())
+            .collect();
+        assert!(location_texts.contains(&"e.rs:5–13"));
+    }
+
+    #[test]
+    fn forge_links_use_github_and_gitlab_formats() {
+        use crate::git::forge_web_from_url as parse;
+        let gh = parse("https://github.com/owner/repo.git").expect("github");
+        assert_eq!(
+            gh.blob_url("main", "src/a.rs", 10, 20),
+            "https://github.com/owner/repo/blob/main/src/a.rs#L10-L20"
+        );
+        let ssh = parse("git@github.com:owner/repo.git").expect("github ssh");
+        assert_eq!(
+            ssh.blob_url("main", "src/a.rs", 7, 7),
+            "https://github.com/owner/repo/blob/main/src/a.rs#L7"
+        );
+        let gl = parse("https://gitlab.com/group/proj").expect("gitlab");
+        assert_eq!(
+            gl.blob_url("dev", "x.rs", 3, 9),
+            "https://gitlab.com/group/proj/-/blob/dev/x.rs#L3-9"
+        );
+        // Unknown hosts are not linked.
+        assert!(parse("https://example.com/owner/repo.git").is_none());
     }
 
     #[test]
