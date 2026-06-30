@@ -54,6 +54,8 @@ orangu is the lean, private, Git-centric coding companion for the terminal — b
 
 **Agent Skills & Workspace Memory.** orangu discovers skills from four locations: `~/.orangu/skills/`, `~/.agents/skills/`, `<workspace>/.orangu/skills/`, and `<workspace>/.agents/skills/`. At startup it discloses only each skill's name, description, and `SKILL.md` location to the model. Additionally, `orangu` automatically scans for `AGENTS.md` files in your home directory and workspace root, injecting persistent project instructions and long-term memory into every chat and review session.
 
+**Knowledge Graph & Codebase Visualization.** orangu incrementally parses your entire codebase offline using Tree-sitter, mapping every function, class, and call into a dependency graph. The AI uses this graph to instantly pinpoint the most central code symbols for any query without flooding its context window. You can also type `/graph` to instantly generate an interactive HTML visualization of the codebase architecture that opens in any browser.
+
 **Comfortable terminal experience.**
 
 - Persistent terminal UI with workspace, server, and model status in the header, refreshed every minute while idle
@@ -289,6 +291,7 @@ Useful first commands:
 /show aafd1cb
 /squash
 /status
+/graph
 ```
 
 ## Documentation

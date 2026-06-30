@@ -72,6 +72,7 @@ pub enum SlashCommand {
     Usage,
     Build,
     Skills,
+    Graph,
     Clear,
     Quit,
 }
@@ -131,6 +132,9 @@ impl SlashCommand {
             SlashCommand::Usage => "Shows token usage statistics",
             SlashCommand::Build => "Builds the workspace project",
             SlashCommand::Skills => "Lists the discovered Agent Skills",
+            SlashCommand::Graph => {
+                "Generates an HTML visualization of the codebase Knowledge Graph"
+            }
             SlashCommand::Clear => "Clears the terminal screen",
             SlashCommand::Quit => "Exits the application",
         }

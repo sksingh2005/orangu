@@ -48,6 +48,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use orangu::{
+    agents::hooks::{rescan_changed_files, run_session_start_hook},
     config::{LlmConfiguration, default_client_config_path, load_client_configuration},
     llm::{ChatMessage, StreamMetrics, normalized_openai_endpoint},
     session::ChatSession,
@@ -353,6 +354,7 @@ async fn run() -> Result<()> {
         mut last_duplicates_report,
         mut startup_notice_until,
         mut pending_response,
+        mut last_git_diff_hash,
         active_model: initial_active_model,
         active_model_id: initial_active_model_id,
         current_endpoint: initial_current_endpoint,
@@ -401,6 +403,28 @@ async fn run() -> Result<()> {
         tokio::task::spawn_blocking(move || fetch_issue_metadata(&meta_workspace, forge))
     });
 
+    // Scan the workspace and build the initial Knowledge Graph in the background.
+    // Runs on a blocking thread so the TUI is never stalled. The handle is
+    // collected in the event loop below, exactly like `sync_handle` / `pr_handle`.
+    //
+    // `kg_store` is shared between `tools` (reads it for `graph_lookup`) and
+    // the event loop below (writes into it once the scan finishes).
+    let kg_store = tools.graph_store.clone(); // Arc pointer shared with ToolExecutor
+    let scan_workspace = tools.workspace().to_path_buf();
+    let mut kg_scan_handle: Option<tokio::task::JoinHandle<_>> =
+        Some(tokio::task::spawn_blocking(move || {
+            run_session_start_hook(&scan_workspace)
+        }));
+
+    // Per-file sha256 hashes used by the incremental KG rescan.
+    // Populated once the initial scan completes, then updated incrementally.
+    let mut kg_file_hashes: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // Handle for an in-flight incremental rescan (spawned per LLM turn when files change).
+    let mut kg_rescan_handle: Option<
+        tokio::task::JoinHandle<orangu::agents::hooks::IncrementalScanResult>,
+    > = None;
+
     // Workspace tab switching. `current_tab!()` packs the active tab's locals
     // into a `WorkspaceTab` (moving them out); `load_tab!(t)` unpacks one back
     // into them; `apply_tab_action!` parks the active tab in the ring and makes
@@ -431,6 +455,7 @@ async fn run() -> Result<()> {
                 last_duplicates_report,
                 startup_notice_until,
                 pending_response,
+                last_git_diff_hash,
                 active_model: active_model.clone(),
                 active_model_id: active_model_id.clone(),
                 current_endpoint: current_endpoint.clone(),
@@ -462,6 +487,7 @@ async fn run() -> Result<()> {
             last_duplicates_report = tab.last_duplicates_report;
             startup_notice_until = tab.startup_notice_until;
             pending_response = tab.pending_response;
+            last_git_diff_hash = tab.last_git_diff_hash;
             active_model = tab.active_model;
             active_model_id = tab.active_model_id;
             current_endpoint = tab.current_endpoint;
@@ -840,6 +866,40 @@ async fn run() -> Result<()> {
             completion::set_issue_metadata(metadata);
         }
 
+        // Collect the Knowledge Graph scan result once it finishes and push a
+        // short summary to the output pane (mirrors the sync-notice pattern).
+        if kg_scan_handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+            && let Some(handle) = kg_scan_handle.take()
+        {
+            match handle.await {
+                Ok(result) => {
+                    // Seed the per-file hash table from the initial full scan.
+                    kg_file_hashes = result
+                        .store
+                        .all_nodes()
+                        .iter()
+                        .map(|n| (n.source_file.clone(), String::new()))
+                        .collect();
+                    // Write the finished store into the shared Arc so the
+                    // `graph_lookup` tool becomes live for the agent.
+                    if let Ok(mut guard) = kg_store.lock() {
+                        *guard = Some(result.store);
+                    }
+                }
+                Err(err) => {
+                    output_state.push_text(&format!("Knowledge graph scan failed: {err:#}"));
+                }
+            }
+        }
+
+        // Collect finished incremental rescan handles (silent — no UI noise for
+        // routine re-parses; the updated store is already live via the Arc).
+        if kg_rescan_handle.as_ref().is_some_and(|h| h.is_finished()) {
+            kg_rescan_handle = None;
+        }
+
         let resume_left_status = startup_notice_until
             .filter(|&deadline| std::time::Instant::now() < deadline)
             .map(|_| StatusFragment::plain(format!("Resuming session {session_id}")));
@@ -1152,6 +1212,14 @@ async fn run() -> Result<()> {
             }
             CommandOutcome::Output(output) => {
                 output_state.push_text(&output);
+                if config.feedback {
+                    output_state.push_text(FEEDBACK_OK);
+                }
+                output_state.reset_scroll();
+                continue;
+            }
+            CommandOutcome::MarkdownOutput(output) => {
+                output_state.push_markdown(&output);
                 if config.feedback {
                     output_state.push_text(FEEDBACK_OK);
                 }
@@ -1734,6 +1802,32 @@ async fn run() -> Result<()> {
         let mut prompt_profile = profile.clone();
         prompt_profile.endpoint = endpoint.to_string();
         prompt_profile.model = active_model_id.clone();
+
+        if let Some((hash, diff)) = orangu::context::world_state::get_current_workspace_diff(
+            &workspace,
+            config.diff_file_cap,
+        )
+        .await
+            && hash != last_git_diff_hash
+        {
+            let fragment =
+                orangu::context::fragments::ContextualFragment::new("world_state_changes", &diff);
+            prompt_input = format!("{}\n\n{}", fragment.render(), prompt_input);
+            last_git_diff_hash = hash;
+
+            // Files changed — kick off an incremental KG rescan in the background
+            // only if no rescan is already in flight and the initial scan is done.
+            if kg_rescan_handle.is_none() && kg_scan_handle.is_none() {
+                let rescan_store = kg_store.clone();
+                let rescan_workspace = workspace.clone();
+                let mut hashes_snapshot = kg_file_hashes.clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    rescan_changed_files(&rescan_workspace, &rescan_store, &mut hashes_snapshot)
+                });
+                kg_rescan_handle = Some(handle);
+            }
+        }
+
         let llm_start = std::time::Instant::now();
         let tool_time_before = tools.total_tool_duration();
         let seed = std::time::SystemTime::now()

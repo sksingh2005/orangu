@@ -35,8 +35,6 @@ pub const ANSI_BOLD_ON: &str = "\x1b[1m";
 pub const ANSI_BOLD_OFF: &str = "\x1b[22m";
 pub const ANSI_ITALIC_ON: &str = "\x1b[3m";
 pub const ANSI_ITALIC_OFF: &str = "\x1b[23m";
-pub const ANSI_UNDERLINE_ON: &str = "\x1b[4m";
-pub const ANSI_UNDERLINE_OFF: &str = "\x1b[24m";
 pub const ANSI_STRIKETHROUGH_ON: &str = "\x1b[9m";
 pub const ANSI_STRIKETHROUGH_OFF: &str = "\x1b[29m";
 pub const ANSI_FG_CODE: &str = "\x1b[38;2;255;215;120m";
@@ -485,9 +483,7 @@ pub fn render_inline_node(node: &Node) -> String {
 /// styled label remains). An empty label falls back to showing the URL itself.
 pub fn render_link(label: &str, url: &str) -> String {
     let shown = if label.is_empty() { url } else { label };
-    format!(
-        "\x1b]8;;{url}\x1b\\{ANSI_FG_LINK}{ANSI_UNDERLINE_ON}{shown}{ANSI_UNDERLINE_OFF}{ANSI_FG_RESET}\x1b]8;;\x1b\\"
-    )
+    format!("\x1b]8;;{url}\x1b\\{ANSI_FG_LINK}{shown}{ANSI_FG_RESET}\x1b]8;;\x1b\\")
 }
 
 pub fn render_list(list: &List) -> String {

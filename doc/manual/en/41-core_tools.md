@@ -742,7 +742,7 @@ A file is analysed when its extension matches one of the built-in languages:
 | Language | Extensions | Language | Extensions |
 |---|---|---|---|
 | Rust | `.rs` | Scala | `.scala`, `.sc` |
-| C | `.c`, `.h` | OCaml | `.ml` |
+| C | `.c`, `.h` | OCaml | `.ml`, `.mli` |
 | C++ | `.cc`, `.cpp`, `.cxx`, `.c++`, `.hpp`, `.hh`, `.hxx` | Haskell | `.hs` |
 | C# | `.cs` | Julia | `.jl` |
 | Go | `.go` | Lua | `.lua` |
@@ -750,7 +750,7 @@ A file is analysed when its extension matches one of the built-in languages:
 | Python | `.py`, `.pyi` | Zig | `.zig` |
 | JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx` | Swift | `.swift` |
 | TypeScript | `.ts`, `.mts`, `.cts` | Dart | `.dart` |
-| TSX | `.tsx` | Erlang | `.erl` |
+| TSX | `.tsx` | Erlang | `.erl`, `.hrl` |
 | Ruby | `.rb` | PHP | `.php` |
 | Bash | `.sh`, `.bash` | | |
 
@@ -867,4 +867,37 @@ export console
 export review
 export auto review
 export duplicates
+```
+
+\newpage
+
+## /graph
+
+Generates an interactive, standalone HTML visualization of the workspace's Knowledge Graph.
+
+Orangu incrementally extracts a semantic graph of the codebase in the background using Tree-sitter. This command takes that internal graph and writes it out to `<repository>-<branch>-graph.html` (for example, `orangu-knowledge-graph-graph.html` when in the `orangu` repo on the `knowledge-graph` branch) using the `vis-network` JavaScript library. 
+
+The generated HTML file is fully self-contained (all data and scripts are embedded). You can open it directly in your web browser (e.g. `file:///path/to/project/orangu-main-graph.html`).
+
+Inside the visualization you can:
+- **Search**: Use the sidebar to quickly locate specific functions, classes, or types.
+- **Inspect**: Click on any node (function or class) to see its full location and a list of all callers (Incoming) and callees (Outgoing).
+- **Filter**: Toggle specific files on and off in the legend to unclutter the graph.
+- **Jump**: Click on any related node in the info panel to instantly jump to it and see its connections.
+
+Nodes are automatically clustered and color-coded based on the file they belong to, helping you easily visualize architectural boundaries and module dependencies.
+
+### Examples
+
+```text
+/graph
+```
+
+Natural-language forms:
+
+```text
+graph
+show graph
+generate graph
+visualize codebase
 ```

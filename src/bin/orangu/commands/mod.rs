@@ -123,6 +123,8 @@ pub enum CommandOutcome {
     Quiet,
     /// Command ran and produced informational output (success).
     Output(String),
+    /// Output rendered as Markdown.
+    MarkdownOutput(String),
     OutputWithLlmContext {
         display: String,
         llm_context: String,
@@ -412,6 +414,7 @@ pub enum LocalCommand<'a> {
     PendingList,
     PendingDelete(Option<usize>),
     Skills,
+    Graph,
 }
 
 pub struct CommandContext<'a> {

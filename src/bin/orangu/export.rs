@@ -506,7 +506,7 @@ fn export_file_path(workspace: &Path, kind: &str) -> PathBuf {
 /// The repository name, for display. Taken from the `origin` remote (so a repo
 /// cloned into a differently named directory still exports under its own name),
 /// falling back to the Git root — else the workspace — directory name.
-fn repository_display(workspace: &Path) -> String {
+pub(crate) fn repository_display(workspace: &Path) -> String {
     let root = discover_git_root(workspace).unwrap_or_else(|| workspace.to_path_buf());
     let name = git_repository_name(&root).unwrap_or_else(|| {
         root.file_name()
@@ -517,7 +517,7 @@ fn repository_display(workspace: &Path) -> String {
 }
 
 /// The current branch name, for display (`nobranch` when not on one).
-fn branch_display(workspace: &Path) -> String {
+pub(crate) fn branch_display(workspace: &Path) -> String {
     non_empty(
         workspace_branch_name(workspace).unwrap_or_default(),
         "nobranch",
@@ -535,7 +535,7 @@ fn non_empty(value: String, fallback: &str) -> String {
 /// Make a string safe for a filename: keep alphanumerics, `-`, `_`, and `.`;
 /// turn everything else (including the `/` in `feature/x`) into `-`, and
 /// collapse runs of `-`.
-fn sanitize(value: &str) -> String {
+pub(crate) fn sanitize(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {

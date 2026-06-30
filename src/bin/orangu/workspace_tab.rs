@@ -86,6 +86,9 @@ pub(crate) struct WorkspaceTab {
     /// The HTTP endpoint for the active server in this tab, or `None` when
     /// disconnected.
     pub(crate) current_endpoint: Option<String>,
+    /// The last compressed git diff (tracked + untracked) hash injected into the prompt.
+    /// Used to avoid injecting identical diffs consecutively.
+    pub(crate) last_git_diff_hash: u64,
 }
 
 impl WorkspacePath for WorkspaceTab {
@@ -248,6 +251,7 @@ impl WorkspaceTab {
             active_model,
             active_model_id,
             current_endpoint,
+            last_git_diff_hash: 0,
         })
     }
 
@@ -444,6 +448,7 @@ mod tests {
             active_model: String::new(),
             active_model_id: String::new(),
             current_endpoint: None,
+            last_git_diff_hash: 0,
         }
     }
 

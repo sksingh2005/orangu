@@ -13,6 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+use crate::graph::store::GraphStore;
 use crate::llm::{FunctionDefinition, ToolDefinition};
 use anyhow::{Result, anyhow};
 use reqwest::Client;
@@ -42,6 +43,9 @@ pub struct ToolExecutor {
     diff_file_cap: usize,
     pub session_dir: Option<PathBuf>,
     pub compression_store: Arc<crate::compression_cache::CompressionStore>,
+    /// Shared knowledge graph, populated by the startup scan.
+    /// `None` while the background scan is still running.
+    pub graph_store: Arc<Mutex<Option<GraphStore>>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -126,6 +130,7 @@ impl ToolExecutor {
                 session_dir.clone(),
             )),
             session_dir,
+            graph_store: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -233,6 +238,23 @@ impl ToolExecutor {
                 "required": ["id"]
             }),
         ));
+        defs.push(tool(
+            "graph_lookup",
+            "Query the workspace Knowledge Graph by symbol name. Returns the matching \n\
+             node(s) together with their callers (in-edges) and callees (out-edges). \n\
+             Use this to understand what calls a function, what a struct depends on, \n\
+             or whether there are circular dependencies — without reading files manually.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Symbol name or partial name to search for (case-insensitive)"
+                    }
+                },
+                "required": ["symbol"]
+            }),
+        ));
 
         defs
     }
@@ -268,6 +290,7 @@ impl ToolExecutor {
             "fetch_url" => self.fetch_url(arguments).await,
             "run_shell_command" => self.run_shell_command(arguments).await,
             "expand_context" => self.expand_context(arguments).await,
+            "graph_lookup" => self.graph_lookup(arguments),
             _ => Err(anyhow!("unknown tool '{}'", name)),
         };
         if let Ok(mut d) = self.tool_duration.lock() {
@@ -284,6 +307,42 @@ impl ToolExecutor {
         match self.compression_store.retrieve(id) {
             Ok(content) => Ok(content),
             Err(e) => Err(anyhow!("Error retrieving content: {}", e)),
+        }
+    }
+
+    fn graph_lookup(&self, arguments: &Map<String, Value>) -> Result<String> {
+        let symbol = arguments
+            .get("symbol")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing 'symbol' argument"))?;
+
+        let guard = self
+            .graph_store
+            .lock()
+            .map_err(|_| anyhow!("graph_store mutex poisoned"))?;
+
+        match &*guard {
+            None => Ok(format!(
+                "[graph_lookup] The Knowledge Graph is still being built. \
+                 Try again in a moment.\n(Searched for: \"{}\")",
+                symbol
+            )),
+            Some(store) => {
+                let results = store.lookup(symbol);
+                if results.is_empty() {
+                    Ok(format!(
+                        "[graph_lookup] No symbol matching \"{}\" found in the Knowledge Graph.\n\
+                         Tip: try a shorter partial name (e.g. \"session\" instead of \"ChatSession\").",
+                        symbol
+                    ))
+                } else {
+                    Ok(results
+                        .iter()
+                        .map(|r| r.format())
+                        .collect::<Vec<_>>()
+                        .join("\n---\n"))
+                }
+            }
         }
     }
 

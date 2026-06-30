@@ -905,6 +905,44 @@ pub(crate) fn handle_command(
             "Usage: /pending delete <number>. Use /pending to list.".to_string(),
         )),
         LocalCommand::PendingDelete(Some(index)) => Ok(CommandOutcome::PendingDelete(index)),
+        LocalCommand::Graph => {
+            let guard = tools
+                .graph_store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("graph store mutex poisoned"))?;
+            match &*guard {
+                None => Ok(CommandOutcome::OutputError(
+                    "Knowledge Graph is still being built — please wait a moment and try again."
+                        .to_string(),
+                )),
+                Some(store) => {
+                    let repo_name = crate::export::repository_display(workspace);
+                    let repo_name = crate::export::sanitize(&repo_name);
+                    let branch_name = crate::export::branch_display(workspace);
+                    let branch_name = crate::export::sanitize(&branch_name);
+                    match orangu::graph::html::write_html(
+                        store,
+                        workspace,
+                        &repo_name,
+                        &branch_name,
+                    ) {
+                        Ok(path) => {
+                            let stats = store.stats();
+                            let file_url = format!("file://{}", path.display());
+                            let path_display =
+                                path.file_name().unwrap_or_default().to_string_lossy();
+                            Ok(CommandOutcome::MarkdownOutput(format!(
+                                "Knowledge Graph written to:\n  [{path_display}]({file_url})\nExtracted {} nodes and {} edges.",
+                                stats.node_count, stats.edge_count
+                            )))
+                        }
+                        Err(err) => Ok(CommandOutcome::OutputError(format!(
+                            "Failed to generate graph: {err:#}"
+                        ))),
+                    }
+                }
+            }
+        }
     }
 }
 

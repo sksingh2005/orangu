@@ -13,19 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-pub mod agents;
-pub mod compression;
-pub mod compression_cache;
-pub mod config;
-pub mod context;
-pub mod diff;
-pub mod duplicates;
-pub mod explorer;
-pub mod graph;
-pub mod llm;
-
-pub mod session;
-pub mod skills;
-pub mod tools;
-pub mod tui;
-pub mod workspaces;
+pub mod cache;
+pub mod extract;
+pub mod html;
+pub mod store;

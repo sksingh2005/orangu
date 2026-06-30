@@ -13,6 +13,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+pub mod fragments;
+pub mod world_state;
+
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::Metadata;
