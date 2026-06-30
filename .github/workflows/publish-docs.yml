@@ -23,12 +23,18 @@ jobs:
           mkdir -p target/web-doc
           MANUAL=doc/manual/en
           TMPL=doc/manual/web-template.html
+          # The link reference definitions ([orangu], [llama], community links,
+          # etc.) live in 99-references.md. Pandoc resolves reference-style links
+          # only when that file is supplied alongside each page, so it is passed
+          # as a second input to every conversion; otherwise the links render as
+          # raw "[text][ref]" text.
+          REFS="$MANUAL/99-references.md"
           PANDOC="pandoc --template $TMPL --toc --toc-depth=2 -f markdown-smart+raw_tex -t html5"
 
           # source file:output page:page title
           while IFS=: read -r src out title; do
             src=$(echo "$src" | xargs); out=$(echo "$out" | xargs); title=$(echo "$title" | xargs)
-            $PANDOC "$MANUAL/$src" --metadata "title=$title" -o "target/web-doc/$out"
+            $PANDOC "$MANUAL/$src" "$REFS" --metadata "title=$title" -o "target/web-doc/$out"
             echo "  $src → $out"
           done <<'PAGES'
           01-introduction.md:introduction.html:Introduction
@@ -44,15 +50,25 @@ jobs:
           73-openai.md:local-llm.html:Local LLM
           PAGES
 
-      - name: Push to website repo
-        env:
-          WEBSITE_PAT: ${{ secrets.WEBSITE_PAT }}
+      # Check out the website repo with the PAT. actions/checkout passes the
+      # token as a base64 Authorization header rather than inlining it in the
+      # clone URL, so tokens containing URL-significant characters (#, @, /)
+      # can never corrupt the remote URL.
+      - name: Check out website repo
+        uses: actions/checkout@v5
+        with:
+          repository: mnemosyne-systems/mnemosyne-systems.github.io
+          token: ${{ secrets.WEBSITE_PAT }}
+          path: website
+
+      - name: Commit and push docs
         run: |
           set -euo pipefail
-          git clone \
-            "https://x-access-token:${WEBSITE_PAT}@github.com/mnemosyne-systems/mnemosyne-systems.github.io.git" \
-            website
           cp target/web-doc/*.html website/orangu/doc/
+          # Copy manual images (e.g. the terminal screenshot referenced by the
+          # introduction) so image links resolve on the published pages.
+          mkdir -p website/orangu/doc/images
+          cp doc/images/*.png website/orangu/doc/images/
           cd website
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
