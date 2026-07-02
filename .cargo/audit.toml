@@ -4,5 +4,7 @@ ignore = [
     "RUSTSEC-2025-0141", # bincode is pulled in by syntect
     "RUSTSEC-2026-0187", # lopdf is pulled in by printpdf; orangu only generates PDFs, never parses untrusted input
     "RUSTSEC-2024-0370", # proc-macro-error (unmaintained) pulled in transitively via printpdf -> allsorts -> ouroboros; build-time only
+    "RUSTSEC-2026-0194", # quick-xml is pulled in by plist -> syntect; orangu only calls ThemeSet::load_defaults()/SyntaxSet::load_defaults_newlines(), which read compiled-in dumps, never syntect's plist-XML loading path
+    "RUSTSEC-2026-0195", # same quick-xml/plist/syntect path as RUSTSEC-2026-0194, and unreachable for the same reason
 ]
 informational_warnings = ["unmaintained"]
