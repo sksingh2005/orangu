@@ -72,9 +72,11 @@ pub fn build_output(
         || workspace.join("setup.cfg").exists()
     {
         python_build(workspace, profile, sink)
+    } else if workspace.join("go.mod").exists() {
+        go_build(workspace, profile, compile_workers, sink)
     } else {
         Err(anyhow!(
-            "no supported project found (expected Cargo.toml, CMakeLists.txt, configure, meson.build, pom.xml, pyproject.toml, setup.py, or setup.cfg)"
+            "no supported project found (expected Cargo.toml, CMakeLists.txt, configure, meson.build, pom.xml, pyproject.toml, setup.py, setup.cfg, or go.mod)"
         ))
     }
 }
@@ -452,6 +454,39 @@ fn python_build(workspace: &Path, _profile: BuildProfile, sink: &BuildSink) -> R
         "pip install -e .",
         make_cmd("pip", &["install", "-e", "."], workspace),
     )?;
+    Ok(())
+}
+
+/// Go projects (`go.mod` at the workspace root). Go has no separate
+/// debug/release artifact; debug instead disables optimizations and inlining
+/// (`-gcflags=all=-N -l`), mirroring the C backends' `-O0` so a debugger (e.g.
+/// delve) can step through unoptimized code. Release passes no extra flags.
+fn go_build(
+    workspace: &Path,
+    profile: BuildProfile,
+    compile_workers: usize,
+    sink: &BuildSink,
+) -> Result<()> {
+    let mut steps = BuildSteps::new(sink);
+
+    let gcflags_arg = match profile {
+        BuildProfile::Debug => Some("-gcflags=all=-N -l".to_string()),
+        BuildProfile::Release => None,
+    };
+    // `0` means unused: omit `-p` and let `go build` pick its own default
+    // parallelism.
+    let jobs_arg = (compile_workers > 0).then(|| format!("-p={compile_workers}"));
+
+    let mut args = vec!["build"];
+    if let Some(arg) = gcflags_arg.as_deref() {
+        args.push(arg);
+    }
+    if let Some(arg) = jobs_arg.as_deref() {
+        args.push(arg);
+    }
+    args.push("./...");
+    steps.run("go build", make_cmd("go", &args, workspace))?;
+
     Ok(())
 }
 
