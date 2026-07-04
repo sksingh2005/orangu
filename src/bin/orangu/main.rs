@@ -395,16 +395,11 @@ async fn run() -> Result<()> {
     // reachable at startup. Resolve the candidate server by role and probe its
     // `/v1/embeddings`; a chat-only server (no embedding model loaded) fails the
     // probe and search stays dormant. Holds the resolved server name, or empty.
-    // A failed probe prints its reason once, so "not detected" is diagnosable
-    // instead of a silent dead end.
     let embeddings_server: String = match config.embeddings_server() {
         Some(name) => match config.llms.get(&name) {
             Some(profile) => match orangu::embeddings::probe_endpoint(profile).await {
                 Ok(()) => name,
-                Err(reason) => {
-                    output_state.push_text(&format!("Semantic /search unavailable: {reason}"));
-                    String::new()
-                }
+                Err(_) => String::new(),
             },
             None => String::new(),
         },
