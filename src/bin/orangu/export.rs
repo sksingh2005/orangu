@@ -66,7 +66,8 @@ use orangu::tui::TranscriptLine;
 
 use crate::VERSION;
 use crate::git::{
-    ForgeWeb, discover_git_root, forge_web_from_origin, git_repository_name, workspace_branch_name,
+    ForgeWeb, PullRequestDetail, PullRequestReviewer, discover_git_root, forge_web_from_origin,
+    git_repository_name, workspace_branch_name,
 };
 use crate::render::{SyntaxHighlightAssets, syntax_highlight_assets};
 
@@ -281,13 +282,14 @@ pub fn export_review(
     let appendix_start = (!appendix_blocks.is_empty()).then_some(page);
 
     // Page 2 — table of contents: every category, then the appendix.
-    let mut toc_rows: Vec<(&str, usize)> = sections
+    let mut toc_rows: Vec<(&str, usize, Option<bool>)> = sections
         .iter()
         .map(|section| section.title.as_str())
         .zip(starts.iter().copied())
+        .map(|(title, start)| (title, start, None))
         .collect();
     if let Some(start) = appendix_start {
-        toc_rows.push(("Appendix", start));
+        toc_rows.push(("Appendix", start, None));
     }
     pdf.new_page();
     pdf.draw_toc(&toc_rows);
@@ -359,10 +361,11 @@ pub fn export_duplicates(
     }
 
     // Page 2 — table of contents (each entry links to its chapter).
-    let toc_rows: Vec<(&str, usize)> = chapters
+    let toc_rows: Vec<(&str, usize, Option<bool>)> = chapters
         .iter()
         .map(|(title, _)| title.as_str())
         .zip(starts.iter().copied())
+        .map(|(title, start)| (title, start, None))
         .collect();
     pdf.new_page();
     pdf.draw_toc(&toc_rows);
@@ -376,6 +379,396 @@ pub fn export_duplicates(
     let path = export_file_path(workspace, "duplicates");
     pdf.save(&path)?;
     Ok(path)
+}
+
+/// Export a report of every open pull/merge request to `{repository}-pr.pdf`
+/// in the workspace root. Unlike the other exports, the filename carries no
+/// branch — the report covers the whole repository, not one branch.
+///
+/// `prs` is fetched from the forge by the caller.
+///
+/// - **Page 1 — pull request status.** The repository name, generation time,
+///   and the open pull requests broken down by status: open, ready for
+///   review, and conflicting.
+/// - **Page 2 — table of contents.** One entry per open pull request, `#N
+///   Title`, linking to its page.
+/// - **Page 3 onward — one page per pull request** (more when it changes
+///   many files): its title linking to the forge, a table of author, dates,
+///   branches, draft/conflict status, comment count, assignees, reviewers
+///   (with their review state), and labels, then the changed files — full
+///   path, one per line, with additions in green and deletions in red.
+///
+/// A repository with no open pull requests still gets its status page,
+/// followed by a short note instead of a table of contents and PR pages.
+pub fn export_pr(workspace: &Path, prs: &[PullRequestDetail], model: &str) -> Result<PathBuf> {
+    let repository = repository_display(workspace);
+    let mut pdf = Pdf::new(&header_label(workspace), model)?;
+
+    pdf.draw_pr_stats_page(&repository, prs);
+
+    let path = export_pr_file_path(workspace);
+    if prs.is_empty() {
+        pdf.new_page();
+        pdf.draw_blocks(&[Block::paragraph(vec![Span::plain(
+            "No open pull requests.",
+        )])]);
+        pdf.save(&path)?;
+        return Ok(path);
+    }
+
+    // One page (more when a pull request touches many files) per pull
+    // request; compute where each lands so the table of contents (page 2)
+    // can point at it. The header (title + field table) is a fixed height
+    // drawn ahead of the changed-files list, so the files are paginated from
+    // however much room is left on that first page; the "Last comment" table
+    // follows, adding one more page only if it doesn't fit where the files
+    // list left off.
+    let titles: Vec<String> = prs
+        .iter()
+        .map(|pr| format!("#{} {}", pr.number, pr.title))
+        .collect();
+    let mut starts = Vec::with_capacity(prs.len());
+    let mut page = 3;
+    for pr in prs {
+        starts.push(page);
+        let header_height = pr_header_height_mm(pr, &pdf.fonts);
+        let start_cursor = (CONTENT_TOP_MM - header_height).max(CONTENT_BOTTOM_MM);
+        let (mut pages_for_pr, cursor_after_files) =
+            paginate_from(&build_changed_file_blocks(pr), &pdf.fonts, start_cursor);
+        let comment_table_height = last_comment_table_height_mm(pr, &pdf.fonts);
+        if cursor_after_files - comment_table_height < CONTENT_BOTTOM_MM {
+            pages_for_pr += 1;
+        }
+        page += pages_for_pr;
+    }
+
+    let toc_rows: Vec<(&str, usize, Option<bool>)> = titles
+        .iter()
+        .map(String::as_str)
+        .zip(starts.iter().copied())
+        .zip(prs.iter())
+        .map(|((title, start), pr)| (title, start, Some(pr_is_ready(pr))))
+        .collect();
+    pdf.new_page();
+    pdf.draw_toc(&toc_rows);
+
+    for pr in prs {
+        pdf.new_page();
+        pdf.draw_pr_detail_page(pr);
+    }
+
+    pdf.save(&path)?;
+    Ok(path)
+}
+
+/// The linked title heading (`#N Title`, linking to the forge) for a pull
+/// request's detail page.
+fn pr_title_block(pr: &PullRequestDetail) -> Block {
+    let title_size = BODY_SIZE + 3.5;
+    Block {
+        spans: vec![Span {
+            text: format!("#{} {}", pr.number, pr.title),
+            bold: true,
+            italic: false,
+            color: None,
+        }],
+        size: title_size,
+        indent_mm: 0.0,
+        hanging_mm: 0.0,
+        word_wrap: true,
+        space_after_mm: title_size * 0.6 * PT_TO_MM,
+        link: (!pr.url.is_empty()).then(|| pr.url.clone()),
+    }
+}
+
+/// A [`Pdf::draw_kv_table`] row's value: plain text for most rows; a URL for
+/// a pull request's "Link" row, drawn brand-coloured and clickable; a URL
+/// followed by plain text (for the stats page's "Oldest"/"Newest" rows — the
+/// pull request's link, then its creation date); or — for a pull request's
+/// "Reviewers" row — the reviewer list itself, drawn with a status icon per
+/// name instead of the review state spelled out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RowValue {
+    Text(String),
+    Link(String),
+    LinkWithText(String, String),
+    Reviewers(Vec<PullRequestReviewer>),
+}
+
+/// A reviewer's status, reduced to the icon [`Pdf::draw_review_icon`] draws:
+/// a green checkmark for an approval, a red "X" for a change request (or, on
+/// GitLab, a still-outstanding review request), and a "?" for anything else —
+/// a comment, a still-pending GitHub review request, or a dismissed review,
+/// none of which are a meaningful verdict either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReviewIcon {
+    Check,
+    Cross,
+    Question,
+}
+
+fn review_icon(state: &str) -> ReviewIcon {
+    match state {
+        "Approved" => ReviewIcon::Check,
+        "Changes requested" | "Requested" => ReviewIcon::Cross,
+        _ => ReviewIcon::Question,
+    }
+}
+
+/// Whether a pull request is ready to merge as far as its own state goes:
+/// not a draft, and not reported as conflicting (a `None`/unknown mergeable
+/// state is not treated as a conflict). Drives the table of contents' green
+/// checkmark (`true`) versus red "X" (`false`) next to each entry.
+fn pr_is_ready(pr: &PullRequestDetail) -> bool {
+    !pr.draft && pr.conflicting != Some(true)
+}
+
+/// The rows of a pull request's header table: author, dates, branch,
+/// draft/conflict status, comment count, assignees, reviewers (as a status
+/// icon per name), and labels — whatever the forge returned. Each row carries
+/// whether its value should render bold: `Draft`/`Conflicts` are bold when
+/// `Yes`, so a draft or a conflict catches the eye.
+/// The rows of the pull request export's page 1 status table: the
+/// repository, generation time, the open/ready/conflicting counts, and — when
+/// there is at least one open pull request with a known creation date — the
+/// oldest and newest, each a clickable link to the pull request followed by
+/// its creation date.
+fn pr_stats_rows(repository: &str, prs: &[PullRequestDetail]) -> Vec<(String, RowValue, bool)> {
+    let ready = prs.iter().filter(|pr| !pr.draft).count();
+    let conflicts = prs.iter().filter(|pr| pr.conflicting == Some(true)).count();
+    let mut rows = vec![
+        ("Repository".to_string(), RowValue::Text(repository.to_string()), false),
+        ("Generated".to_string(), RowValue::Text(format_timestamp()), false),
+        ("Open".to_string(), RowValue::Text(prs.len().to_string()), false),
+        ("Ready".to_string(), RowValue::Text(ready.to_string()), false),
+        ("Conflicts".to_string(), RowValue::Text(conflicts.to_string()), false),
+    ];
+    let (oldest, newest) = oldest_and_newest(prs);
+    // With exactly one open pull request, "Oldest" and "Newest" would be the
+    // same entry — showing it twice is redundant, so "Oldest" is left empty
+    // rather than repeating "Newest". With none at all, both fall back to
+    // "N/A" via `pr_link_or_na`.
+    let oldest_value = if prs.len() == 1 {
+        RowValue::Text(String::new())
+    } else {
+        pr_link_or_na(oldest)
+    };
+    rows.push(("Oldest".to_string(), oldest_value, false));
+    rows.push(("Newest".to_string(), pr_link_or_na(newest), false));
+    rows
+}
+
+/// A pull request as an "Oldest"/"Newest" row value: its link and creation
+/// date, or `"N/A"` when there is none (no open pull requests, or none with
+/// a known creation date).
+fn pr_link_or_na(pr: Option<&PullRequestDetail>) -> RowValue {
+    match pr {
+        Some(pr) => RowValue::LinkWithText(pr.url.clone(), pr.created_at.clone()),
+        None => RowValue::Text("N/A".to_string()),
+    }
+}
+
+/// The oldest and newest pull request by `created_at` (an ISO-ish
+/// `YYYY-MM-DD HH:MM:SS` string, which sorts lexicographically) — `None` for
+/// either when no pull request has a known creation date. The same pull
+/// request is returned for both when there is only one.
+fn oldest_and_newest(prs: &[PullRequestDetail]) -> (Option<&PullRequestDetail>, Option<&PullRequestDetail>) {
+    let mut oldest: Option<&PullRequestDetail> = None;
+    let mut newest: Option<&PullRequestDetail> = None;
+    for pr in prs {
+        if pr.created_at.is_empty() {
+            continue;
+        }
+        if oldest.is_none_or(|current| pr.created_at < current.created_at) {
+            oldest = Some(pr);
+        }
+        if newest.is_none_or(|current| pr.created_at > current.created_at) {
+            newest = Some(pr);
+        }
+    }
+    (oldest, newest)
+}
+
+fn pr_header_rows(pr: &PullRequestDetail) -> Vec<(String, RowValue, bool)> {
+    let conflicts = match pr.conflicting {
+        Some(true) => "Yes",
+        Some(false) => "No",
+        None => "Unknown",
+    };
+    let draft = if pr.draft { "Yes" } else { "No" };
+    vec![
+        (
+            "Author".to_string(),
+            RowValue::Text(non_empty(pr.author.clone(), "unknown")),
+            false,
+        ),
+        ("Link".to_string(), RowValue::Link(pr.url.clone()), false),
+        (
+            "Created".to_string(),
+            RowValue::Text(non_empty(pr.created_at.clone(), "unknown")),
+            false,
+        ),
+        (
+            "Updated".to_string(),
+            RowValue::Text(non_empty(pr.updated_at.clone(), "unknown")),
+            false,
+        ),
+        ("Branch".to_string(), RowValue::Text(pr.head.clone()), false),
+        ("Draft".to_string(), RowValue::Text(draft.to_string()), draft == "Yes"),
+        (
+            "Conflicts".to_string(),
+            RowValue::Text(conflicts.to_string()),
+            conflicts == "Yes",
+        ),
+        (
+            "Comments".to_string(),
+            RowValue::Text(pr.comment_count.to_string()),
+            false,
+        ),
+        (
+            "Assignees".to_string(),
+            RowValue::Text(list_or_none(&pr.assignees)),
+            false,
+        ),
+        ("Reviewers".to_string(), RowValue::Reviewers(pr.reviewers.clone()), false),
+        (
+            "Labels".to_string(),
+            RowValue::Text(list_or_none(&pr.labels)),
+            false,
+        ),
+    ]
+}
+
+/// The vertical space (mm) a pull request page's fixed header — the title
+/// heading plus the field table — occupies, before the changed-files list
+/// starts. Mirrors [`Pdf::draw_pr_detail_page`]'s layout exactly, so the
+/// table of contents can compute accurate page numbers without drawing.
+fn pr_header_height_mm(pr: &PullRequestDetail, fonts: &DocFonts) -> f32 {
+    let title = pr_title_block(pr);
+    let title_line_height = title.size * 1.35 * PT_TO_MM;
+    let title_lines = wrap_block(&title, fonts).len() as f32;
+    let title_height = title_lines * title_line_height + title.space_after_mm;
+
+    let row_height = BODY_SIZE * 1.9 * PT_TO_MM;
+    let table_height = pr_header_rows(pr).len() as f32 * row_height + 8.0;
+
+    title_height + table_height
+}
+
+/// One line per changed file: its full path, then its added-line count in
+/// green and removed-line count in red. Empty when the forge did not return a
+/// diff (GitLab's merge-request list endpoint never does).
+/// Extra breathing room (mm), on top of a changed-file line's normal
+/// trailing gap, left after the last one — so the "Last comment" table that
+/// follows doesn't crowd the changed files. Added to the last block's
+/// `space_after_mm` so both the real draw (`draw_blocks`) and the table of
+/// contents' page-count simulation (`paginate_from`, which also sums
+/// `space_after_mm`) account for it identically.
+const LAST_COMMENT_GAP_MM: f32 = 6.0;
+
+fn build_changed_file_blocks(pr: &PullRequestDetail) -> Vec<Block> {
+    let mut blocks: Vec<Block> = pr
+        .files
+        .iter()
+        .map(|file| Block {
+            spans: vec![
+                Span::plain(format!("{}  ", file.path)),
+                Span {
+                    text: format!("+{}", file.additions),
+                    bold: false,
+                    italic: false,
+                    color: Some(STATUS_GREEN),
+                },
+                Span::plain("  "),
+                Span {
+                    text: format!("-{}", file.deletions),
+                    bold: false,
+                    italic: false,
+                    color: Some(STATUS_RED),
+                },
+            ],
+            size: BODY_SIZE,
+            indent_mm: 0.0,
+            hanging_mm: 4.0,
+            word_wrap: false,
+            space_after_mm: BODY_SIZE * 0.25 * PT_TO_MM,
+            link: None,
+        })
+        .collect();
+    if let Some(last) = blocks.last_mut() {
+        last.space_after_mm += LAST_COMMENT_GAP_MM;
+    }
+    blocks
+}
+
+fn list_or_none(items: &[String]) -> String {
+    if items.is_empty() {
+        "none".to_string()
+    } else {
+        items.join(", ")
+    }
+}
+
+/// The comment body length above which [`truncate_comment`] cuts it off —
+/// bounds the "Last comment" table's height so it stays small and its size
+/// predictable ahead of drawing (see [`last_comment_table_height_mm`]).
+const LAST_COMMENT_MAX_CHARS: usize = 500;
+
+/// Cut `body` to [`LAST_COMMENT_MAX_CHARS`] characters, appending an ellipsis
+/// when it was longer. Left whole otherwise.
+fn truncate_comment(body: &str) -> String {
+    if body.chars().count() <= LAST_COMMENT_MAX_CHARS {
+        return body.to_string();
+    }
+    let mut truncated: String = body.chars().take(LAST_COMMENT_MAX_CHARS).collect();
+    truncated.push('…');
+    truncated
+}
+
+/// The "Last comment" table's geometry (the author/comment column divider,
+/// the row height) and the comment's wrapped, truncated lines — shared by
+/// [`Pdf::draw_last_comment_table`] and [`last_comment_table_height_mm`] so
+/// they can never drift apart.
+fn last_comment_table_layout(author: &str, body: &str, fonts: &DocFonts) -> (f32, f32, Vec<String>) {
+    let x0 = MARGIN_MM;
+    let x1 = PAGE_WIDTH_MM - MARGIN_MM;
+    let row_height = BODY_SIZE * 1.9 * PT_TO_MM;
+    let author_width = fonts.text_width_mm(author, false, false, BODY_SIZE);
+    let divider = (x0 + 6.0 + author_width.max(20.0) + 6.0).min(x1 - 40.0);
+    let comment_width = (x1 - divider - 6.0).max(20.0);
+    let chars: Vec<StyledChar> = truncate_comment(body)
+        .chars()
+        .map(|ch| StyledChar {
+            ch,
+            bold: false,
+            italic: false,
+            color: None,
+        })
+        .collect();
+    let lines = wrap(&chars, comment_width, comment_width, true, fonts, BODY_SIZE)
+        .into_iter()
+        .map(|line| line.into_iter().map(|styled| styled.ch).collect())
+        .collect();
+    (divider, row_height, lines)
+}
+
+/// The vertical space (mm) the "Last comment" table occupies, for a pull
+/// request with (or without) a comment — `"N/A"`/`"N/A"` when there is none,
+/// matching what [`Pdf::draw_pr_detail_page`] actually draws.
+fn last_comment_table_height_mm(pr: &PullRequestDetail, fonts: &DocFonts) -> f32 {
+    let (author, body) = match &pr.last_comment {
+        Some(comment) => (comment.author.as_str(), comment.body.as_str()),
+        None => ("N/A", "N/A"),
+    };
+    let (_, row_height, lines) = last_comment_table_layout(author, body, fonts);
+    row_height + lines.len().max(1) as f32 * row_height + 8.0
+}
+
+/// `{repository}-pr.pdf` in the workspace root — no branch, since the report
+/// covers every open pull request in the repository, not one branch.
+fn export_pr_file_path(workspace: &Path) -> PathBuf {
+    let repository = non_empty(sanitize(&repository_display(workspace)), "workspace");
+    workspace.join(format!("{repository}-pr.pdf"))
 }
 
 /// Resolves source locations to forge (GitHub/GitLab) web URLs. Built once per
@@ -1387,12 +1780,16 @@ impl Pdf {
     ) {
         self.draw_block(&heading("Review", BODY_SIZE + 5.0));
         let mut rows = vec![
-            ("Repository".to_string(), repository.to_string()),
-            ("Branch".to_string(), branch.to_string()),
-            ("Generated".to_string(), format_timestamp()),
+            ("Repository".to_string(), RowValue::Text(repository.to_string()), false),
+            ("Branch".to_string(), RowValue::Text(branch.to_string()), false),
+            ("Generated".to_string(), RowValue::Text(format_timestamp()), false),
         ];
         for section in sections {
-            rows.push((section.title.clone(), section.entry_count.to_string()));
+            rows.push((
+                section.title.clone(),
+                RowValue::Text(section.entry_count.to_string()),
+                false,
+            ));
         }
         self.draw_kv_table(&rows);
         self.draw_status_banner(verdict);
@@ -1408,20 +1805,23 @@ impl Pdf {
     ) {
         self.draw_block(&heading("Duplicate code report", BODY_SIZE + 5.0));
         let mut rows = vec![
-            ("Repository".to_string(), repository.to_string()),
-            ("Branch".to_string(), branch.to_string()),
-            ("Generated".to_string(), format_timestamp()),
+            ("Repository".to_string(), RowValue::Text(repository.to_string()), false),
+            ("Branch".to_string(), RowValue::Text(branch.to_string()), false),
+            ("Generated".to_string(), RowValue::Text(format_timestamp()), false),
             (
                 "Threshold".to_string(),
-                format!("{}%", report.threshold_percent()),
+                RowValue::Text(format!("{}%", report.threshold_percent())),
+                false,
             ),
             (
                 "Files scanned".to_string(),
-                report.files_scanned.to_string(),
+                RowValue::Text(report.files_scanned.to_string()),
+                false,
             ),
             (
                 "Functions analysed".to_string(),
-                report.functions_analyzed.to_string(),
+                RowValue::Text(report.functions_analyzed.to_string()),
+                false,
             ),
         ];
         // On a branch, record what the analysis was restricted to.
@@ -1430,34 +1830,148 @@ impl Pdf {
             new_functions,
         } = &report.scope
         {
-            rows.push(("Compared against".to_string(), base.clone()));
+            rows.push(("Compared against".to_string(), RowValue::Text(base.clone()), false));
             rows.push((
                 "New/changed functions".to_string(),
-                new_functions.to_string(),
+                RowValue::Text(new_functions.to_string()),
+                false,
             ));
         }
         rows.push((
             "Candidate pairs".to_string(),
-            report.pairs.len().to_string(),
+            RowValue::Text(report.pairs.len().to_string()),
+            false,
         ));
         self.draw_kv_table(&rows);
     }
 
-    /// A two-column table: bold labels on the left, values on the right.
-    fn draw_kv_table(&mut self, rows: &[(String, String)]) {
+    /// Page 1 of the pull request export: the repository name, generation
+    /// time, the open pull requests broken down by status — how many are
+    /// open in total, how many are ready for review (not a draft), and how
+    /// many have merge conflicts — and the oldest/newest open pull request.
+    fn draw_pr_stats_page(&mut self, repository: &str, prs: &[PullRequestDetail]) {
+        self.draw_block(&heading("Pull Requests", BODY_SIZE + 5.0));
+        self.draw_kv_table(&pr_stats_rows(repository, prs));
+    }
+
+    /// One pull request's detail page: the linked title heading, a field
+    /// table (author, dates, branch, draft/conflict status, comment count,
+    /// assignees, reviewers, labels), then the changed files — one line per
+    /// file, full path, additions in green and deletions in red. The page is
+    /// assumed freshly started (`new_page` just called); the changed-files
+    /// list spills onto further pages on its own via `draw_blocks`' normal
+    /// overflow handling when there are many files.
+    fn draw_pr_detail_page(&mut self, pr: &PullRequestDetail) {
+        self.draw_block(&pr_title_block(pr));
+        self.draw_kv_table(&pr_header_rows(pr));
+        if !pr.files.is_empty() {
+            self.draw_blocks(&build_changed_file_blocks(pr));
+        }
+        // A single atomic page break if the table (small and bounded — see
+        // `last_comment_table_height_mm`) does not fit in what's left.
+        if self.cursor_y - last_comment_table_height_mm(pr, &self.fonts) < CONTENT_BOTTOM_MM {
+            self.new_page();
+        }
+        let (author, body) = match &pr.last_comment {
+            Some(comment) => (comment.author.as_str(), comment.body.as_str()),
+            None => ("N/A", "N/A"),
+        };
+        self.draw_last_comment_table(author, body);
+    }
+
+    /// The "Last comment" table following a pull request's changed files: a
+    /// header row spanning both columns, then one data row with the
+    /// comment's author (left) and its text (right, word-wrapped to fit).
+    /// `"N/A"`/`"N/A"` when the pull request has no comment.
+    fn draw_last_comment_table(&mut self, author: &str, body: &str) {
+        let (divider, row_height, lines) = last_comment_table_layout(author, body, &self.fonts);
+        let x0 = MARGIN_MM;
+        let x1 = PAGE_WIDTH_MM - MARGIN_MM;
+        let top = self.cursor_y;
+        let header_bottom = top - row_height;
+        let bottom = header_bottom - lines.len().max(1) as f32 * row_height;
+
+        self.text(
+            "Last comment",
+            true,
+            x0 + 3.0,
+            top - row_height * 0.68,
+            BODY_SIZE,
+            TEXT_COLOR,
+        );
+        self.text(
+            author,
+            false,
+            x0 + 3.0,
+            header_bottom - row_height * 0.68,
+            BODY_SIZE,
+            TEXT_COLOR,
+        );
+        for (index, line) in lines.iter().enumerate() {
+            let baseline = header_bottom - (index as f32 + 0.68) * row_height;
+            self.text(line, false, divider + 3.0, baseline, BODY_SIZE, TEXT_COLOR);
+        }
+
+        // Outer box, the rule under the header, and the column divider
+        // (alongside the data row only — the header spans both columns).
+        self.rule(x0, top, x1, top, GRID_COLOR, 0.4);
+        self.rule(x0, header_bottom, x1, header_bottom, GRID_COLOR, 0.4);
+        self.rule(x0, bottom, x1, bottom, GRID_COLOR, 0.4);
+        self.rule(x0, top, x0, bottom, GRID_COLOR, 0.4);
+        self.rule(x1, top, x1, bottom, GRID_COLOR, 0.4);
+        self.rule(divider, header_bottom, divider, bottom, GRID_COLOR, 0.4);
+
+        self.cursor_y = bottom - 8.0;
+    }
+
+    /// A two-column table: bold labels on the left, values on the right. Each
+    /// row is `(label, value, bold)`; `bold` renders that row's value in bold
+    /// too (used to draw attention to e.g. a pull request's `Draft`/
+    /// `Conflicts` value when it's `Yes`) — plain for the common case.
+    fn draw_kv_table(&mut self, rows: &[(String, RowValue, bool)]) {
         let x0 = MARGIN_MM;
         let label_width = rows
             .iter()
-            .map(|(key, _)| self.fonts.text_width_mm(key, true, false, BODY_SIZE))
+            .map(|(key, _, _)| self.fonts.text_width_mm(key, true, false, BODY_SIZE))
             .fold(0.0_f32, f32::max);
         let divider = x0 + 6.0 + label_width + 6.0;
-        let x1 = (divider + 70.0).min(PAGE_WIDTH_MM - MARGIN_MM);
+        // Span the full content width (page width minus margins) rather than
+        // a fixed value-column width, matching `draw_last_comment_table`.
+        let x1 = PAGE_WIDTH_MM - MARGIN_MM;
         let row_height = BODY_SIZE * 1.9 * PT_TO_MM;
         let top = self.cursor_y;
-        for (index, (key, value)) in rows.iter().enumerate() {
+        for (index, (key, value, bold)) in rows.iter().enumerate() {
             let baseline = top - (index as f32 + 0.68) * row_height;
             self.text(key, true, x0 + 3.0, baseline, BODY_SIZE, TEXT_COLOR);
-            self.text(value, false, divider + 3.0, baseline, BODY_SIZE, TEXT_COLOR);
+            match value {
+                RowValue::Text(text) => {
+                    self.text(text, *bold, divider + 3.0, baseline, BODY_SIZE, TEXT_COLOR);
+                }
+                RowValue::Link(url) if !url.is_empty() => {
+                    self.draw_link(url, divider + 3.0, baseline, *bold);
+                }
+                RowValue::Link(_) => {
+                    self.text("unknown", *bold, divider + 3.0, baseline, BODY_SIZE, TEXT_COLOR);
+                }
+                RowValue::LinkWithText(url, text) if !url.is_empty() => {
+                    self.draw_link(url, divider + 3.0, baseline, *bold);
+                    let link_width = self.fonts.text_width_mm(url, *bold, false, BODY_SIZE);
+                    self.text(
+                        &format!(" {text}"),
+                        false,
+                        divider + 3.0 + link_width,
+                        baseline,
+                        BODY_SIZE,
+                        TEXT_COLOR,
+                    );
+                }
+                RowValue::LinkWithText(_, text) => {
+                    self.text(text, *bold, divider + 3.0, baseline, BODY_SIZE, TEXT_COLOR);
+                }
+                RowValue::Reviewers(reviewers) => {
+                    self.draw_reviewer_list(reviewers, divider + 3.0, baseline);
+                }
+            }
         }
         let bottom = top - rows.len() as f32 * row_height;
         for index in 0..=rows.len() {
@@ -1468,6 +1982,84 @@ impl Pdf {
         self.rule(divider, top, divider, bottom, GRID_COLOR, 0.4);
         self.rule(x1, top, x1, bottom, GRID_COLOR, 0.4);
         self.cursor_y = bottom - 8.0;
+    }
+
+    /// Draw a clickable URL: the text in the brand colour (so it reads as a
+    /// link, matching the duplicates export's source-location links), with a
+    /// `Op::LinkAnnotation` covering the drawn text.
+    fn draw_link(&mut self, url: &str, x: f32, baseline: f32, bold: bool) {
+        self.text(url, bold, x, baseline, BODY_SIZE, BRAND_COLOR);
+        let width = self.fonts.text_width_mm(url, bold, false, BODY_SIZE);
+        self.ops.push(Op::LinkAnnotation {
+            link: LinkAnnotation::new(
+                Rect {
+                    x: Mm(x).into(),
+                    y: Mm(baseline - 1.5).into(),
+                    width: Mm(width).into(),
+                    height: Mm(BODY_SIZE * PT_TO_MM + 2.5).into(),
+                    mode: None,
+                    winding_order: None,
+                },
+                Actions::uri(url.to_string()),
+                Some(BorderArray::Solid([0.0, 0.0, 0.0])),
+                None,
+                None,
+            ),
+        });
+    }
+
+    /// Draw a pull request's reviewers, comma-separated, each name followed
+    /// by its status icon (see [`draw_review_icon`](Self::draw_review_icon))
+    /// instead of the review state spelled out. `"none"` when there are no
+    /// reviewers.
+    fn draw_reviewer_list(&mut self, reviewers: &[PullRequestReviewer], x: f32, baseline: f32) {
+        if reviewers.is_empty() {
+            self.text("none", false, x, baseline, BODY_SIZE, TEXT_COLOR);
+            return;
+        }
+        let mut cursor_x = x;
+        for (index, reviewer) in reviewers.iter().enumerate() {
+            if index > 0 {
+                let separator = ", ";
+                self.text(separator, false, cursor_x, baseline, BODY_SIZE, TEXT_COLOR);
+                cursor_x += self.fonts.text_width_mm(separator, false, false, BODY_SIZE);
+            }
+            self.text(&reviewer.login, false, cursor_x, baseline, BODY_SIZE, TEXT_COLOR);
+            cursor_x += self.fonts.text_width_mm(&reviewer.login, false, false, BODY_SIZE);
+            cursor_x += 1.5;
+            cursor_x += self.draw_review_icon(review_icon(&reviewer.state), cursor_x, baseline);
+        }
+    }
+
+    /// Draw one reviewer's status icon at `(x, baseline)`, returning the mm
+    /// width it occupies so the caller can advance past it. A green
+    /// checkmark for an approval — drawn as two short vector strokes, since
+    /// the embedded Red Hat Text font has no checkmark glyph — a bold red
+    /// "X" for a change request, or a plain "?" for anything else.
+    fn draw_review_icon(&mut self, icon: ReviewIcon, x: f32, baseline: f32) -> f32 {
+        match icon {
+            ReviewIcon::Check => self.draw_checkmark(x, baseline, BODY_SIZE, STATUS_GREEN),
+            ReviewIcon::Cross => {
+                self.text("X", true, x, baseline, BODY_SIZE, STATUS_RED);
+                self.fonts.text_width_mm("X", true, false, BODY_SIZE)
+            }
+            ReviewIcon::Question => {
+                self.text("?", false, x, baseline, BODY_SIZE, TEXT_COLOR);
+                self.fonts.text_width_mm("?", false, false, BODY_SIZE)
+            }
+        }
+    }
+
+    /// Draw a small checkmark (two vector strokes — a short down-stroke then
+    /// a longer up-stroke) at `(x, baseline)`, sized to `size`, returning its
+    /// mm width.
+    fn draw_checkmark(&mut self, x: f32, baseline: f32, size: f32, color: (f32, f32, f32)) -> f32 {
+        let h = size * 0.5 * PT_TO_MM;
+        let w = h * 1.1;
+        let mid_x = x + w * 0.4;
+        self.rule(x, baseline + h * 0.35, mid_x, baseline, color, 1.0);
+        self.rule(mid_x, baseline, x + w, baseline + h * 0.8, color, 1.0);
+        w
     }
 
     fn draw_status_banner(&mut self, verdict: Verdict) {
@@ -1495,12 +2087,15 @@ impl Pdf {
     }
 
     /// Page 2: the table of contents — each entry (categories, then the
-    /// appendix) and its starting page.
-    fn draw_toc(&mut self, rows: &[(&str, usize)]) {
+    /// appendix) and its starting page. `ok` is `Some(true)`/`Some(false)`
+    /// to draw a green checkmark/red "X" right after the title (used by the
+    /// `/export pr` table of contents to flag a draft or conflicting pull
+    /// request at a glance), or `None` to draw no icon at all.
+    fn draw_toc(&mut self, rows: &[(&str, usize, Option<bool>)]) {
         self.draw_block(&heading("Table of Contents", BODY_SIZE + 5.0));
         let size = BODY_SIZE + 1.0;
         let row_height = size * 1.8 * PT_TO_MM;
-        for &(title, page) in rows {
+        for &(title, page, ok) in rows {
             if self.cursor_y - row_height < CONTENT_BOTTOM_MM {
                 self.new_page();
             }
@@ -1508,6 +2103,14 @@ impl Pdf {
             // The entry (title and page number) links to the start of its
             // chapter, drawn in the brand colour to read as a link.
             self.text(title, false, MARGIN_MM, self.cursor_y, size, BRAND_COLOR);
+            if let Some(ok) = ok {
+                let icon_x = MARGIN_MM + self.fonts.text_width_mm(title, false, false, size) + 3.0;
+                if ok {
+                    self.draw_checkmark(icon_x, self.cursor_y, size, STATUS_GREEN);
+                } else {
+                    self.text("X", true, icon_x, self.cursor_y, size, STATUS_RED);
+                }
+            }
             let number = page.to_string();
             let width = self.fonts.text_width_mm(&number, false, false, size);
             self.text(
@@ -1667,8 +2270,18 @@ fn heading(text: &str, size: f32) -> Block {
 /// The number of pages `blocks` occupy when laid out from a fresh page — used
 /// to compute table-of-contents page numbers without drawing.
 fn paginate(blocks: &[Block], fonts: &DocFonts) -> usize {
+    paginate_from(blocks, fonts, CONTENT_TOP_MM).0
+}
+
+/// Like [`paginate`], but the first page starts with `start_cursor_y` mm of
+/// vertical room already used — by a fixed-height header drawn ahead of these
+/// blocks — instead of a fresh page's full height. Returns the page count and
+/// the cursor position after the last block, so a fixed-height element that
+/// follows (like the "Last comment" table) can be accounted for too, without
+/// redrawing.
+fn paginate_from(blocks: &[Block], fonts: &DocFonts, start_cursor_y: f32) -> (usize, f32) {
     let mut pages = 1;
-    let mut cursor_y = CONTENT_TOP_MM;
+    let mut cursor_y = start_cursor_y;
     for block in blocks {
         let line_height = block.size * 1.35 * PT_TO_MM;
         for _ in 0..wrap_block(block, fonts).len() {
@@ -1680,7 +2293,7 @@ fn paginate(blocks: &[Block], fonts: &DocFonts) -> usize {
         }
         cursor_y -= block.space_after_mm;
     }
-    pages
+    (pages, cursor_y)
 }
 
 /// Wrap a block into visual lines at the page width.
@@ -2052,6 +2665,355 @@ mod tests {
             pairs: vec![],
         };
         let path = export_duplicates(workspace.path(), &report, "gemma").expect("export");
+        let bytes = std::fs::read(&path).expect("read pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    fn sample_pull_request() -> PullRequestDetail {
+        PullRequestDetail {
+            number: 42,
+            title: "Add pull completion".to_string(),
+            author: "alice".to_string(),
+            created_at: "2026-06-01 12:30:45".to_string(),
+            updated_at: "2026-06-02 08:00:00".to_string(),
+            base: "main".to_string(),
+            head: "feature/completion".to_string(),
+            draft: false,
+            conflicting: Some(true),
+            comment_count: 3,
+            reviewers: vec![
+                crate::git::PullRequestReviewer {
+                    login: "bob".to_string(),
+                    state: "Approved".to_string(),
+                },
+                crate::git::PullRequestReviewer {
+                    login: "carol".to_string(),
+                    state: "Pending".to_string(),
+                },
+            ],
+            assignees: vec!["alice".to_string()],
+            labels: vec!["enhancement".to_string()],
+            files: vec![
+                crate::git::ChangedFile {
+                    path: "src/main.rs".to_string(),
+                    additions: 8,
+                    deletions: 2,
+                },
+                crate::git::ChangedFile {
+                    path: "src/lib.rs".to_string(),
+                    additions: 2,
+                    deletions: 2,
+                },
+            ],
+            last_comment: Some(crate::git::PullRequestComment {
+                author: "dave".to_string(),
+                body: "Looks good, thanks!".to_string(),
+            }),
+            url: "https://github.com/o/r/pull/42".to_string(),
+        }
+    }
+
+    #[test]
+    fn export_pr_renders_stats_toc_and_pages() {
+        let workspace = tempdir().expect("workspace");
+        let prs = vec![sample_pull_request()];
+        let path = export_pr(workspace.path(), &prs, "gemma").expect("export");
+        assert!(path.exists());
+        assert!(path.file_name().unwrap().to_string_lossy().ends_with("-pr.pdf"));
+        // Unlike the other exports, the branch is not part of the filename.
+        assert!(!path.file_name().unwrap().to_string_lossy().contains("nobranch"));
+        let bytes = std::fs::read(&path).expect("read pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn export_pr_with_no_pull_requests_still_writes_a_pdf() {
+        let workspace = tempdir().expect("workspace");
+        let path = export_pr(workspace.path(), &[], "gemma").expect("export");
+        let bytes = std::fs::read(&path).expect("read pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn pr_stats_page_counts_ready_and_conflicting() {
+        let mut draft = sample_pull_request();
+        draft.number = 1;
+        draft.draft = true;
+        draft.conflicting = Some(false);
+        let mut ready_clean = sample_pull_request();
+        ready_clean.number = 2;
+        ready_clean.draft = false;
+        ready_clean.conflicting = Some(false);
+        let mut ready_conflicting = sample_pull_request();
+        ready_conflicting.number = 3;
+        ready_conflicting.draft = false;
+        ready_conflicting.conflicting = Some(true);
+        let prs = vec![draft, ready_clean, ready_conflicting];
+
+        // Mirrors the counts draw_pr_stats_page computes: 3 open, 2 ready
+        // (non-draft), 1 with conflicts.
+        let ready = prs.iter().filter(|pr| !pr.draft).count();
+        let conflicts = prs.iter().filter(|pr| pr.conflicting == Some(true)).count();
+        assert_eq!((prs.len(), ready, conflicts), (3, 2, 1));
+
+        let workspace = tempdir().expect("workspace");
+        let path = export_pr(workspace.path(), &prs, "gemma").expect("export");
+        let bytes = std::fs::read(&path).expect("read pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn oldest_and_newest_pick_by_created_at_regardless_of_order() {
+        let mut middle = sample_pull_request();
+        middle.number = 1;
+        middle.created_at = "2026-06-15 00:00:00".to_string();
+        middle.url = "https://github.com/o/r/pull/1".to_string();
+        let mut oldest = sample_pull_request();
+        oldest.number = 2;
+        oldest.created_at = "2026-01-01 00:00:00".to_string();
+        oldest.url = "https://github.com/o/r/pull/2".to_string();
+        let mut newest = sample_pull_request();
+        newest.number = 3;
+        newest.created_at = "2026-12-31 00:00:00".to_string();
+        newest.url = "https://github.com/o/r/pull/3".to_string();
+        // Deliberately out of chronological order, so a naive first/last
+        // pick would get this wrong.
+        let prs = vec![middle, oldest.clone(), newest.clone()];
+
+        let (found_oldest, found_newest) = oldest_and_newest(&prs);
+        assert_eq!(found_oldest.map(|pr| pr.number), Some(2));
+        assert_eq!(found_newest.map(|pr| pr.number), Some(3));
+    }
+
+    #[test]
+    fn oldest_and_newest_skip_missing_created_at() {
+        let mut unknown = sample_pull_request();
+        unknown.created_at = String::new();
+        let (oldest, newest) = oldest_and_newest(std::slice::from_ref(&unknown));
+        assert!(oldest.is_none());
+        assert!(newest.is_none());
+    }
+
+    #[test]
+    fn pr_stats_rows_include_oldest_and_newest_as_links() {
+        let mut oldest = sample_pull_request();
+        oldest.number = 1;
+        oldest.created_at = "2026-01-01 00:00:00".to_string();
+        oldest.url = "https://github.com/o/r/pull/1".to_string();
+        let mut newest = sample_pull_request();
+        newest.number = 2;
+        newest.created_at = "2026-12-31 00:00:00".to_string();
+        newest.url = "https://github.com/o/r/pull/2".to_string();
+        let prs = vec![oldest, newest];
+
+        let rows = pr_stats_rows("orangu", &prs);
+        let find = |label: &str| rows.iter().find(|(key, _, _)| key == label).map(|(_, value, _)| value);
+        assert_eq!(
+            find("Oldest"),
+            Some(&RowValue::LinkWithText(
+                "https://github.com/o/r/pull/1".to_string(),
+                "2026-01-01 00:00:00".to_string(),
+            ))
+        );
+        assert_eq!(
+            find("Newest"),
+            Some(&RowValue::LinkWithText(
+                "https://github.com/o/r/pull/2".to_string(),
+                "2026-12-31 00:00:00".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn pr_stats_rows_use_na_for_oldest_and_newest_when_empty() {
+        let rows = pr_stats_rows("orangu", &[]);
+        let find = |label: &str| rows.iter().find(|(key, _, _)| key == label).map(|(_, value, _)| value);
+        assert_eq!(find("Oldest"), Some(&RowValue::Text("N/A".to_string())));
+        assert_eq!(find("Newest"), Some(&RowValue::Text("N/A".to_string())));
+    }
+
+    #[test]
+    fn pr_stats_rows_oldest_is_empty_with_a_single_pull_request() {
+        let mut pr = sample_pull_request();
+        pr.created_at = "2026-03-01 00:00:00".to_string();
+        pr.url = "https://github.com/o/r/pull/1".to_string();
+        let rows = pr_stats_rows("orangu", std::slice::from_ref(&pr));
+        let find = |label: &str| rows.iter().find(|(key, _, _)| key == label).map(|(_, value, _)| value);
+        // "Oldest" and "Newest" would be the same entry with only one pull
+        // request, so "Oldest" is left empty instead of repeating it.
+        assert_eq!(find("Oldest"), Some(&RowValue::Text(String::new())));
+        assert_eq!(
+            find("Newest"),
+            Some(&RowValue::LinkWithText(
+                "https://github.com/o/r/pull/1".to_string(),
+                "2026-03-01 00:00:00".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn pr_title_block_links_to_the_forge() {
+        let pr = sample_pull_request();
+        let title = pr_title_block(&pr);
+        assert_eq!(title.spans[0].text, "#42 Add pull completion");
+        assert_eq!(title.link.as_deref(), Some("https://github.com/o/r/pull/42"));
+    }
+
+    /// Look up a `pr_header_rows` row's text value by label — `None` for the
+    /// "Reviewers" row, whose value is the raw reviewer list, not text.
+    fn find_row_text<'a>(rows: &'a [(String, RowValue, bool)], label: &str) -> Option<(&'a str, bool)> {
+        rows.iter()
+            .find(|(key, _, _)| key == label)
+            .and_then(|(_, value, bold)| match value {
+                RowValue::Text(text) | RowValue::Link(text) => Some((text.as_str(), *bold)),
+                RowValue::LinkWithText(_, _) | RowValue::Reviewers(_) => None,
+            })
+    }
+
+    #[test]
+    fn pr_header_rows_report_every_field() {
+        let pr = sample_pull_request();
+        let rows = pr_header_rows(&pr);
+        assert_eq!(find_row_text(&rows, "Author"), Some(("alice", false)));
+        let link_row = rows.iter().find(|(key, _, _)| key == "Link").map(|(_, value, _)| value);
+        assert_eq!(
+            link_row,
+            Some(&RowValue::Link("https://github.com/o/r/pull/42".to_string()))
+        );
+        assert_eq!(find_row_text(&rows, "Draft"), Some(("No", false)));
+        // "Yes" is bolded, so a draft or a conflict catches the eye.
+        assert_eq!(find_row_text(&rows, "Conflicts"), Some(("Yes", true)));
+        assert_eq!(find_row_text(&rows, "Comments"), Some(("3", false)));
+        assert_eq!(find_row_text(&rows, "Labels"), Some(("enhancement", false)));
+        // Reviewers carries the raw list — icon selection happens at draw
+        // time (`review_icon`/`draw_review_icon`), not as formatted text.
+        let reviewers_row = rows.iter().find(|(key, _, _)| key == "Reviewers").map(|(_, value, _)| value);
+        assert_eq!(reviewers_row, Some(&RowValue::Reviewers(pr.reviewers.clone())));
+        // The changed-files table has its own section — no longer duplicated
+        // as a row in the header table.
+        assert!(find_row_text(&rows, "Changed files").is_none());
+    }
+
+    #[test]
+    fn pr_header_rows_bolds_draft_yes_and_leaves_no_plain() {
+        let mut pr = sample_pull_request();
+        pr.draft = true;
+        pr.conflicting = Some(false);
+        let rows = pr_header_rows(&pr);
+        assert_eq!(find_row_text(&rows, "Draft"), Some(("Yes", true)));
+        assert_eq!(find_row_text(&rows, "Conflicts"), Some(("No", false)));
+    }
+
+    #[test]
+    fn pr_header_rows_link_falls_back_to_unknown_without_a_url() {
+        let mut pr = sample_pull_request();
+        pr.url = String::new();
+        let rows = pr_header_rows(&pr);
+        assert_eq!(
+            rows.iter().find(|(key, _, _)| key == "Link").map(|(_, value, _)| value),
+            Some(&RowValue::Link(String::new()))
+        );
+        // draw_kv_table renders an empty Link as plain "unknown" text rather
+        // than an empty, unclickable link.
+        let workspace = tempdir().expect("workspace");
+        let path = export_pr(workspace.path(), std::slice::from_ref(&pr), "gemma").expect("export");
+        let bytes = std::fs::read(&path).expect("read pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn review_icon_maps_states_to_icons() {
+        assert_eq!(review_icon("Approved"), ReviewIcon::Check);
+        assert_eq!(review_icon("Changes requested"), ReviewIcon::Cross);
+        // GitLab's "Requested" (a review requested but not yet given) is not
+        // a positive verdict, so it gets the same icon as an explicit change
+        // request rather than the ambiguous "?".
+        assert_eq!(review_icon("Requested"), ReviewIcon::Cross);
+        assert_eq!(review_icon("Commented"), ReviewIcon::Question);
+        assert_eq!(review_icon("Pending"), ReviewIcon::Question);
+        // Anything else (e.g. a dismissed review) is not a meaningful
+        // verdict either, so it falls back to the same "?".
+        assert_eq!(review_icon("Dismissed"), ReviewIcon::Question);
+        assert_eq!(review_icon("Unknown"), ReviewIcon::Question);
+    }
+
+    #[test]
+    fn pr_is_ready_requires_not_draft_and_not_conflicting() {
+        let mut pr = sample_pull_request();
+        pr.draft = false;
+        pr.conflicting = Some(false);
+        assert!(pr_is_ready(&pr));
+
+        pr.conflicting = None;
+        assert!(pr_is_ready(&pr), "an unknown mergeable state is not a conflict");
+
+        pr.conflicting = Some(true);
+        assert!(!pr_is_ready(&pr));
+
+        pr.conflicting = Some(false);
+        pr.draft = true;
+        assert!(!pr_is_ready(&pr));
+    }
+
+    #[test]
+    fn changed_file_blocks_color_additions_green_and_deletions_red() {
+        let pr = sample_pull_request();
+        let blocks = build_changed_file_blocks(&pr);
+        assert_eq!(blocks.len(), 2);
+        let main_rs = &blocks[0];
+        assert_eq!(main_rs.spans[0].text, "src/main.rs  ");
+        assert_eq!(main_rs.spans[1].text, "+8");
+        assert_eq!(main_rs.spans[1].color, Some(STATUS_GREEN));
+        assert_eq!(main_rs.spans[3].text, "-2");
+        assert_eq!(main_rs.spans[3].color, Some(STATUS_RED));
+    }
+
+    #[test]
+    fn no_changed_files_yields_no_blocks() {
+        let mut pr = sample_pull_request();
+        pr.files.clear();
+        assert!(build_changed_file_blocks(&pr).is_empty());
+    }
+
+    #[test]
+    fn last_comment_table_layout_wraps_the_body_and_places_the_divider() {
+        let fonts = Pdf::new("t", "m").expect("pdf").fonts;
+        let (divider, row_height, lines) =
+            last_comment_table_layout("dave", "Looks good, thanks!", &fonts);
+        assert!(divider > MARGIN_MM);
+        assert!(row_height > 0.0);
+        assert_eq!(lines.join(" "), "Looks good, thanks!");
+    }
+
+    #[test]
+    fn last_comment_table_truncates_very_long_bodies() {
+        let fonts = Pdf::new("t", "m").expect("pdf").fonts;
+        let long_body = "x".repeat(LAST_COMMENT_MAX_CHARS + 200);
+        let (_, _, lines) = last_comment_table_layout("dave", &long_body, &fonts);
+        let joined: String = lines.join("");
+        // Truncated to the cap plus the ellipsis marker, not the full length.
+        assert!(joined.chars().count() <= LAST_COMMENT_MAX_CHARS + 1);
+        assert!(joined.ends_with('…'));
+    }
+
+    #[test]
+    fn last_comment_table_height_matches_no_comment_and_with_comment() {
+        let fonts = Pdf::new("t", "m").expect("pdf").fonts;
+        let mut pr = sample_pull_request();
+        let with_comment = last_comment_table_height_mm(&pr, &fonts);
+        pr.last_comment = None;
+        let without_comment = last_comment_table_height_mm(&pr, &fonts);
+        // Both a real comment and the "N/A" placeholder are one line, so the
+        // heights should match (both render one header row + one data row).
+        assert!((with_comment - without_comment).abs() < 0.01);
+    }
+
+    #[test]
+    fn export_pr_draws_last_comment_table_with_na_fallback() {
+        let workspace = tempdir().expect("workspace");
+        let mut pr = sample_pull_request();
+        pr.last_comment = None;
+        let path = export_pr(workspace.path(), std::slice::from_ref(&pr), "gemma").expect("export");
         let bytes = std::fs::read(&path).expect("read pdf");
         assert!(bytes.starts_with(b"%PDF"));
     }

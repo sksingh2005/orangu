@@ -434,6 +434,9 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
     if matches_ci(input, &["export duplicates"]) {
         return Some(LocalCommand::Export(ExportTarget::Duplicates));
     }
+    if matches_ci(input, &["export pr", "export pull requests"]) {
+        return Some(LocalCommand::Export(ExportTarget::Pr));
+    }
     if matches_ci(
         input,
         &["duplicates", "find duplicates", "find duplicate code"],

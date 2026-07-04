@@ -375,6 +375,12 @@ fn parse_export_target_handles_buffers_and_rejects_unknown() {
         parse_export_target("  Duplicates "),
         Some(ExportTarget::Duplicates)
     ));
+    for arg in ["pr", "PR", "pull requests", "pull_requests", "pull-requests"] {
+        assert!(
+            matches!(parse_export_target(arg), Some(ExportTarget::Pr)),
+            "{arg:?}"
+        );
+    }
     // The auto-review buffer is selected by `auto review` (and its punctuation
     // variants), case-insensitively.
     for arg in ["auto review", "Auto Review", "auto_review", "auto-review"] {
@@ -432,6 +438,14 @@ fn parses_export_commands() {
     assert!(matches!(
         parse_local_command("export duplicates"),
         Some(LocalCommand::Export(ExportTarget::Duplicates))
+    ));
+    assert!(matches!(
+        parse_local_command("/export pr"),
+        Some(LocalCommand::Export(ExportTarget::Pr))
+    ));
+    assert!(matches!(
+        parse_local_command("export pr"),
+        Some(LocalCommand::Export(ExportTarget::Pr))
     ));
 }
 

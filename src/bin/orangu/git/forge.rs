@@ -850,6 +850,391 @@ pub(crate) fn git_commit_count(repo_root: &Path, range: &str) -> Result<usize> {
     .unwrap_or(0))
 }
 
+/// One reviewer's status on a pull/merge request. `state` is a human-readable
+/// label — `"Approved"`, `"Changes requested"`, `"Commented"`, `"Dismissed"`,
+/// or `"Pending"` on GitHub (from the review's actual state, or `"Pending"`
+/// for a still-outstanding review request); `"Requested"` on GitLab, whose
+/// merge-request list endpoint does not carry per-reviewer approval state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestReviewer {
+    pub login: String,
+    pub state: String,
+}
+
+/// One file changed by a pull/merge request, with its added/removed line
+/// counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangedFile {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+/// The author and body of a pull/merge request's most recent conversation
+/// comment, for the `/export pr` report's "Last comment" table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestComment {
+    pub author: String,
+    pub body: String,
+}
+
+/// A full snapshot of one open pull/merge request for the `/export pr`
+/// report — as much detail as [`fetch_pull_request_details`] can get from the
+/// forge CLI in a single list call.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PullRequestDetail {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub base: String,
+    pub head: String,
+    pub draft: bool,
+    pub conflicting: Option<bool>,
+    pub comment_count: usize,
+    pub reviewers: Vec<PullRequestReviewer>,
+    pub assignees: Vec<String>,
+    pub labels: Vec<String>,
+    pub files: Vec<ChangedFile>,
+    pub last_comment: Option<PullRequestComment>,
+    pub url: String,
+}
+
+/// Fetch every open pull/merge request in the repository containing
+/// `workspace`, with as much detail as the forge CLI can return in one call:
+/// conflicts, comments, reviewers (and their review state), assignees, and
+/// labels. Used by `/export pr`.
+///
+/// GitHub: `gh pr list --json ...` — a single call that also carries
+/// `mergeable` and `reviews`. GitLab: `glab api
+/// projects/:id/merge_requests?state=opened` (the REST list endpoint);
+/// GitLab's list response does not carry per-reviewer approval state, so
+/// GitLab reviewers are reported with the state `"Requested"` rather than
+/// approved/changes-requested/commented, and diff size (`additions`/
+/// `deletions`) is not available either.
+///
+/// Unlike [`fetch_active_pull_requests`] (used for silent startup caching),
+/// this surfaces CLI/network failures as `Err`, since `/export pr` is an
+/// explicit user action that should report why the report could not be
+/// built rather than silently producing an empty one.
+pub fn fetch_pull_request_details(
+    workspace: &Path,
+    forge: Forge,
+) -> Result<Vec<PullRequestDetail>> {
+    let repo_root = discover_git_root(workspace)
+        .ok_or_else(|| anyhow!("export pr is only available inside a Git repository"))?;
+    let cli = forge.cli();
+    let args: Vec<&str> = match forge {
+        Forge::GitHub => vec![
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            "number,title,author,createdAt,updatedAt,baseRefName,headRefName,isDraft,mergeable,\
+             comments,reviews,reviewRequests,assignees,labels,files,url",
+        ],
+        Forge::GitLab => vec!["api", "projects/:id/merge_requests?state=opened&per_page=100"],
+    };
+    let output = match std::process::Command::new(cli)
+        .args(&args)
+        .current_dir(&repo_root)
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow!("export pr requires the {cli} CLI to be installed"));
+        }
+        Err(err) => return Err(err).context(format!("failed to run {cli}")),
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "{cli} pull request list failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    parse_pull_request_details(&output.stdout, forge)
+}
+
+/// Parse the JSON array printed by `gh pr list --json ...` / `glab api
+/// .../merge_requests` into [`PullRequestDetail`]s. Entries missing their
+/// number are skipped; every other field falls back to its empty/default
+/// value rather than failing the whole parse, since forges vary in which
+/// optional fields they populate.
+pub fn parse_pull_request_details(
+    stdout: &[u8],
+    forge: Forge,
+) -> Result<Vec<PullRequestDetail>> {
+    let text = String::from_utf8_lossy(stdout);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed)
+        .context("failed to parse forge pull request details as JSON")?;
+    let Some(entries) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    Ok(entries
+        .iter()
+        .filter_map(|entry| match forge {
+            Forge::GitHub => parse_github_pr_detail(entry),
+            Forge::GitLab => parse_gitlab_pr_detail(entry),
+        })
+        .collect())
+}
+
+fn json_str(entry: &serde_json::Value, key: &str) -> String {
+    entry
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Pull a `[{path, additions, deletions}, ...]` array (GitHub's `files` field)
+/// into [`ChangedFile`]s. Entries missing a path are skipped.
+fn json_changed_files(entry: &serde_json::Value, key: &str) -> Vec<ChangedFile> {
+    entry
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let path = item.get("path").and_then(serde_json::Value::as_str)?.to_string();
+                    Some(ChangedFile {
+                        path,
+                        additions: item
+                            .get("additions")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                        deletions: item
+                            .get("deletions")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn json_string_array(entry: &serde_json::Value, key: &str, field: &str) -> Vec<String> {
+    entry
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get(field).and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_github_pr_detail(entry: &serde_json::Value) -> Option<PullRequestDetail> {
+    let number = entry.get("number")?.as_u64()?;
+    let author = entry
+        .get("author")
+        .and_then(|author| author.get("login"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    // GitHub's `mergeable` GraphQL enum: MERGEABLE, CONFLICTING, UNKNOWN.
+    let conflicting = match entry.get("mergeable").and_then(serde_json::Value::as_str) {
+        Some("MERGEABLE") => Some(false),
+        Some("CONFLICTING") => Some(true),
+        _ => None,
+    };
+    let comments = entry.get("comments").and_then(serde_json::Value::as_array);
+    let comment_count = comments.map(Vec::len).unwrap_or(0);
+    // The most recently created comment, by `createdAt` (ISO 8601 strings
+    // sort lexicographically); GitHub's field already carries the author and
+    // body, so this needs no extra request.
+    let last_comment = comments
+        .and_then(|comments| {
+            comments.iter().max_by_key(|comment| {
+                comment
+                    .get("createdAt")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+            })
+        })
+        .map(|comment| PullRequestComment {
+            author: comment
+                .get("author")
+                .and_then(|author| author.get("login"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            body: comment
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        });
+
+    // The latest review state per author, then any reviewer still awaiting a
+    // review (present in `reviewRequests` but not yet in `reviews`).
+    let mut reviewers: Vec<PullRequestReviewer> = Vec::new();
+    if let Some(reviews) = entry.get("reviews").and_then(serde_json::Value::as_array) {
+        for review in reviews {
+            let login = review
+                .get("author")
+                .and_then(|author| author.get("login"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let state = humanize_review_state(
+                review
+                    .get("state")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+            );
+            match reviewers.iter_mut().find(|r| r.login == login) {
+                Some(existing) => existing.state = state,
+                None => reviewers.push(PullRequestReviewer { login, state }),
+            }
+        }
+    }
+    if let Some(requests) = entry.get("reviewRequests").and_then(serde_json::Value::as_array) {
+        for request in requests {
+            let login = request
+                .get("login")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            if !reviewers.iter().any(|r| r.login == login) {
+                reviewers.push(PullRequestReviewer {
+                    login,
+                    state: "Pending".to_string(),
+                });
+            }
+        }
+    }
+
+    Some(PullRequestDetail {
+        number,
+        title: json_str(entry, "title"),
+        author,
+        created_at: format_comment_date(&json_str(entry, "createdAt")),
+        updated_at: format_comment_date(&json_str(entry, "updatedAt")),
+        base: json_str(entry, "baseRefName"),
+        head: json_str(entry, "headRefName"),
+        draft: entry
+            .get("isDraft")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        conflicting,
+        comment_count,
+        reviewers,
+        assignees: json_string_array(entry, "assignees", "login"),
+        labels: json_string_array(entry, "labels", "name"),
+        files: json_changed_files(entry, "files"),
+        last_comment,
+        url: json_str(entry, "url"),
+    })
+}
+
+/// Turn a GitHub review state (`APPROVED`, `CHANGES_REQUESTED`, ...) into the
+/// label shown in the report. An unrecognised or empty state is passed
+/// through so a future GitHub state still shows up rather than vanishing.
+fn humanize_review_state(state: &str) -> String {
+    match state {
+        "APPROVED" => "Approved".to_string(),
+        "CHANGES_REQUESTED" => "Changes requested".to_string(),
+        "COMMENTED" => "Commented".to_string(),
+        "DISMISSED" => "Dismissed".to_string(),
+        "PENDING" => "Pending".to_string(),
+        "" => "Unknown".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn parse_gitlab_pr_detail(entry: &serde_json::Value) -> Option<PullRequestDetail> {
+    let number = entry.get("iid")?.as_u64()?;
+    let author = entry
+        .get("author")
+        .and_then(|author| author.get("username"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let conflicting = entry
+        .get("has_conflicts")
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| {
+            entry
+                .get("merge_status")
+                .and_then(serde_json::Value::as_str)
+                .map(|status| status == "cannot_be_merged")
+        });
+    let comment_count = entry
+        .get("user_notes_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
+    let reviewers = entry
+        .get("reviewers")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("username").and_then(serde_json::Value::as_str))
+                .map(|login| PullRequestReviewer {
+                    login: login.to_string(),
+                    state: "Requested".to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(PullRequestDetail {
+        number,
+        title: json_str(entry, "title"),
+        author,
+        created_at: format_comment_date(&json_str(entry, "created_at")),
+        updated_at: format_comment_date(&json_str(entry, "updated_at")),
+        base: json_str(entry, "target_branch"),
+        head: json_str(entry, "source_branch"),
+        draft: entry
+            .get("draft")
+            .and_then(serde_json::Value::as_bool)
+            .or_else(|| entry.get("work_in_progress").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false),
+        conflicting,
+        comment_count,
+        reviewers,
+        assignees: json_string_array(entry, "assignees", "username"),
+        labels: entry
+            .get("labels")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        // The merge-request list endpoint carries no diff; a per-MR call
+        // would be needed to fill this in, which `/export pr` skips to avoid
+        // one extra round trip per open merge request.
+        files: Vec::new(),
+        // Only a count (`user_notes_count`) is available from the
+        // merge-request list endpoint, not the comments themselves.
+        last_comment: None,
+        url: json_str(entry, "web_url"),
+    })
+}
+
 pub fn try_forge_create_pr(
     repo_root: &Path,
     branch: &str,
@@ -1272,6 +1657,143 @@ mod tests {
         assert!(
             err.to_string().contains("run /auto_review first"),
             "{err:#}"
+        );
+    }
+
+    #[test]
+    fn parses_github_pull_request_details() {
+        let json = br#"[{
+            "number": 42,
+            "title": "Add pull completion",
+            "author": {"login": "alice"},
+            "createdAt": "2026-06-01T12:30:45Z",
+            "updatedAt": "2026-06-02T08:00:00Z",
+            "baseRefName": "main",
+            "headRefName": "feature/completion",
+            "isDraft": false,
+            "mergeable": "CONFLICTING",
+            "comments": [
+                {"author": {"login": "dave"}, "body": "Looks good, thanks!", "createdAt": "2026-06-02T09:15:00Z"},
+                {"author": {"login": "alice"}, "body": "hi", "createdAt": "2026-06-01T13:00:00Z"}
+            ],
+            "reviews": [
+                {"author": {"login": "bob"}, "state": "APPROVED"},
+                {"author": {"login": "carol"}, "state": "CHANGES_REQUESTED"},
+                {"author": {"login": "bob"}, "state": "COMMENTED"}
+            ],
+            "reviewRequests": [{"login": "dave"}],
+            "assignees": [{"login": "alice"}],
+            "labels": [{"name": "enhancement"}],
+            "files": [
+                {"path": "src/main.rs", "additions": 8, "deletions": 2},
+                {"path": "src/lib.rs", "additions": 2, "deletions": 2}
+            ],
+            "url": "https://github.com/o/r/pull/42"
+        }]"#;
+        let details = parse_pull_request_details(json, Forge::GitHub).expect("parse");
+        assert_eq!(details.len(), 1);
+        let pr = &details[0];
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.author, "alice");
+        assert_eq!(pr.conflicting, Some(true));
+        assert_eq!(pr.comment_count, 2);
+        // The later comment (by createdAt) wins, not the last one in the array.
+        assert_eq!(
+            pr.last_comment,
+            Some(PullRequestComment {
+                author: "dave".to_string(),
+                body: "Looks good, thanks!".to_string(),
+            })
+        );
+        assert_eq!(
+            pr.files,
+            vec![
+                ChangedFile {
+                    path: "src/main.rs".to_string(),
+                    additions: 8,
+                    deletions: 2,
+                },
+                ChangedFile {
+                    path: "src/lib.rs".to_string(),
+                    additions: 2,
+                    deletions: 2,
+                },
+            ]
+        );
+        assert_eq!(pr.assignees, vec!["alice".to_string()]);
+        assert_eq!(pr.labels, vec!["enhancement".to_string()]);
+        // bob's later COMMENTED review replaces the earlier APPROVED one;
+        // carol keeps CHANGES_REQUESTED; dave is still awaiting review.
+        assert_eq!(
+            pr.reviewers,
+            vec![
+                PullRequestReviewer {
+                    login: "bob".to_string(),
+                    state: "Commented".to_string(),
+                },
+                PullRequestReviewer {
+                    login: "carol".to_string(),
+                    state: "Changes requested".to_string(),
+                },
+                PullRequestReviewer {
+                    login: "dave".to_string(),
+                    state: "Pending".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_gitlab_pull_request_details() {
+        let json = br#"[{
+            "iid": 7,
+            "title": "Tidy docs",
+            "author": {"username": "erin"},
+            "created_at": "2026-06-01T12:30:45.000Z",
+            "updated_at": "2026-06-02T08:00:00.000Z",
+            "target_branch": "main",
+            "source_branch": "docs",
+            "work_in_progress": true,
+            "has_conflicts": false,
+            "user_notes_count": 3,
+            "reviewers": [{"username": "frank"}],
+            "assignees": [{"username": "erin"}],
+            "labels": ["docs"],
+            "web_url": "https://gitlab.com/o/r/-/merge_requests/7"
+        }]"#;
+        let details = parse_pull_request_details(json, Forge::GitLab).expect("parse");
+        assert_eq!(details.len(), 1);
+        let pr = &details[0];
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.author, "erin");
+        assert!(pr.draft);
+        assert_eq!(pr.conflicting, Some(false));
+        assert_eq!(pr.comment_count, 3);
+        assert_eq!(
+            pr.reviewers,
+            vec![PullRequestReviewer {
+                login: "frank".to_string(),
+                state: "Requested".to_string(),
+            }]
+        );
+        assert_eq!(pr.labels, vec!["docs".to_string()]);
+        // GitLab's merge-request list endpoint carries no diff or comment
+        // bodies.
+        assert!(pr.files.is_empty());
+        assert_eq!(pr.last_comment, None);
+    }
+
+    #[test]
+    fn empty_pull_request_details_is_empty() {
+        assert!(
+            parse_pull_request_details(b"", Forge::GitHub)
+                .expect("parse")
+                .is_empty()
+        );
+        assert!(
+            parse_pull_request_details(b"[]\n", Forge::GitHub)
+                .expect("parse")
+                .is_empty()
         );
     }
 }

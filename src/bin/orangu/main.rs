@@ -92,7 +92,8 @@ use git::{
     branch_create_output, branch_delete_output, branch_list_all_output, branch_list_output,
     branch_rename_output, cherry_pick_output, close_output, collect_review_diff, comment_output,
     commit_output, create_pull_request_output, discover_git_root, fetch_active_pull_requests,
-    fetch_issue_metadata, fetch_output, get_comments_output, git_checkout, git_diff_against_branch,
+    fetch_issue_metadata, fetch_output, fetch_pull_request_details, get_comments_output,
+    git_checkout, git_diff_against_branch,
     git_workspace_diff, grep_output, init_repo_output, issue_field_output,
     list_workspace_files_tree, log_output, merge_output, move_file_output, open_in_editor,
     pull_request_output, push_output, rebase_output, remove_file_output, restore_output,
@@ -1727,6 +1728,8 @@ async fn run() -> Result<()> {
                         ),
                         None => Err(anyhow!("No auto review to export; run /auto_review first")),
                     },
+                    ExportTarget::Pr => fetch_pull_request_details(&workspace, forge)
+                        .and_then(|prs| export::export_pr(&workspace, &prs, &active_model_id)),
                     ExportTarget::Duplicates => match &last_duplicates_report {
                         // Reuse the report cached by the most recent /duplicates
                         // run — no second scan.

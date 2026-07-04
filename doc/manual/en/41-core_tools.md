@@ -849,10 +849,11 @@ It takes one optional argument selecting what to export:
 - `/export review` — the **review buffer**: the Markdown of the last `/review` (or, if none, the last `/auto_review`) report from this session. If no review has been run yet, the command reports that there is nothing to export.
 - `/export auto review` — the **auto-review buffer** specifically: the Markdown of the last `/auto_review` report. If no auto review has been run yet, the command reports that there is nothing to export.
 - `/export duplicates` — a **duplicate-code report**: the report from the most recent `/duplicates` run in this tab, rendered to a PDF. The report is cached when `/duplicates` runs, so the export reuses it directly — including that run's threshold (run `/duplicates 0.8` and `/export duplicates` writes an 80% report) — without scanning the workspace a second time. If `/duplicates` has not been run this session, the export scans once at the default 80% threshold and caches the result, so it still works with no prior command.
+- `/export pr` — a **pull request report**: every open pull/merge request in the repository, fetched from the forge (`gh`/`glab`) at export time, one page per pull request with as much detail as the forge returns.
 
-The argument **Tab-completes** (and shows the inline ghost hint): pressing Tab after `/export` offers `console`, `review`, `auto review`, and `duplicates`, and the multi-word `auto review` completes from as little as `a` (so `export a` → `export auto review`). The natural-language `export <target>` form (without the leading slash) completes the same way.
+The argument **Tab-completes** (and shows the inline ghost hint): pressing Tab after `/export` offers `console`, `review`, `auto review`, `duplicates`, and `pr`, and the multi-word `auto review` completes from as little as `a` (so `export a` → `export auto review`). The natural-language `export <target>` form (without the leading slash) completes the same way.
 
-The file is saved in the workspace root as `{repository}-{branch}-console.pdf`, `{repository}-{branch}-review.pdf`, or `{repository}-{branch}-duplicates.pdf`, where `{repository}` is the Git repository (or workspace) directory name and `{branch}` is the current branch (`nobranch` when not on one); both are sanitized for use in a filename, so a branch such as `feature/x` becomes `feature-x`. An existing file with the same name is overwritten. On success the saved path is printed to the output window.
+The file is saved in the workspace root as `{repository}-{branch}-console.pdf`, `{repository}-{branch}-review.pdf`, or `{repository}-{branch}-duplicates.pdf`, where `{repository}` is the Git repository (or workspace) directory name and `{branch}` is the current branch (`nobranch` when not on one); both are sanitized for use in a filename, so a branch such as `feature/x` becomes `feature-x`. The `pr` export is saved as `{repository}-pr.pdf` instead — no branch, since the report covers every open pull request in the repository, not one branch. An existing file with the same name is overwritten. On success the saved path is printed to the output window.
 
 Every page carries a **header band** centered on `{repository}-{branch}` and a **footer band** centered on `orangu {version} ({model})` (the active model), both in white on the orangu brand colour to match the terminal banner; in the footer the word `orangu` links to the project site.
 
@@ -872,6 +873,12 @@ The **review** export is organized for reading and sharing:
 - **Page 2 — table of contents.** Each category with the page it starts on, then a final **Appendix** entry.
 - **Page 3 onward — the report.** Each category (`Overall`, `Code`, `Security`, `Memory`, `Performance`, `Test Suite`, `Documentation`, then `Conclusion`) starts on its own page, rendered from the report's Markdown with brand-coloured headings, **bold** and *italic* emphasis, ordered and unordered (including nested) lists, fenced code blocks, block quotes, and tables. So `Overall` opens on page 3.
 - **Appendix.** Both the `/review` and `/auto_review` exports add a **source appendix** following the categories on its own page: grouped by category, each finding (or comment) is listed with the **source code around its line** — the `/show_file` view, 3 lines before and after, with line numbers. Only the finding's **recorded line(s)** are **syntax-highlighted and drawn in bold**; the surrounding context lines are shown plain, so the line the finding points at stands out. (For `/review`, the comment's diff position is mapped to its real source line so the appendix matches the file.)
+
+The **pr** export is organized like the review and duplicates exports:
+
+- **Page 1 — pull request status.** A single table: the repository name, generation date/time, the open pull requests broken down by status — **Open** (the total), **Ready** (not a draft), and **Conflicts** (reported as having a merge conflict) — then **Oldest** and **Newest**, each a clickable link to that pull request followed by its creation date. With no open pull requests both read `N/A`; with exactly one, **Oldest** is left empty rather than repeating the same entry as **Newest**.
+- **Page 2 — table of contents.** One entry per open pull request, `#N Title`, **clickable links** that jump to their page. Each entry ends with a status icon: a **green checkmark** when the pull request is neither a draft nor conflicting, otherwise a **red "X"**.
+- **Page 3 onward — one page per pull request** (more when it changes many files or has a long last comment). The title **links to the pull/merge request's home page on the forge**, followed by a table (spanning the full page width) of author, a **Link** row with the pull request's full URL (also clickable), created/updated dates, the branch, draft status, merge-conflict status, comment count, assignees, reviewers, and labels — whatever the forge returned. The **Draft** and **Conflicts** values are shown in **bold** when they are `Yes`, so an unfinished or blocked pull request catches the eye. Each **reviewer** is shown as their name followed by a status icon rather than the review state spelled out: a **green checkmark** for an approval, a **red "X"** for a change request (or, on GitLab, a still-outstanding review request — its merge-request list does not carry per-reviewer approval state at all), and a **"?"** for anything else that isn't a clear verdict (a comment, a still-pending GitHub review request, or a dismissed review). Below the table, the **changed files**: one line per file, its **full path** followed by its added-line count in **green** and removed-line count in **red** (GitLab's merge-request list carries no diff, so this section is empty there). Finally a **Last comment** table (also full width): a header spanning both columns, then one row with the comment's **author** (left) and its **text** (right, word-wrapped and truncated if very long); a pull request with no comments — or, on GitLab, whose comment bodies the list endpoint does not carry — shows `N/A` in both columns. (A repository with no open pull requests is the status page followed by a short note instead.)
 
 ### Examples
 
@@ -895,6 +902,12 @@ Export a fresh duplicate-code report:
 /export duplicates
 ```
 
+Export a pull request report:
+
+```text
+/export pr
+```
+
 Natural-language forms:
 
 ```text
@@ -903,6 +916,7 @@ export console
 export review
 export auto review
 export duplicates
+export pr
 ```
 
 \newpage

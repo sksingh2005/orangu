@@ -474,10 +474,13 @@ mod tests {
 
     #[test]
     fn export_completes_console_review_auto_review_and_duplicates() {
-        // The bare argument offers all four targets, in order.
+        // The bare argument offers all five targets, in order.
         let (start, all) = export_completion_candidates("/export ").expect("export argument");
         assert_eq!(start, "/export ".len());
-        assert_eq!(all, vec!["console", "review", "auto review", "duplicates"]);
+        assert_eq!(
+            all,
+            vec!["console", "review", "auto review", "duplicates", "pr"]
+        );
 
         // Typing narrows; `auto review` completes from `auto` (multi-word).
         assert_eq!(
@@ -491,6 +494,12 @@ mod tests {
                 .expect("argument")
                 .1,
             vec!["duplicates".to_string()]
+        );
+        assert_eq!(
+            export_completion_candidates("/export p")
+                .expect("argument")
+                .1,
+            vec!["pr".to_string()]
         );
         assert_eq!(
             export_completion_candidates("/export auto")
@@ -517,7 +526,10 @@ mod tests {
         // `export a` completes straight to `auto review`.
         let (start, all) = export_completion_candidates("export ").expect("natural argument");
         assert_eq!(start, "export ".len());
-        assert_eq!(all, vec!["console", "review", "auto review", "duplicates"]);
+        assert_eq!(
+            all,
+            vec!["console", "review", "auto review", "duplicates", "pr"]
+        );
         assert_eq!(
             export_completion_candidates("export a")
                 .expect("argument")

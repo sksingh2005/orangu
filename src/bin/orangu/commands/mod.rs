@@ -300,11 +300,14 @@ pub enum ExportTarget {
     /// A fresh duplicate-code report for the workspace (`export duplicates`),
     /// computed at export time.
     Duplicates,
+    /// A report of every open pull/merge request (`export pr`), fetched from
+    /// the forge at export time.
+    Pr,
 }
 
 /// The `/export` target words, in offer order, used for Tab completion and the
 /// inline ghost. Kept in step with [`parse_export_target`].
-pub const EXPORT_TARGETS: [&str; 4] = ["console", "review", "auto review", "duplicates"];
+pub const EXPORT_TARGETS: [&str; 5] = ["console", "review", "auto review", "duplicates", "pr"];
 
 /// A `/bisect` subcommand, wrapping `git bisect`. The `Start`, `Good`, `Bad`,
 /// and `Skip` variants carry an optional commit/rev argument; when it is `None`
