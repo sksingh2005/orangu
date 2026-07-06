@@ -44,6 +44,7 @@ pub struct ClientAppConfiguration {
     /// Where the workspace tab bar is drawn.
     pub workspaces: WorkspacePlacement,
     pub drop_down: bool,
+    pub word_wrap: bool,
 }
 
 impl ClientAppConfiguration {
@@ -114,6 +115,10 @@ pub fn default_drop_down() -> bool {
     true
 }
 
+pub fn default_word_wrap() -> bool {
+    false
+}
+
 pub fn default_auto_downsample_lines() -> usize {
     300
 }
@@ -161,6 +166,10 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
         .get("drop_down")
         .map(|value| parse_feedback_bool(value))
         .unwrap_or_else(default_drop_down);
+    let word_wrap = client
+        .get("word_wrap")
+        .map(|value| parse_feedback_bool(value))
+        .unwrap_or_else(default_word_wrap);
     let auto_downsample_lines = parse_client_field(
         &client,
         "auto_downsample_lines",
@@ -213,6 +222,7 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
         platform: client.get("platform").cloned().unwrap_or_default(),
         workspaces,
         drop_down,
+        word_wrap,
     })
 }
 

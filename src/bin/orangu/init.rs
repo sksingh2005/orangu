@@ -27,7 +27,7 @@ use orangu::{
     config::{
         CLIENT_SECTION, DEFAULT_PLATFORM, default_code_max_tokens, default_drop_down,
         default_llm_max_tool_rounds, default_review_max_tokens, default_timeout,
-        default_virtual_width,
+        default_virtual_width, default_word_wrap,
     },
     llm::normalized_openai_endpoint,
 };
@@ -117,6 +117,7 @@ pub async fn run_init() -> Result<()> {
     let banner = prompt_with_options("banner", "left", BANNER_OPTIONS)?;
     let workspaces = prompt_with_options("workspaces", "top", WORKSPACE_OPTIONS)?;
     let drop_down = prompt_bool("drop_down", default_drop_down())?;
+    let word_wrap = prompt_bool("word_wrap", default_word_wrap())?;
     let feedback = prompt_bool("feedback", false)?;
     let auto_rebase = prompt_bool("auto_rebase", false)?;
     let auto_squash = prompt_bool("auto_squash", false)?;
@@ -159,6 +160,10 @@ pub async fn run_init() -> Result<()> {
     if drop_down != default_drop_down() {
         let value = if drop_down { "on" } else { "off" };
         client.push(format!("drop_down = {value}"));
+    }
+    if word_wrap != default_word_wrap() {
+        let value = if word_wrap { "on" } else { "off" };
+        client.push(format!("word_wrap = {value}"));
     }
     if feedback {
         client.push("feedback = on".to_string());

@@ -138,6 +138,7 @@ pub fn print_screen(render: RenderContext<'_>, screen: ScreenState<'_>) {
             tab_statuses: render.tab_statuses,
             transcript: screen.transcript,
             scroll_offset: screen.scroll_offset,
+            word_wrap: render.word_wrap,
             left_status: screen.left_status,
             pending_count: screen.pending_count,
             pending_line: screen.pending_line,

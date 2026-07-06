@@ -156,6 +156,97 @@ pub fn visible_line_width(line: &str) -> usize {
     col
 }
 
+pub fn wrap_text_to_lines(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![line.to_string()];
+    }
+    let total = visible_line_width(line);
+    if total <= width {
+        return vec![line.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut offset = 0;
+    while offset < total {
+        let mut wrap_at = width;
+        let mut advance = width;
+
+        if offset + width < total {
+            let mut col = 0usize;
+            let mut current_offset = 0;
+            let mut last_space = None;
+            let mut chars = line.chars().peekable();
+            'outer: while let Some(ch) = chars.next() {
+                if ch == '\x1b' {
+                    match chars.peek() {
+                        Some(&'[') => {
+                            chars.next();
+                            loop {
+                                match chars.next() {
+                                    Some(c) => {
+                                        if c.is_ascii_alphabetic() || c == '~' || c == '@' {
+                                            break;
+                                        }
+                                    }
+                                    None => break 'outer,
+                                }
+                            }
+                        }
+                        Some(&'O') => {
+                            chars.next();
+                            chars.next();
+                        }
+                        Some(&']') => {
+                            chars.next();
+                            loop {
+                                match chars.next() {
+                                    Some('\x07') => break,
+                                    Some('\x1b') => {
+                                        if chars.peek() == Some(&'\\') {
+                                            chars.next();
+                                        }
+                                        break;
+                                    }
+                                    Some(_) => {}
+                                    None => break 'outer,
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                if current_offset < offset {
+                    current_offset += 1;
+                    continue;
+                }
+
+                if ch.is_whitespace() {
+                    last_space = Some(col);
+                }
+
+                col += 1;
+                if col > width {
+                    break;
+                }
+            }
+
+            if let Some(space_col) = last_space {
+                if space_col > 0 {
+                    wrap_at = space_col;
+                    advance = space_col + 1;
+                }
+            }
+        }
+
+        let clipped = clip_line(line, offset, wrap_at);
+        lines.push(clipped);
+        offset += advance;
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

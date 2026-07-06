@@ -60,6 +60,7 @@ pub struct ScreenRenderArgs<'a> {
     pub tab_statuses: &'a [TabStatus],
     pub transcript: &'a [TranscriptLine],
     pub scroll_offset: usize,
+    pub word_wrap: bool,
     pub left_status: Option<StatusFragment>,
     pub pending_count: usize,
     pub pending_line: Option<&'a str>,
@@ -205,12 +206,21 @@ pub fn render_screen(args: ScreenRenderArgs<'_>) -> String {
     let mut output_lines = args
         .transcript
         .iter()
-        .map(|line| {
-            let (rendered, offset) = match line {
-                TranscriptLine::UserInput(_) => (render_transcript_line(line, inner_width), 0),
-                _ => (render_transcript_line(line, width), args.x_offset),
+        .flat_map(|line| {
+            let (rendered, offset, is_plain) = match line {
+                TranscriptLine::UserInput(_) => {
+                    (render_transcript_line(line, inner_width), 0, false)
+                }
+                TranscriptLine::Plain(_) => {
+                    (render_transcript_line(line, width), args.x_offset, true)
+                }
+                _ => (render_transcript_line(line, width), args.x_offset, false),
             };
-            clip_line(&rendered, offset, inner_width)
+            if args.word_wrap && is_plain {
+                wrap_text_to_lines(&rendered, inner_width)
+            } else {
+                vec![clip_line(&rendered, offset, inner_width)]
+            }
         })
         .collect::<Vec<_>>();
     if let Some(pending_line) = args.pending_line {
