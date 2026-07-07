@@ -50,11 +50,12 @@ use printpdf::{
     PaintMode, ParsedFont, PdfDocument, PdfFontHandle, PdfPage, PdfSaveOptions, Point, Pt, Rect,
     Rgb, TextItem,
 };
+use rust_fontconfig::FontBytes;
 use std::{
     fs::File,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -94,10 +95,10 @@ pub struct AutoReviewAppendixEntry {
 }
 
 // --- Embedded brand font (Red Hat Text, SIL OFL — see assets/fonts/LICENSE) ---
-const FONT_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/RedHatText-Regular.otf");
-const FONT_BOLD: &[u8] = include_bytes!("../../../assets/fonts/RedHatText-Bold.otf");
-const FONT_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/RedHatText-Italic.otf");
-const FONT_BOLD_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/RedHatText-BoldItalic.otf");
+const FONT_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/RedHatText-Regular.ttf");
+const FONT_BOLD: &[u8] = include_bytes!("../../../assets/fonts/RedHatText-Bold.ttf");
+const FONT_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/RedHatText-Italic.ttf");
+const FONT_BOLD_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/RedHatText-BoldItalic.ttf");
 
 // --- Page geometry (A4, in millimetres) ---
 const PAGE_WIDTH_MM: f32 = 210.0;
@@ -1622,8 +1623,15 @@ fn load_fonts(doc: &mut PdfDocument) -> Result<DocFonts> {
 }
 
 /// Parse and register one embedded face, returning its document font handle.
+///
+/// `ParsedFont::from_bytes` alone leaves the font's source bytes unattached,
+/// which then makes printpdf embed an empty (0-byte) `FontFile`/`FontFile2`
+/// stream — the PDF opens with the right layout but no visible text. Attach
+/// the source via `with_source_bytes` so embedding (and subsetting) has the
+/// actual font program to draw from.
 fn add_external_font(doc: &mut PdfDocument, bytes: &'static [u8]) -> Option<PdfFontHandle> {
-    let parsed = ParsedFont::from_bytes(bytes, 0, &mut Vec::new())?;
+    let parsed = ParsedFont::from_bytes(bytes, 0, &mut Vec::new())?
+        .with_source_bytes(Arc::new(FontBytes::Owned(Arc::from(bytes))));
     Some(PdfFontHandle::External(doc.add_font(&parsed)))
 }
 
@@ -2317,7 +2325,17 @@ impl Pdf {
         self.finish_page();
         let pages = std::mem::take(&mut self.pages);
         self.doc.with_pages(pages);
-        let bytes = self.doc.save(&PdfSaveOptions::default(), &mut Vec::new());
+        // printpdf's font subsetting (glyph renumbering via allsorts) scrambles
+        // the embedded outlines for the Red Hat Text faces — the PDF ends up
+        // with the right layout and correct copy/paste text, but wrong or
+        // missing glyphs on screen. Embedding the full (unsubset) face avoids
+        // that renumbering step; it costs a few embedded fonts' worth of file
+        // size, negligible next to a review or PR export.
+        let opts = PdfSaveOptions {
+            subset_fonts: false,
+            ..PdfSaveOptions::default()
+        };
+        let bytes = self.doc.save(&opts, &mut Vec::new());
         let file =
             File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
         BufWriter::new(file)

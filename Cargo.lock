@@ -1834,6 +1834,7 @@ dependencies = [
  "rayon",
  "regex",
  "reqwest",
+ "rust-fontconfig",
  "rustyline",
  "serde",
  "serde_json",
