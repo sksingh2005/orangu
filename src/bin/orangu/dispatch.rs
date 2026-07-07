@@ -1012,6 +1012,9 @@ pub(crate) fn handle_command(
         LocalCommand::Export(target) => Ok(CommandOutcome::Export(target)),
         LocalCommand::Manual => Ok(CommandOutcome::Manual),
         LocalCommand::Usage => Ok(CommandOutcome::Output(usage_stats.format(tools))),
+        LocalCommand::Statistics(total) => Ok(CommandOutcome::Output(
+            crate::activity_log::format_report(workspace, total),
+        )),
         LocalCommand::Build(profile) => {
             let ws = workspace.to_path_buf();
             Ok(CommandOutcome::Streaming(

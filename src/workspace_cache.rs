@@ -48,6 +48,26 @@ pub fn workspace_cache_dir(workspace: &Path, subsystem: &str) -> PathBuf {
     }
 }
 
+/// Every per-workspace cache directory currently on disk (one per hashed
+/// workspace path, under `~/.orangu/workspace/`), for subsystems that
+/// aggregate across every workspace rather than reporting on just one (e.g.
+/// `/statistics total`). Returns an empty list when no home directory
+/// resolves or nothing has been cached yet.
+pub fn all_workspace_dirs() -> Vec<PathBuf> {
+    let Some(home) = home::home_dir() else {
+        return Vec::new();
+    };
+    let root = home.join(".orangu").join("workspace");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
 fn sha256(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());

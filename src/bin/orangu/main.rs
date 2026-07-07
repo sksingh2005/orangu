@@ -13,6 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+mod activity_log;
 mod build;
 mod commands;
 mod completion;
@@ -1954,6 +1955,9 @@ async fn run() -> Result<()> {
                     },
                     ExportTarget::Pr => fetch_pull_request_details(&workspace, forge)
                         .and_then(|prs| export::export_pr(&workspace, &prs, &active_model_id)),
+                    ExportTarget::Statistics(total) => {
+                        export::export_statistics(&workspace, &active_model_id, total)
+                    }
                     ExportTarget::Duplicates => match &last_duplicates_report {
                         // Reuse the report cached by the most recent /duplicates
                         // run — no second scan.

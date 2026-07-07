@@ -213,6 +213,84 @@ llm information
 
 \newpage
 
+## /statistics
+
+Reports persistent activity: how active this project has been over time. Where `/usage` reports the current session's totals and disappears when orangu exits, `/statistics` reads back a small log that survives restarts, and folds in the workspace's own `git log` — so a repository with commit history has something to report from the very first run, not just after you've used orangu in it for a while.
+
+Every completed turn — success, cancellation, or failure — appends one record to `~/.orangu/workspace/<hash>/stats/activity.json` (the same shared cache root the knowledge graph and semantic search index use, keyed by a hash of the workspace's canonical path — see `/search`): the day it happened, the session it belongs to, and that turn's token count, LLM time, and tool time. Bare `/statistics` reads the current workspace's log and merges in its `git log`; `/statistics total` merges every workspace's turn log into one aggregate instead (commit history is left out of `total`, since it would mean reading unrelated repositories that don't share one `git log`).
+
+The report has two parts:
+
+- **Total** — all-time figures, split into a **Repository Activity** table (total commits, days active, and your current/longest streak of consecutive active days) and a **Token Usage** table (sessions, turns, tokens, LLM and tool time), then a **Heatmap** and an **Authors** breakdown (from `git log`, most commits first) of each author's commit count and lines added/removed — similar to GitHub's contributors graph.
+- One section per calendar **year** with any activity, newest first: that year's **Yearly total** (tokens and commits), then a **Monthly** breakdown (also newest first).
+
+The heatmap is a GitHub-style grid: the last 20 weeks, one Monday-to-Sunday column per week and one row per weekday (Monday on top, each row labelled with its initial), shaded from blank (no activity) through four increasing quartiles of your busiest recorded day. A day with orangu usage shades by its token count; a day with only a commit (no orangu usage that day) still gets the lightest tint rather than staying blank:
+
+```text
+Total
+
+Repository Activity
+Commits          : 512
+Days active      : 340
+Current streak   : 4 days
+Longest streak   : 9 days
+
+Token Usage
+Sessions         : 42
+Turns            : 358
+Tokens           : 1284091
+LLM time         : 6h 12m 0s
+Tool time        : 1h 47m 0s
+
+Heatmap
+
+M ░░▒▒▓▓██████████████████████████████████░░
+T ▒▒▓▓██████████████████████████████████░░░░
+W   ░░▒▒▓▓████████████████████████████████░░
+T ░░▒▒▓▓██████████████████████████████████░░
+F ▒▒▓▓██████████████████████████████████░░░░
+S   ░░▒▒▓▓████████████████████████████████░░
+S ░░▒▒▓▓██████████████████████████████████░░
+
+Authors
+Jesper Pedersen           310 commits    +45210   -12043
+Tejas Bhati               202 commits    +28114    -9021
+
+2026
+
+Yearly total
+Tokens           : 442080
+Commits          : 302
+
+Monthly
+2026-02                 : 232036 tokens, 182 commits
+2026-01                 : 210044 tokens, 120 commits
+```
+
+A current streak counts today if you've already used orangu today, or ends at yesterday if you haven't yet — so a streak in progress isn't reported as broken partway through the day. With no activity recorded yet (a fresh install outside a Git repository, or a corrupted log), `/statistics` reports that plainly rather than an error or a blank table.
+
+See [`/export statistics`](#export) to save the same report — plus a two-layer table of contents, per-year and per-month heatmaps, Authors breakdowns, and bar charts, and a per-author appendix — to a PDF.
+
+### Examples
+
+```text
+/statistics
+/statistics total
+```
+
+Natural-language forms:
+
+```text
+statistics
+show statistics
+activity
+statistics total
+show statistics total
+activity total
+```
+
+\newpage
+
 ## /disconnect
 
 Disconnects from the current server.
@@ -900,12 +978,13 @@ It takes one optional argument selecting what to export:
 - `/export auto review` — the **auto-review buffer** specifically: the Markdown of the last `/auto_review` report. If no auto review has been run yet, the command reports that there is nothing to export.
 - `/export duplicates` — a **duplicate-code report**: the report from the most recent `/duplicates` run in this tab, rendered to a PDF. The report is cached when `/duplicates` runs, so the export reuses it directly — including that run's threshold (run `/duplicates 0.8` and `/export duplicates` writes an 80% report) — without scanning the workspace a second time. If `/duplicates` has not been run this session, the export scans once at the default 80% threshold and caches the result, so it still works with no prior command.
 - `/export pr` — a **pull request report**: every open pull/merge request in the repository, fetched from the forge (`gh`/`glab`) at export time, one page per pull request with as much detail as the forge returns.
+- `/export statistics` (or `/export statistics total`) — the **persistent activity history**: the same Total-then-year report `/statistics` (or `/statistics total`) prints in the console — totals, streaks, heatmap, and by-author commit breakdown, then a yearly/monthly breakdown per year — plus a token-usage bar chart, rendered to a PDF.
 
-The argument **Tab-completes** (and shows the inline ghost hint): pressing Tab after `/export` offers `console`, `review`, `auto review`, `duplicates`, and `pr`, and the multi-word `auto review` completes from as little as `a` (so `export a` → `export auto review`). The natural-language `export <target>` form (without the leading slash) completes the same way.
+The argument **Tab-completes** (and shows the inline ghost hint): pressing Tab after `/export` offers `console`, `review`, `auto review`, `duplicates`, `pr`, and `statistics`, and the multi-word `auto review` completes from as little as `a` (so `export a` → `export auto review`). The natural-language `export <target>` form (without the leading slash) completes the same way.
 
-The file is saved in the workspace root as `{repository}-{branch}-console.pdf`, `{repository}-{branch}-review.pdf`, or `{repository}-{branch}-duplicates.pdf`, where `{repository}` is the Git repository (or workspace) directory name and `{branch}` is the current branch (`nobranch` when not on one); both are sanitized for use in a filename, so a branch such as `feature/x` becomes `feature-x`. The `pr` export is saved as `{repository}-pr.pdf` instead — no branch, since the report covers every open pull request in the repository, not one branch. An existing file with the same name is overwritten. On success the saved path is printed to the output window.
+The file is saved in the workspace root as `{repository}-{branch}-console.pdf`, `{repository}-{branch}-review.pdf`, or `{repository}-{branch}-duplicates.pdf`, where `{repository}` is the Git repository (or workspace) directory name and `{branch}` is the current branch (`nobranch` when not on one); both are sanitized for use in a filename, so a branch such as `feature/x` becomes `feature-x`. The `pr` and `statistics` exports are saved as `{repository}-pr.pdf` and `{repository}-statistics.pdf` instead — no branch, since those reports cover the whole repository, not one branch. An existing file with the same name is overwritten. On success the saved path is printed to the output window.
 
-Every page carries a **header band** centered on `{repository}-{branch}` and a **footer band** centered on `orangu {version} ({model})` (the active model), both in white on the orangu brand colour to match the terminal banner; in the footer the word `orangu` links to the project site.
+Every page carries a **header band** centered on `{repository}-{branch}` (`{repository}-statistics` for the statistics export, which covers the whole repository rather than one branch) and a **footer band** centered on `orangu {version} ({model})` (the active model), both in white on the orangu brand colour to match the terminal banner; in the footer the word `orangu` links to the project site.
 
 The PDF keeps the Markdown formatting as much as a self-contained file can. Text is set in **Red Hat Text**, embedded into the binary (SIL Open Font License), so no system fonts are needed; if for any reason the embedded font cannot be loaded the export falls back to the closest built-in face, Helvetica. Headings use the orangu brand colour. Long lines wrap to the page width using the font's real glyph metrics — prose on word boundaries, code lines hard at the margin — and the content flows across as many pages as needed.
 
@@ -929,6 +1008,18 @@ The **pr** export is organized like the review and duplicates exports:
 - **Page 1 — pull request status.** A single table: the repository name, generation date/time, the open pull requests broken down by status — **Open** (the total), **Ready** (not a draft), and **Conflicts** (reported as having a merge conflict) — then **Oldest** and **Newest**, each a clickable link to that pull request followed by its creation date. With no open pull requests both read `N/A`; with exactly one, **Oldest** is left empty rather than repeating the same entry as **Newest**.
 - **Page 2 — table of contents.** One entry per open pull request, `#N Title`, **clickable links** that jump to their page. Each entry ends with a status icon: a **green checkmark** when the pull request is neither a draft nor conflicting, otherwise a **red "X"**.
 - **Page 3 onward — one page per pull request** (more when it changes many files or has a long last comment). The title **links to the pull/merge request's home page on the forge**, followed by a table (spanning the full page width) of author, a **Link** row with the pull request's full URL (also clickable), created/updated dates, the branch, draft status, merge-conflict status, comment count, assignees, reviewers, and labels — whatever the forge returned. The **Draft** and **Conflicts** values are shown in **bold** when they are `Yes`, so an unfinished or blocked pull request catches the eye. Each **reviewer** is shown as their name followed by a status icon rather than the review state spelled out: a **green checkmark** for an approval, a **red "X"** for a change request (or, on GitLab, a still-outstanding review request — its merge-request list does not carry per-reviewer approval state at all), and a **"?"** for anything else that isn't a clear verdict (a comment, a still-pending GitHub review request, or a dismissed review). Below the table, the **changed files**: one line per file, its **full path** followed by its added-line count in **green** and removed-line count in **red** (GitLab's merge-request list carries no diff, so this section is empty there). Finally a **Last comment** table (also full width): a header spanning both columns, then one row with the comment's **author** (left) and its **text** (right, word-wrapped and truncated if very long); a pull request with no comments — or, on GitLab, whose comment bodies the list endpoint does not carry — shows `N/A` in both columns. (A repository with no open pull requests is the status page followed by a short note instead.)
+
+The **statistics** export has the most pages of the six, since most of the work is in the PDF rather than the console:
+
+- **Page 1 — Total.** A **Repository Activity** table (total commits, days active, current streak, longest streak) and a **Token Usage** table (total sessions, turns, tokens, LLM and tool time) — the same figures `/statistics` prints in the console.
+- **Table of contents.** Two layers: one top-level entry per section — Activity, Authors, each calendar year, and Author Details — with each year's months nested beneath it, so a specific month ("June, 2026") is one click away. Every entry is a **clickable link** that jumps to its page, in the same style as `/export pr` and `/export review`'s tables of contents; the contents flow across as many pages as the history needs.
+- **Activity.** The last 20 weeks of activity as a grid of filled squares, one Monday-to-Sunday column per week and one row per weekday (Monday on top, each row labelled with its initial), shaded from a light tint through the full orangu brand colour by quartile of your busiest recorded day — the PDF counterpart of the console's block-character heatmap. A commit-only day (no orangu usage) still gets the lightest tint rather than staying blank.
+- **Authors.** A borderless table, one row per `git log` author, most commits first: the name, then the commit count, lines added (green), and lines removed (red), each right-aligned in its own column so the `+`/`-` figures line up down the page — the same colouring `/export pr` uses for a pull request's changed files. Spans as many pages as it needs. Omitted for `statistics total` and for a workspace with no commit history.
+- **One section per calendar year with activity, newest first.** The year's **Yearly Total** table (tokens and commits), its own **Activity** heatmap spanning the whole year (cells shrink to fit all ~53 weeks on the page), a **Monthly Token Usage** bar chart of that year's months, and that year's own **Authors** breakdown.
+- **One page per month, newest first,** headed by its name ("July, 2026"): the month's tokens and commits, its own **Activity** heatmap, and its own **Authors** breakdown.
+- **Author Details — one page per commit author.** Their total commits and lines added/removed, then a **Yearly Commits** table breaking down their commit count by calendar year. Omitted for `statistics total` and for a workspace with no commit history.
+
+`statistics total` renders the Total page, table of contents, and year/month sections aggregated across every workspace's turn log instead of just the current one (with the Total heading noting it covers "all workspaces"), but without the Authors breakdowns or appendix — `total` has no one workspace's `git log` to read.
 
 ### Examples
 
@@ -958,6 +1049,13 @@ Export a pull request report:
 /export pr
 ```
 
+Export the persistent activity history:
+
+```text
+/export statistics
+/export statistics total
+```
+
 Natural-language forms:
 
 ```text
@@ -967,6 +1065,8 @@ export review
 export auto review
 export duplicates
 export pr
+export statistics
+export statistics total
 ```
 
 \newpage

@@ -21,6 +21,7 @@ pub(crate) struct UsageStats {
     pub(crate) total_tool_duration: std::time::Duration,
     pub(crate) total_tokens: usize,
     pub(crate) session_id: String,
+    pub(crate) workspace: std::path::PathBuf,
 }
 
 impl UsageStats {
@@ -31,11 +32,17 @@ impl UsageStats {
             total_tool_duration: std::time::Duration::ZERO,
             total_tokens: 0,
             session_id: String::new(),
+            workspace: std::path::PathBuf::new(),
         }
     }
 
     pub(crate) fn with_session(mut self, session_id: &str) -> Self {
         self.session_id = session_id.to_string();
+        self
+    }
+
+    pub(crate) fn with_workspace(mut self, workspace: &std::path::Path) -> Self {
+        self.workspace = workspace.to_path_buf();
         self
     }
 
@@ -47,8 +54,7 @@ impl UsageStats {
         total_duration: std::time::Duration,
         tool_duration: std::time::Duration,
     ) {
-        self.total_tool_duration += tool_duration;
-        self.total_llm_duration += total_duration.saturating_sub(tool_duration);
+        self.record_turn(total_duration, tool_duration, 0);
     }
 
     pub(crate) fn record_response(
@@ -57,9 +63,39 @@ impl UsageStats {
         response: &str,
         tool_duration: std::time::Duration,
     ) {
-        self.record_elapsed(total_duration, tool_duration);
-        if let Ok(tokenizer) = cl100k_base() {
-            self.total_tokens += tokenizer.encode_with_special_tokens(response).len();
+        let tokens = cl100k_base()
+            .map(|tokenizer| tokenizer.encode_with_special_tokens(response).len())
+            .unwrap_or(0);
+        self.record_turn(total_duration, tool_duration, tokens);
+    }
+
+    /// The single choke point for every turn outcome: updates the in-memory
+    /// session totals `/usage` reports, and appends one record to the
+    /// persistent, per-workspace activity log `/statistics` reads back
+    /// (`~/.orangu/workspace/<hash>/stats/activity.json`). Skips the disk
+    /// write under test so `cargo test` never touches the real log.
+    fn record_turn(
+        &mut self,
+        total_duration: std::time::Duration,
+        tool_duration: std::time::Duration,
+        tokens: usize,
+    ) {
+        self.total_tool_duration += tool_duration;
+        let llm_duration = total_duration.saturating_sub(tool_duration);
+        self.total_llm_duration += llm_duration;
+        self.total_tokens += tokens;
+
+        if !cfg!(test) {
+            crate::activity_log::append_activity(
+                &self.workspace,
+                &crate::activity_log::ActivityRecord {
+                    day: crate::activity_log::today(),
+                    session_id: self.session_id.clone(),
+                    tokens,
+                    llm_ms: llm_duration.as_millis() as u64,
+                    tool_ms: tool_duration.as_millis() as u64,
+                },
+            );
         }
     }
 

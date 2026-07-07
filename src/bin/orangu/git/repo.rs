@@ -552,6 +552,67 @@ pub fn git_log(repo_root: &Path, count: Option<u64>) -> Result<String> {
     }
 }
 
+/// One commit's contribution to `/statistics`: the day it was authored (days
+/// since the Unix epoch, UTC), the author's name, and the lines it added and
+/// removed (summed across every file the commit touched; binary files, which
+/// `git log --numstat` reports as `-`, contribute zero).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommitStat {
+    pub day: u64,
+    pub author: String,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+/// Every commit reachable from `HEAD`, oldest first. Used by `/statistics` for
+/// the "By author" breakdown (commits plus lines added/removed, styled like
+/// `/export pr`'s changed-files list) and to give the heatmap something to
+/// show on a repository with commit history predating any orangu-recorded
+/// activity. Returns an empty list outside a Git repository or if `git log`
+/// fails.
+pub fn commit_history(workspace: &Path) -> Vec<CommitStat> {
+    let Some(repo_root) = discover_git_root(workspace) else {
+        return Vec::new();
+    };
+    // `\x01` (a byte that never appears in a timestamp or name) marks the
+    // start of each commit's header line, so a commit's numstat block can be
+    // told apart from the next commit's header even though `git log` puts no
+    // other separator between them.
+    let Ok(output) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["log", "--reverse", "--numstat", "--format=%x01%at%x09%an"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split('\x01')
+        .filter_map(|chunk| {
+            let mut lines = chunk.lines();
+            let (secs, author) = lines.next()?.split_once('\t')?;
+            let day = secs.trim().parse::<u64>().ok()? / 86_400;
+            let (mut additions, mut deletions) = (0usize, 0usize);
+            for line in lines {
+                let mut fields = line.splitn(3, '\t');
+                if let (Some(added), Some(removed)) = (fields.next(), fields.next()) {
+                    additions += added.parse::<usize>().unwrap_or(0);
+                    deletions += removed.parse::<usize>().unwrap_or(0);
+                }
+            }
+            Some(CommitStat {
+                day,
+                author: author.to_string(),
+                additions,
+                deletions,
+            })
+        })
+        .collect()
+}
+
 /// Counts uncommitted (tracked) and untracked changes in the working tree and
 /// renders a one-line, highlighted summary to append to `/log` output. Returns
 /// an empty string if the status check fails, so the log itself is never lost.
@@ -726,6 +787,44 @@ mod tests {
         }
         // No `origin` to special-case, so git's alphabetical order stands.
         assert_eq!(git_remote_names(workspace.path()), vec!["fork", "upstream"]);
+    }
+
+    #[test]
+    fn commit_history_reads_day_and_author_oldest_first() {
+        let workspace = tempdir().expect("workspace");
+        init_git_for_test(workspace.path());
+
+        std::fs::write(workspace.path().join("a.txt"), "one\n").expect("write");
+        git_run(workspace.path(), &["add", "."]);
+        git_run(workspace.path(), &["commit", "-m", "first"]);
+
+        std::fs::write(workspace.path().join("a.txt"), "two\n").expect("write");
+        git_run(workspace.path(), &["add", "."]);
+        git_run(
+            workspace.path(),
+            &["-c", "user.name=Someone Else", "commit", "-m", "second"],
+        );
+
+        let history = commit_history(workspace.path());
+        assert_eq!(history.len(), 2);
+        // Oldest first: the "first" commit (author "Orangu Tests" from
+        // `init_git_for_test`) before "second" (author "Someone Else").
+        assert_eq!(history[0].author, "Orangu Tests");
+        assert_eq!(history[1].author, "Someone Else");
+        // Both commits happened today.
+        assert_eq!(history[0].day, crate::activity_log::today());
+        // "one\n" -> "two\n" is a one-line change: 1 added, 1 removed.
+        assert_eq!(history[1].additions, 1);
+        assert_eq!(history[1].deletions, 1);
+        // The first commit only adds a line (a new file).
+        assert_eq!(history[0].additions, 1);
+        assert_eq!(history[0].deletions, 0);
+    }
+
+    #[test]
+    fn commit_history_is_empty_outside_a_git_repository() {
+        let workspace = tempdir().expect("workspace");
+        assert!(commit_history(workspace.path()).is_empty());
     }
 
     #[test]

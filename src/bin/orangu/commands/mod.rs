@@ -342,11 +342,22 @@ pub enum ExportTarget {
     /// A report of every open pull/merge request (`export pr`), fetched from
     /// the forge at export time.
     Pr,
+    /// The persistent activity history (`export statistics`, or `export
+    /// statistics total` for every workspace): totals, streaks, and a daily
+    /// heatmap, read from the same log `/statistics` reports on.
+    Statistics(bool),
 }
 
 /// The `/export` target words, in offer order, used for Tab completion and the
 /// inline ghost. Kept in step with [`parse_export_target`].
-pub const EXPORT_TARGETS: [&str; 5] = ["console", "review", "auto review", "duplicates", "pr"];
+pub const EXPORT_TARGETS: [&str; 6] = [
+    "console",
+    "review",
+    "auto review",
+    "duplicates",
+    "pr",
+    "statistics",
+];
 
 /// A `/bisect` subcommand, wrapping `git bisect`. The `Start`, `Good`, `Bad`,
 /// and `Skip` variants carry an optional commit/rev argument; when it is `None`
@@ -456,6 +467,11 @@ pub enum LocalCommand<'a> {
     Export(ExportTarget),
     Manual,
     Usage,
+    /// `/statistics` (or `/statistics total`): report persistent,
+    /// cross-session activity — totals, streaks, and a daily heatmap read
+    /// from `~/.orangu/workspace/<hash>/stats/activity.json`, either for the
+    /// current workspace or aggregated across all of them.
+    Statistics(bool),
     /// `/build [debug|release]`: build the workspace project. Defaults to
     /// `release`.
     Build(crate::build::BuildProfile),

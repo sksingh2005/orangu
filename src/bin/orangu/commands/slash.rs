@@ -89,6 +89,7 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
         "/delete_workspace" => Some(LocalCommand::DeleteWorkspace),
         "/manual" => Some(LocalCommand::Manual),
         "/usage" => Some(LocalCommand::Usage),
+        "/statistics" => Some(LocalCommand::Statistics(false)),
         "/clear" => Some(LocalCommand::Clear),
         "/quit" => Some(LocalCommand::Quit),
         "/pending" => Some(LocalCommand::PendingList),
@@ -154,6 +155,12 @@ pub fn parse_slash_command(input: &str) -> Option<LocalCommand<'_>> {
             }
             if let Some(args) = input.strip_prefix("/export ") {
                 return parse_export_target(args.trim()).map(LocalCommand::Export);
+            }
+            if let Some(args) = input.strip_prefix("/statistics ") {
+                return match args.trim().to_ascii_lowercase().as_str() {
+                    "total" => Some(LocalCommand::Statistics(true)),
+                    _ => None,
+                };
             }
             if let Some(args) = input.strip_prefix("/build ") {
                 return crate::build::BuildProfile::parse(args).map(LocalCommand::Build);

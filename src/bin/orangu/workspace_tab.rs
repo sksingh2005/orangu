@@ -220,7 +220,9 @@ impl WorkspaceTab {
             session.restore(load_session_messages(&session_messages_path)?);
         }
 
-        let usage_stats = UsageStats::new().with_session(&session_id);
+        let usage_stats = UsageStats::new()
+            .with_session(&session_id)
+            .with_workspace(&workspace);
         let history = load_history(&session_hist_path)?;
         let mut output_state = OutputState::default();
         // The auto-resume notice only shows for a session restored implicitly on

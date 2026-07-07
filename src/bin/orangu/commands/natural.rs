@@ -320,6 +320,10 @@ pub const NATURAL_LANGUAGE_BINDINGS: &[&str] = &[
     // --- usage ---
     "usage",
     "show usage",
+    // --- statistics ---
+    "statistics",
+    "show statistics",
+    "activity",
     // --- clear conversation ---
     "clear",
     "clear conversation",
@@ -447,6 +451,12 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
     }
     if matches_ci(input, &["export pr", "export pull requests"]) {
         return Some(LocalCommand::Export(ExportTarget::Pr));
+    }
+    if matches_ci(input, &["export statistics total"]) {
+        return Some(LocalCommand::Export(ExportTarget::Statistics(true)));
+    }
+    if matches_ci(input, &["export statistics"]) {
+        return Some(LocalCommand::Export(ExportTarget::Statistics(false)));
     }
     if matches_ci(
         input,
@@ -938,6 +948,19 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
     }
     if matches_ci(input, &["usage", "show usage"]) {
         return Some(LocalCommand::Usage);
+    }
+    if matches_ci(
+        input,
+        &[
+            "statistics total",
+            "show statistics total",
+            "activity total",
+        ],
+    ) {
+        return Some(LocalCommand::Statistics(true));
+    }
+    if matches_ci(input, &["statistics", "show statistics", "activity"]) {
+        return Some(LocalCommand::Statistics(false));
     }
     if matches_ci(
         input,

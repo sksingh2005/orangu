@@ -72,6 +72,7 @@ pub enum SlashCommand {
     DeleteWorkspace,
     Manual,
     Usage,
+    Statistics,
     Build,
     Shell,
     Skills,
@@ -137,6 +138,9 @@ impl SlashCommand {
             SlashCommand::DeleteWorkspace => "Closes the active workspace tab",
             SlashCommand::Manual => "Opens the built-in manual",
             SlashCommand::Usage => "Shows token usage statistics",
+            SlashCommand::Statistics => {
+                "Shows persistent, cross-session activity history and a daily heatmap"
+            }
             SlashCommand::Build => "Builds the workspace project",
             SlashCommand::Shell => "Executes a shell command",
             SlashCommand::Skills => "Lists the discovered Agent Skills",

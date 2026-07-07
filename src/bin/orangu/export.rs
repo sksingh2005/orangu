@@ -732,6 +732,10 @@ fn build_changed_file_blocks(pr: &PullRequestDetail) -> Vec<Block> {
     blocks
 }
 
+/// The trailing gap (mm) after each Authors-table row, matching the
+/// changed-files list's per-line rhythm.
+const AUTHOR_ROW_GAP_MM: f32 = BODY_SIZE * 0.25 * PT_TO_MM;
+
 fn list_or_none(items: &[String]) -> String {
     if items.is_empty() {
         "none".to_string()
@@ -804,6 +808,308 @@ fn last_comment_table_height_mm(pr: &PullRequestDetail, fonts: &DocFonts) -> f32
 fn export_pr_file_path(workspace: &Path) -> PathBuf {
     let repository = non_empty(sanitize(&repository_display(workspace)), "workspace");
     workspace.join(format!("{repository}-pr.pdf"))
+}
+
+/// `{repository}-statistics.pdf` in the workspace root — no branch, like the
+/// pr export, since the activity history covers the whole repository, not one
+/// branch.
+fn export_statistics_file_path(workspace: &Path) -> PathBuf {
+    let repository = non_empty(sanitize(&repository_display(workspace)), "workspace");
+    workspace.join(format!("{repository}-statistics.pdf"))
+}
+
+/// Export the persistent, cross-session activity history to a PDF: a
+/// **Total** page (**Repository Activity** and **Token Usage** tables), a
+/// two-layer table of contents (years with their months nested beneath), an
+/// all-time **Activity** heatmap and **Authors** breakdown, then one section
+/// per calendar year — newest first — with that year's totals, heatmap,
+/// monthly token bar chart, and Authors, followed by one page per month
+/// ("July, 2026") with the month's totals, heatmap, and Authors, and finally
+/// an **Author Details** appendix with one page per commit author. `total`
+/// aggregates every workspace's turn log instead of just this one; commit
+/// history (and so every Authors breakdown and the appendix) is only merged
+/// in for the single-workspace report.
+pub fn export_statistics(workspace: &Path, model: &str, total: bool) -> Result<PathBuf> {
+    let records = if total {
+        crate::activity_log::read_all_workspaces_activity()
+    } else {
+        crate::activity_log::read_activity(workspace)
+    };
+    let mut summary = crate::activity_log::summarize(&records);
+    let commits = if total {
+        Vec::new()
+    } else {
+        crate::git::commit_history(workspace)
+    };
+    if !total {
+        crate::activity_log::merge_commit_history(&mut summary, &commits);
+    }
+    // Newest first — years, and the months within each year.
+    let mut years = crate::activity_log::year_breakdown(&summary);
+    years.reverse();
+    for year in &mut years {
+        year.months.reverse();
+    }
+
+    // The table of contents' entries (label, indent): the fixed sections,
+    // then each year with its months nested beneath.
+    let mut toc: Vec<(String, f32)> = vec![("Activity".to_string(), 0.0)];
+    if !summary.by_author.is_empty() {
+        toc.push(("Authors".to_string(), 0.0));
+    }
+    for year in &years {
+        toc.push((year.year.to_string(), 0.0));
+        for &(month, _) in &year.months {
+            toc.push((
+                format!("{}, {}", MONTH_NAMES[(month - 1) as usize], year.year),
+                6.0,
+            ));
+        }
+    }
+    if !summary.by_author.is_empty() {
+        toc.push(("Author Details".to_string(), 0.0));
+    }
+
+    // Sections flow across pages (long Authors lists, variable month pages),
+    // so the table of contents' page numbers come from rendering twice: the
+    // first pass draws with placeholder numbers and records where each entry
+    // actually lands, the second draws the real thing. The layout is
+    // identical in both passes — page numbers only change the digits drawn in
+    // the contents' right column.
+    let (_, entry_pages) = render_statistics(
+        workspace, model, total, &summary, &commits, &years, &toc, None,
+    )?;
+    let (pdf, _) = render_statistics(
+        workspace,
+        model,
+        total,
+        &summary,
+        &commits,
+        &years,
+        &toc,
+        Some(&entry_pages),
+    )?;
+
+    let path = export_statistics_file_path(workspace);
+    pdf.save(&path)?;
+    Ok(path)
+}
+
+/// One full rendering pass of the statistics PDF (see [`export_statistics`]).
+/// `entry_pages` is `None` on the first, measuring pass (the table of
+/// contents shows placeholder numbers) and the recorded numbers on the
+/// second. Returns the built document and the page each table-of-contents
+/// entry starts on, in `toc` order.
+#[allow(clippy::too_many_arguments)]
+fn render_statistics(
+    workspace: &Path,
+    model: &str,
+    total: bool,
+    summary: &crate::activity_log::ActivitySummary,
+    commits: &[crate::git::CommitStat],
+    years: &[crate::activity_log::YearSummary],
+    toc: &[(String, f32)],
+    entry_pages: Option<&[usize]>,
+) -> Result<(Pdf, Vec<usize>)> {
+    let total_llm_ms: u64 = summary.per_day.values().map(|d| d.llm_ms).sum();
+    let total_tool_ms: u64 = summary.per_day.values().map(|d| d.tool_ms).sum();
+    let max_tokens = summary
+        .per_day
+        .values()
+        .map(|d| d.tokens)
+        .max()
+        .unwrap_or(0);
+    let today = crate::activity_log::today();
+
+    // The header band reads `{repository}-statistics` — no branch, matching
+    // the repository-wide file name, since the history covers the whole
+    // repository rather than one branch.
+    let header = format!("{}-statistics", repository_display(workspace));
+    let mut pdf = Pdf::new(&header, model)?;
+
+    // Page 1 — Total: Repository Activity, then Token Usage.
+    pdf.draw_block(&heading(
+        if total {
+            "Total (all workspaces)"
+        } else {
+            "Total"
+        },
+        BODY_SIZE + 5.0,
+    ));
+    pdf.draw_block(&heading("Repository Activity", BODY_SIZE + 2.0));
+    pdf.draw_kv_table(&[
+        (
+            "Total commits".to_string(),
+            RowValue::Text(summary.total_commits.to_string()),
+            false,
+        ),
+        (
+            "Days active".to_string(),
+            RowValue::Text(summary.days_active.to_string()),
+            false,
+        ),
+        (
+            "Current streak".to_string(),
+            RowValue::Text(format!(
+                "{} day{}",
+                summary.current_streak,
+                if summary.current_streak == 1 { "" } else { "s" }
+            )),
+            true,
+        ),
+        (
+            "Longest streak".to_string(),
+            RowValue::Text(format!(
+                "{} day{}",
+                summary.longest_streak,
+                if summary.longest_streak == 1 { "" } else { "s" }
+            )),
+            true,
+        ),
+    ]);
+    pdf.draw_block(&heading("Token Usage", BODY_SIZE + 2.0));
+    pdf.draw_kv_table(&[
+        (
+            "Total sessions".to_string(),
+            RowValue::Text(summary.total_sessions.to_string()),
+            false,
+        ),
+        (
+            "Total turns".to_string(),
+            RowValue::Text(summary.total_turns.to_string()),
+            false,
+        ),
+        (
+            "Total tokens".to_string(),
+            RowValue::Text(summary.total_tokens.to_string()),
+            false,
+        ),
+        (
+            "LLM time".to_string(),
+            RowValue::Text(crate::stats::format_duration(
+                std::time::Duration::from_millis(total_llm_ms),
+            )),
+            false,
+        ),
+        (
+            "Tool time".to_string(),
+            RowValue::Text(crate::stats::format_duration(
+                std::time::Duration::from_millis(total_tool_ms),
+            )),
+            false,
+        ),
+    ]);
+
+    // Page 2 onward — the table of contents.
+    let placeholder = vec![1; toc.len()];
+    pdf.new_page();
+    pdf.draw_toc_nested(toc, entry_pages.unwrap_or(&placeholder));
+
+    let mut recorded = Vec::with_capacity(toc.len());
+
+    // All-time activity heatmap.
+    pdf.new_page();
+    recorded.push(pdf.current_page());
+    pdf.draw_activity_heatmap(summary);
+
+    // All-time Authors.
+    if !summary.by_author.is_empty() {
+        pdf.new_page();
+        recorded.push(pdf.current_page());
+        pdf.draw_by_author_table(&summary.by_author, BODY_SIZE + 5.0);
+    }
+
+    // One section per year (newest first): the year's totals, heatmap,
+    // monthly token bar chart, and Authors — then one page per month.
+    for year in years {
+        let year_first = days_from_civil(year.year, 1, 1).max(0) as u64;
+        let year_last = (days_from_civil(year.year + 1, 1, 1) - 1).max(0) as u64;
+
+        pdf.new_page();
+        recorded.push(pdf.current_page());
+        pdf.draw_block(&heading(&year.year.to_string(), BODY_SIZE + 5.0));
+        pdf.draw_block(&heading("Yearly Total", BODY_SIZE + 2.0));
+        pdf.draw_kv_table(&[
+            (
+                "Tokens".to_string(),
+                RowValue::Text(year.tokens.to_string()),
+                false,
+            ),
+            (
+                "Commits".to_string(),
+                RowValue::Text(year.commits.to_string()),
+                false,
+            ),
+        ]);
+        pdf.draw_block(&heading("Activity", BODY_SIZE + 2.0));
+        pdf.draw_range_heatmap(summary, year_first, year_last.min(today), max_tokens);
+        // The year's monthly token usage, chronological left to right (the
+        // months list itself is newest first for the pages below).
+        let month_buckets: Vec<BucketTotals> = year
+            .months
+            .iter()
+            .rev()
+            .map(|(month, totals)| BucketTotals {
+                label: format!("{:04}-{:02}", year.year, month),
+                tokens: totals.tokens,
+            })
+            .collect();
+        pdf.draw_monthly_bar_chart(&month_buckets);
+        let year_authors = crate::activity_log::authors_in_range(commits, year_first, year_last);
+        if !year_authors.is_empty() {
+            pdf.draw_by_author_table(&year_authors, BODY_SIZE + 2.0);
+        }
+
+        // One page per month, newest first.
+        for &(month, totals) in &year.months {
+            let (month_first, month_last) = month_day_range(year.year, month);
+
+            pdf.new_page();
+            recorded.push(pdf.current_page());
+            pdf.draw_block(&heading(
+                &format!("{}, {}", MONTH_NAMES[(month - 1) as usize], year.year),
+                BODY_SIZE + 5.0,
+            ));
+            pdf.draw_kv_table(&[
+                (
+                    "Tokens".to_string(),
+                    RowValue::Text(totals.tokens.to_string()),
+                    false,
+                ),
+                (
+                    "Commits".to_string(),
+                    RowValue::Text(totals.commits.to_string()),
+                    false,
+                ),
+            ]);
+            pdf.draw_block(&heading("Activity", BODY_SIZE + 2.0));
+            pdf.draw_range_heatmap(summary, month_first, month_last.min(today), max_tokens);
+            let month_authors =
+                crate::activity_log::authors_in_range(commits, month_first, month_last);
+            if !month_authors.is_empty() {
+                pdf.draw_by_author_table(&month_authors, BODY_SIZE + 2.0);
+            }
+        }
+    }
+
+    // Appendix — one page per commit author: their totals, then a yearly
+    // commit breakdown, mirroring the review/auto-review appendix pattern of
+    // one entry per item rather than a single combined page.
+    for (index, author) in summary.by_author.iter().enumerate() {
+        pdf.new_page();
+        if index == 0 {
+            recorded.push(pdf.current_page());
+        }
+        pdf.draw_author_appendix_page(author);
+    }
+
+    Ok((pdf, recorded))
+}
+
+/// One month's token total, a bar of the monthly token usage chart.
+struct BucketTotals {
+    label: String,
+    tokens: usize,
 }
 
 /// Resolves source locations to forge (GitHub/GitLab) web URLs. Built once per
@@ -1114,8 +1420,10 @@ fn format_timestamp() -> String {
 }
 
 /// Convert a count of days since the Unix epoch to a `(year, month, day)`
-/// proleptic-Gregorian date (Howard Hinnant's `civil_from_days`).
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
+/// proleptic-Gregorian date (Howard Hinnant's `civil_from_days`). Also used by
+/// `crate::activity_log` to group `/statistics` activity into calendar years
+/// and months.
+pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -1127,6 +1435,49 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     (year + i64::from(month <= 2), month, day)
 }
+
+/// The inverse of [`civil_from_days`]: a proleptic-Gregorian `(year, month,
+/// day)` date to its count of days since the Unix epoch (Howard Hinnant's
+/// `days_from_civil`). Used to turn `/statistics`' calendar years and months
+/// back into the day ranges their heatmaps and Authors breakdowns cover.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The inclusive day range of one calendar month, for `/statistics`' month
+/// pages.
+fn month_day_range(year: i64, month: i64) -> (u64, u64) {
+    let first = days_from_civil(year, month, 1);
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let last = days_from_civil(next_year, next_month, 1) - 1;
+    (first.max(0) as u64, last.max(0) as u64)
+}
+
+/// Month names for `/statistics`' month page headings ("January, 2023").
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
 
 fn render_block_nodes(nodes: &[Node], level: usize, blocks: &mut Vec<Block>) {
     for node in nodes {
@@ -1703,6 +2054,12 @@ impl Pdf {
         self.draw_furniture();
     }
 
+    /// The 1-based number of the page currently being drawn — what a
+    /// table-of-contents entry for content drawn now should point at.
+    fn current_page(&self) -> usize {
+        self.pages.len() + 1
+    }
+
     fn draw_blocks(&mut self, blocks: &[Block]) {
         for block in blocks {
             self.draw_block(block);
@@ -2061,6 +2418,299 @@ impl Pdf {
         self.cursor_y = bottom - 8.0;
     }
 
+    /// Draw the `/export statistics` daily heatmap: `HEATMAP_WEEKS`
+    /// Monday-to-Sunday columns of 7-day squares (Monday in the top row),
+    /// shaded from a light tint to the full brand colour by quartile — the
+    /// same shading [`crate::activity_log::render_heatmap`] uses for the
+    /// console view, drawn here as filled squares instead of text.
+    fn draw_activity_heatmap(&mut self, summary: &crate::activity_log::ActivitySummary) {
+        self.draw_block(&heading("Activity", BODY_SIZE + 5.0));
+        let max_tokens = summary
+            .per_day
+            .values()
+            .map(|d| d.tokens)
+            .max()
+            .unwrap_or(0);
+        self.draw_range_heatmap(
+            summary,
+            crate::activity_log::heatmap_start_day(),
+            crate::activity_log::today(),
+            max_tokens,
+        );
+    }
+
+    /// Draw a Monday-aligned daily heatmap covering `first_day..=last_day`
+    /// (padded outward to whole Monday-to-Sunday weeks; the padding days stay
+    /// blank, as do days after today). Cells scale down to fit the content
+    /// width when the range is long — a whole year's 53 columns — and are
+    /// capped at the 20-week view's size when it's short. Shading is by
+    /// quartile of `max_tokens` (the whole history's busiest day, not the
+    /// range's), so shading is comparable across every heatmap in the report.
+    fn draw_range_heatmap(
+        &mut self,
+        summary: &crate::activity_log::ActivitySummary,
+        first_day: u64,
+        last_day: u64,
+        max_tokens: usize,
+    ) {
+        self.cursor_y -= 4.0;
+
+        const LABEL_WIDTH_MM: f32 = 6.0;
+        const SHADES: [(f32, f32, f32); 5] = [
+            (0.92, 0.92, 0.92),
+            (0.96, 0.88, 0.78),
+            (0.85, 0.70, 0.55),
+            (0.65, 0.50, 0.35),
+            BRAND_COLOR,
+        ];
+
+        let start = first_day.saturating_sub(crate::activity_log::weekday_index(first_day) as u64);
+        let end = last_day + (6 - crate::activity_log::weekday_index(last_day) as u64);
+        let weeks = (end - start + 1) / 7;
+        let per_week = ((PAGE_WIDTH_MM - 2.0 * MARGIN_MM - LABEL_WIDTH_MM) / weeks as f32).min(5.0);
+        let cell = per_week * 0.8;
+        let gap = per_week * 0.2;
+        let label_size = (cell / PT_TO_MM * 0.9).min(CODE_SIZE);
+        let today = crate::activity_log::today();
+
+        let grid_top = self.cursor_y;
+        let grid_x0 = MARGIN_MM + LABEL_WIDTH_MM;
+        for weekday in 0..7usize {
+            let letter = crate::activity_log::WEEKDAY_LETTERS[weekday];
+            let y1 = grid_top - weekday as f32 * (cell + gap);
+            self.text(
+                &letter.to_string(),
+                false,
+                MARGIN_MM,
+                y1 - cell * 0.75,
+                label_size,
+                TEXT_COLOR,
+            );
+        }
+        for week in 0..weeks {
+            for weekday in 0..7u64 {
+                let day = start + week * 7 + weekday;
+                if day < first_day || day > last_day || day > today {
+                    continue;
+                }
+                let level = summary
+                    .per_day
+                    .get(&day)
+                    .map(|d| crate::activity_log::day_heatmap_level(d, max_tokens))
+                    .unwrap_or(0);
+                let x0 = grid_x0 + week as f32 * (cell + gap);
+                let y1 = grid_top - weekday as f32 * (cell + gap);
+                self.fill_rect(x0, y1 - cell, x0 + cell, y1, SHADES[level as usize]);
+            }
+        }
+        self.cursor_y = grid_top - 7.0 * (cell + gap) - 8.0;
+    }
+
+    /// Draw an "Authors" breakdown as a borderless table: one row per commit
+    /// author (from `git log`), most commits first — the author name left-
+    /// aligned, then the commit count, lines added (green), and lines removed
+    /// (red) each right-aligned in its own column so the `+`/`-` figures line
+    /// up down the page. `title_size` distinguishes the report-level page
+    /// (a full heading) from the per-year/per-month sections (a subheading).
+    fn draw_by_author_table(
+        &mut self,
+        by_author: &[crate::activity_log::AuthorStats],
+        title_size: f32,
+    ) {
+        self.draw_block(&heading("Authors", title_size));
+
+        let column_width = |texts: &mut dyn Iterator<Item = String>| {
+            texts
+                .map(|text| self.fonts.text_width_mm(&text, false, false, BODY_SIZE))
+                .fold(0.0_f32, f32::max)
+        };
+        let commits_label = |author: &crate::activity_log::AuthorStats| {
+            format!(
+                "{} commit{}",
+                author.commits,
+                if author.commits == 1 { "" } else { "s" }
+            )
+        };
+        let additions_width =
+            column_width(&mut by_author.iter().map(|a| format!("+{}", a.additions)));
+        let deletions_width =
+            column_width(&mut by_author.iter().map(|a| format!("-{}", a.deletions)));
+
+        // The numeric columns hug the right margin; the name column takes the
+        // rest, matching how the bordered tables span the content width.
+        const COLUMN_GAP_MM: f32 = 6.0;
+        let deletions_right = PAGE_WIDTH_MM - MARGIN_MM;
+        let additions_right = deletions_right - deletions_width - COLUMN_GAP_MM;
+        let commits_right = additions_right - additions_width - COLUMN_GAP_MM;
+
+        let line_height = BODY_SIZE * 1.35 * PT_TO_MM;
+        for author in by_author {
+            if self.cursor_y - line_height < CONTENT_BOTTOM_MM {
+                self.new_page();
+            }
+            self.cursor_y -= line_height;
+            let baseline = self.cursor_y;
+            self.text(
+                &author.author,
+                false,
+                MARGIN_MM,
+                baseline,
+                BODY_SIZE,
+                TEXT_COLOR,
+            );
+            let commits = commits_label(author);
+            let width = self.fonts.text_width_mm(&commits, false, false, BODY_SIZE);
+            self.text(
+                &commits,
+                false,
+                commits_right - width,
+                baseline,
+                BODY_SIZE,
+                TEXT_COLOR,
+            );
+            let additions = format!("+{}", author.additions);
+            let width = self
+                .fonts
+                .text_width_mm(&additions, false, false, BODY_SIZE);
+            self.text(
+                &additions,
+                false,
+                additions_right - width,
+                baseline,
+                BODY_SIZE,
+                STATUS_GREEN,
+            );
+            let deletions = format!("-{}", author.deletions);
+            let width = self
+                .fonts
+                .text_width_mm(&deletions, false, false, BODY_SIZE);
+            self.text(
+                &deletions,
+                false,
+                deletions_right - width,
+                baseline,
+                BODY_SIZE,
+                STATUS_RED,
+            );
+            self.cursor_y -= AUTHOR_ROW_GAP_MM;
+        }
+        self.cursor_y -= 8.0;
+    }
+
+    /// Draw one author's appendix page: their totals, then a calendar-year
+    /// breakdown of their commit count.
+    fn draw_author_appendix_page(&mut self, author: &crate::activity_log::AuthorStats) {
+        self.draw_block(&heading(&author.author, BODY_SIZE + 5.0));
+        self.draw_kv_table(&[
+            (
+                "Commits".to_string(),
+                RowValue::Text(author.commits.to_string()),
+                false,
+            ),
+            (
+                "Lines added".to_string(),
+                RowValue::Text(author.additions.to_string()),
+                false,
+            ),
+            (
+                "Lines removed".to_string(),
+                RowValue::Text(author.deletions.to_string()),
+                false,
+            ),
+        ]);
+        if !author.commits_by_year.is_empty() {
+            self.draw_block(&heading("Yearly Commits", BODY_SIZE + 2.0));
+            let rows: Vec<(String, RowValue, bool)> = author
+                .commits_by_year
+                .iter()
+                .map(|(year, commits)| {
+                    (year.to_string(), RowValue::Text(commits.to_string()), false)
+                })
+                .collect();
+            self.draw_kv_table(&rows);
+        }
+    }
+
+    /// Draw a monthly token-usage bar chart: one bar per month, height
+    /// proportional to that month's token total, in the brand colour.
+    fn draw_monthly_bar_chart(&mut self, monthly: &[BucketTotals]) {
+        const CHART_HEIGHT_MM: f32 = 70.0;
+        const LABEL_GAP_MM: f32 = 12.0;
+
+        // A fixed-height element mid-page (it lives inside the year
+        // sections): break to a fresh page first when the chart wouldn't fit
+        // above the footer.
+        let heading_allowance = 14.0;
+        if self.cursor_y - heading_allowance - CHART_HEIGHT_MM - LABEL_GAP_MM < CONTENT_BOTTOM_MM {
+            self.new_page();
+        }
+        self.draw_block(&heading("Monthly Token Usage", BODY_SIZE + 2.0));
+        self.cursor_y -= 4.0;
+
+        if monthly.is_empty() {
+            self.text(
+                "No activity recorded yet.",
+                false,
+                MARGIN_MM,
+                self.cursor_y,
+                BODY_SIZE,
+                TEXT_COLOR,
+            );
+            self.cursor_y -= BODY_SIZE * PT_TO_MM + 8.0;
+            return;
+        }
+        let usable_width = PAGE_WIDTH_MM - 2.0 * MARGIN_MM;
+        let (bar_width, bar_gap) = bar_layout(usable_width, monthly.len());
+        let max_tokens = monthly.iter().map(|b| b.tokens).max().unwrap_or(0).max(1);
+
+        let chart_top = self.cursor_y;
+        let baseline = chart_top - CHART_HEIGHT_MM;
+        // Every bar gets its 2-digit month label when there's room for one;
+        // otherwise only January bars are labelled, with the year instead of
+        // the month, so a many-year history reads as a timeline rather than
+        // illegible overlapping text.
+        let label_every_month =
+            bar_width >= self.fonts.text_width_mm("00", false, false, CODE_SIZE) + 1.0;
+        for (index, bucket) in monthly.iter().enumerate() {
+            let x0 = MARGIN_MM + index as f32 * (bar_width + bar_gap);
+            let height = CHART_HEIGHT_MM * bucket.tokens as f32 / max_tokens as f32;
+            self.fill_rect(x0, baseline, x0 + bar_width, baseline + height, BRAND_COLOR);
+
+            let (year, month) = bucket.label.split_once('-').unwrap_or((&bucket.label, ""));
+            let label = if label_every_month {
+                Some(month.to_string())
+            } else if month == "01" || index == 0 {
+                // Also label the very first bar even when it isn't a January
+                // (a repository's history rarely starts on one), so the
+                // earliest year on the chart is never left unmarked.
+                Some(year.to_string())
+            } else {
+                None
+            };
+            if let Some(label) = label {
+                let label_width = self.fonts.text_width_mm(&label, false, false, CODE_SIZE);
+                let label_x = x0 + (bar_width - label_width) / 2.0;
+                self.text(
+                    &label,
+                    false,
+                    label_x,
+                    baseline - 5.0,
+                    CODE_SIZE,
+                    TEXT_COLOR,
+                );
+            }
+        }
+        self.rule(
+            MARGIN_MM,
+            baseline,
+            PAGE_WIDTH_MM - MARGIN_MM,
+            baseline,
+            GRID_COLOR,
+            0.4,
+        );
+        self.cursor_y = baseline - LABEL_GAP_MM;
+    }
+
     /// Draw a clickable URL: the text in the brand colour (so it reads as a
     /// link, matching the duplicates export's source-location links), with a
     /// `Op::LinkAnnotation` covering the drawn text.
@@ -2197,6 +2847,43 @@ impl Pdf {
                     self.text("X", true, icon_x, self.cursor_y, size, STATUS_RED);
                 }
             }
+            let number = page.to_string();
+            let width = self.fonts.text_width_mm(&number, false, false, size);
+            self.text(
+                &number,
+                false,
+                PAGE_WIDTH_MM - MARGIN_MM - width,
+                self.cursor_y,
+                size,
+                BRAND_COLOR,
+            );
+            self.link_to_page(page, self.cursor_y - 1.0, size * PT_TO_MM + 2.0);
+        }
+    }
+
+    /// Draw the statistics export's two-layer table of contents: `rows` pairs
+    /// each entry's label with its indent (`0` for a top-level section or
+    /// year, indented for the months nested under their year), and `pages`
+    /// gives the page each entry links to, in the same order. Entries are
+    /// drawn like [`Self::draw_toc`]'s, flowing across as many pages as
+    /// needed.
+    fn draw_toc_nested(&mut self, rows: &[(String, f32)], pages: &[usize]) {
+        self.draw_block(&heading("Table of Contents", BODY_SIZE + 5.0));
+        let size = BODY_SIZE + 1.0;
+        let row_height = size * 1.8 * PT_TO_MM;
+        for ((title, indent), &page) in rows.iter().zip(pages) {
+            if self.cursor_y - row_height < CONTENT_BOTTOM_MM {
+                self.new_page();
+            }
+            self.cursor_y -= row_height;
+            self.text(
+                title,
+                false,
+                MARGIN_MM + indent,
+                self.cursor_y,
+                size,
+                BRAND_COLOR,
+            );
             let number = page.to_string();
             let width = self.fonts.text_width_mm(&number, false, false, size);
             self.text(
@@ -2361,6 +3048,39 @@ fn heading(text: &str, size: f32) -> Block {
         space_after_mm: size * 0.6 * PT_TO_MM,
         link: None,
     }
+}
+
+/// The `(bar_width, bar_gap)` (both mm) for `count` bars spanning
+/// `usable_width`, so `count` bars always fit `usable_width` however large
+/// `count` is — a fixed minimum bar width would instead run bars off the page
+/// once a repository's history passes roughly 45 months. Tries the full 2mm
+/// gap first; if that would leave bars narrower than 1mm, shrinks the gap
+/// (down to a 0.2mm hairline) before shrinking the bar itself.
+fn bar_layout(usable_width: f32, count: usize) -> (f32, f32) {
+    const MAX_BAR_GAP_MM: f32 = 2.0;
+    const MIN_BAR_GAP_MM: f32 = 0.2;
+    const MIN_BAR_WIDTH_MM: f32 = 1.0;
+    let count = count.max(1) as f32;
+    if count <= 1.0 {
+        return (usable_width, 0.0);
+    }
+    let gaps = count - 1.0;
+
+    let bar_width_at_max_gap = (usable_width - MAX_BAR_GAP_MM * gaps) / count;
+    if bar_width_at_max_gap >= MIN_BAR_WIDTH_MM {
+        return (bar_width_at_max_gap, MAX_BAR_GAP_MM);
+    }
+
+    let gap_at_min_bar_width = (usable_width - MIN_BAR_WIDTH_MM * count) / gaps;
+    if gap_at_min_bar_width >= MIN_BAR_GAP_MM {
+        return (MIN_BAR_WIDTH_MM, gap_at_min_bar_width);
+    }
+
+    // An extreme number of bars (many decades of monthly history): hold the
+    // gap at its hairline and let the bar shrink below the usual minimum
+    // rather than the gap going negative.
+    let bar_width = ((usable_width - MIN_BAR_GAP_MM * gaps) / count).max(0.05);
+    (bar_width, MIN_BAR_GAP_MM)
 }
 
 /// The number of pages `blocks` occupy when laid out from a fresh page — used
@@ -3421,5 +4141,76 @@ mod tests {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         // 2021-01-01 is 18628 days after the epoch.
         assert_eq!(civil_from_days(18628), (2021, 1, 1));
+    }
+
+    #[test]
+    fn days_from_civil_inverts_civil_from_days() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2021, 1, 1), 18628);
+        // Round-trip across month/year boundaries, including a leap February.
+        for day in [18627, 18628, 18658, 18659, 19058, 19059, 19082] {
+            let (y, m, d) = civil_from_days(day);
+            assert_eq!(days_from_civil(y, m, d), day);
+        }
+    }
+
+    #[test]
+    fn month_day_range_covers_whole_months() {
+        // January 2021: day 18628 through 18658 (31 days).
+        assert_eq!(month_day_range(2021, 1), (18628, 18658));
+        // December rolls into the next year.
+        let (first, last) = month_day_range(2021, 12);
+        assert_eq!(civil_from_days(first as i64), (2021, 12, 1));
+        assert_eq!(civil_from_days(last as i64), (2021, 12, 31));
+    }
+
+    #[test]
+    fn bar_layout_always_fits_within_usable_width() {
+        let usable_width = PAGE_WIDTH_MM - 2.0 * MARGIN_MM;
+        // A modest count (a couple of years) uses the full 2mm gap.
+        let (bar_width, bar_gap) = bar_layout(usable_width, 24);
+        assert!((bar_width * 24.0 + bar_gap * 23.0 - usable_width).abs() < 0.01);
+        assert_eq!(bar_gap, 2.0);
+
+        // A long history (many years of months) still fits the page: the gap
+        // shrinks well below 2mm rather than letting the bars overflow.
+        let many = 90;
+        let (bar_width, bar_gap) = bar_layout(usable_width, many);
+        let total_width = bar_width * many as f32 + bar_gap * (many as f32 - 1.0);
+        assert!(
+            total_width <= usable_width + 0.01,
+            "bars must not overflow the page: {total_width} > {usable_width}"
+        );
+        assert!(bar_gap < 2.0);
+    }
+
+    #[test]
+    fn export_statistics_writes_a_pdf_with_no_activity() {
+        // Deliberately doesn't call `append_activity`: that (like
+        // `crate::activity_log::read_activity`, which this exercises)
+        // resolves under the real `~/.orangu`, which unit tests must never
+        // write to. A fresh, non-Git workspace's log reads back empty,
+        // exercising the empty-history path (heatmap and Total page still
+        // render; by-author and year pages are skipped).
+        let workspace = tempdir().expect("workspace");
+        let path = export_statistics(workspace.path(), "model", false).expect("export");
+        let bytes = std::fs::read(&path).expect("read pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn export_statistics_writes_a_pdf_with_commit_history() {
+        // A real Git repo's commit history is safe to read here (unlike the
+        // turn log, `git log` never touches `~/.orangu`), and exercises the
+        // by-author and per-year pages the empty-history test above skips.
+        let workspace = tempdir().expect("workspace");
+        crate::git::init_git_for_test(workspace.path());
+        std::fs::write(workspace.path().join("a.txt"), "one\n").expect("write");
+        crate::git::git_run(workspace.path(), &["add", "."]);
+        crate::git::git_run(workspace.path(), &["commit", "-m", "first"]);
+
+        let path = export_statistics(workspace.path(), "model", false).expect("export");
+        let bytes = std::fs::read(&path).expect("read pdf");
+        assert!(bytes.starts_with(b"%PDF"));
     }
 }
