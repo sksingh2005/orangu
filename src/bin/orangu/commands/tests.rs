@@ -830,7 +830,11 @@ fn parses_auto_review_commands() {
         assert!(
             matches!(
                 parse_local_command(input),
-                Some(LocalCommand::AutoReview(AutoReviewTarget::Branch, false, false))
+                Some(LocalCommand::AutoReview(
+                    AutoReviewTarget::Branch,
+                    false,
+                    false
+                ))
             ),
             "expected {input:?} to parse as a whole-branch AutoReview"
         );
@@ -852,11 +856,19 @@ fn parses_auto_review_commands() {
     // alongside a file, in either order.
     assert!(matches!(
         parse_local_command("/auto_review immediate"),
-        Some(LocalCommand::AutoReview(AutoReviewTarget::Branch, true, false))
+        Some(LocalCommand::AutoReview(
+            AutoReviewTarget::Branch,
+            true,
+            false
+        ))
     ));
     assert!(matches!(
         parse_local_command("auto review immediate"),
-        Some(LocalCommand::AutoReview(AutoReviewTarget::Branch, true, false))
+        Some(LocalCommand::AutoReview(
+            AutoReviewTarget::Branch,
+            true,
+            false
+        ))
     ));
     assert!(matches!(
         parse_local_command("/auto_review src/tui.rs immediate"),
@@ -873,7 +885,11 @@ fn parses_auto_review_commands() {
         assert!(
             matches!(
                 parse_local_command(input),
-                Some(LocalCommand::AutoReview(AutoReviewTarget::All, false, false))
+                Some(LocalCommand::AutoReview(
+                    AutoReviewTarget::All,
+                    false,
+                    false
+                ))
             ),
             "expected {input:?} to parse as an All AutoReview"
         );
@@ -889,7 +905,11 @@ fn parses_auto_review_commands() {
     // `all` wins over a file argument if both are somehow given.
     assert!(matches!(
         parse_local_command("/auto_review src/tui.rs all"),
-        Some(LocalCommand::AutoReview(AutoReviewTarget::All, false, false))
+        Some(LocalCommand::AutoReview(
+            AutoReviewTarget::All,
+            false,
+            false
+        ))
     ));
 
     // The `deep` keyword starts every file in Deep mode — alone (whole
@@ -899,7 +919,11 @@ fn parses_auto_review_commands() {
         assert!(
             matches!(
                 parse_local_command(input),
-                Some(LocalCommand::AutoReview(AutoReviewTarget::Branch, false, true))
+                Some(LocalCommand::AutoReview(
+                    AutoReviewTarget::Branch,
+                    false,
+                    true
+                ))
             ),
             "expected {input:?} to parse as a Deep whole-branch AutoReview"
         );

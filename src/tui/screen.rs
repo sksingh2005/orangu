@@ -717,9 +717,9 @@ fn render_status_line(
         (None, Some(pending)) => Some(pending.clone()),
         (None, None) => None,
     };
-    let middle = combined.filter(|text| show_model && visible_line_width(text) <= gap).or_else(
-        || graph_text.filter(|text| show_model && visible_line_width(text) <= gap),
-    );
+    let middle = combined
+        .filter(|text| show_model && visible_line_width(text) <= gap)
+        .or_else(|| graph_text.filter(|text| show_model && visible_line_width(text) <= gap));
 
     let gap_content = match &middle {
         Some(text) => centered(text, gap),

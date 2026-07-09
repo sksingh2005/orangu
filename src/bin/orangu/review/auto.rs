@@ -462,7 +462,8 @@ pub(crate) struct AutoReviewState {
     /// (`tools.graph_status`) by `run_auto_review_mode` right after
     /// construction; defaults to a private, always-`Building` handle so tests
     /// building `AutoReviewState` directly don't need to supply one.
-    pub(crate) graph_status: std::sync::Arc<std::sync::Mutex<orangu::graph::status::GraphBuildStatus>>,
+    pub(crate) graph_status:
+        std::sync::Arc<std::sync::Mutex<orangu::graph::status::GraphBuildStatus>>,
 }
 
 impl AutoReviewState {
@@ -2294,7 +2295,10 @@ pub(crate) async fn run_auto_review_mode(
         if deep && any_rejected {
             let findings = state.findings_for_path(&path);
             if !findings.is_empty() {
-                state.status = format!("File: {path} ({}/{total})  Category: Deep verify", index + 1);
+                state.status = format!(
+                    "File: {path} ({}/{total})  Category: Deep verify",
+                    index + 1
+                );
                 let prompt = build_auto_review_verify_prompt(&findings);
                 let llm_start = std::time::Instant::now();
                 let outcome = run_auto_review_request(
@@ -3208,9 +3212,10 @@ mod tests {
             parse_auto_review_verify_response("not the requested format", 2),
             vec![false, false]
         );
-        assert_eq!(parse_auto_review_verify_response("1. DROP\n", 2), vec![
-            true, false
-        ]);
+        assert_eq!(
+            parse_auto_review_verify_response("1. DROP\n", 2),
+            vec![true, false]
+        );
         // Out-of-range and zero ordinals are ignored rather than panicking.
         assert_eq!(
             parse_auto_review_verify_response("0. DROP\n5. DROP\n", 2),
@@ -4156,7 +4161,10 @@ mod tests {
             deep: false,
             files: Vec::new(),
         });
-        assert_eq!(*state.graph_status.lock().unwrap(), GraphBuildStatus::Building);
+        assert_eq!(
+            *state.graph_status.lock().unwrap(),
+            GraphBuildStatus::Building
+        );
     }
 
     #[test]

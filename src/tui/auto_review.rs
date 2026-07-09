@@ -507,7 +507,10 @@ mod tests {
         let screen = render_auto_review_screen(args);
         assert!(screen.contains(&blue_dot), "{screen:?}");
         assert!(screen.contains(&white_dot), "{screen:?}");
-        assert!(screen.contains("a.rs") && screen.contains("b.rs"), "{screen:?}");
+        assert!(
+            screen.contains("a.rs") && screen.contains("b.rs"),
+            "{screen:?}"
+        );
 
         // Once the run starts the ignored file is approved: no blue dot any
         // more, just the green status dot.

@@ -752,9 +752,7 @@ mod tests {
             },
         ];
         let table = format_information_table("main-server", "gemma", "Complete", &capabilities);
-        assert!(table.contains(
-            "Server  main-server\nModel   gemma      \nGraph   Complete   "
-        ));
+        assert!(table.contains("Server  main-server\nModel   gemma      \nGraph   Complete   "));
         assert!(table.contains("STATUS  API        ENDPOINT    DETAILS"));
         assert!(table.contains(&format!("{FEEDBACK_OK}       OpenAI     /v1/models  gemma")));
         assert!(table.contains(&format!(

@@ -424,7 +424,11 @@ pub(crate) fn handle_command(
             let model_id = active_model_id.clone();
             let is_embeddings_server = active_model.as_str() == embeddings_server;
             let graph_status = crate::information::graph_status_label(
-                tools.graph_status.lock().map(|status| *status).unwrap_or_default(),
+                tools
+                    .graph_status
+                    .lock()
+                    .map(|status| *status)
+                    .unwrap_or_default(),
             );
             Ok(CommandOutcome::Blocking(Box::new(move || {
                 let capabilities = tokio::runtime::Handle::current().block_on(async {
