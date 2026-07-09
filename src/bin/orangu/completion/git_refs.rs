@@ -38,10 +38,9 @@ pub fn checkout_completion_candidates(
         // Checked before the shorter `switch to ` so `switch to branch m` keeps
         // `m` as the token rather than treating `branch m` as the branch prefix.
         (prefix.len() - rest.len(), rest, true)
-    } else if let Some(rest) = strip_ascii_prefix(prefix, "switch to ") {
-        (prefix.len() - rest.len(), rest, true)
     } else {
-        return None;
+        let rest = strip_ascii_prefix(prefix, "switch to ")?;
+        (prefix.len() - rest.len(), rest, true)
     };
 
     let mut candidates: Vec<String> = discover_git_root(workspace)
@@ -126,10 +125,9 @@ pub fn restore_completion_candidates(
         ("/restore ".len(), rest, true)
     } else if let Some(rest) = strip_ascii_prefix(prefix, "git restore ") {
         (prefix.len() - rest.len(), rest, false)
-    } else if let Some(rest) = strip_ascii_prefix(prefix, "restore ") {
-        (prefix.len() - rest.len(), rest, false)
     } else {
-        return None;
+        let rest = strip_ascii_prefix(prefix, "restore ")?;
+        (prefix.len() - rest.len(), rest, false)
     };
 
     if allow_flags {
@@ -225,10 +223,9 @@ pub fn add_file_completion_candidates(
         (prefix.len() - rest.len(), rest)
     } else if let Some(rest) = strip_ascii_prefix(prefix, "add file ") {
         (prefix.len() - rest.len(), rest)
-    } else if let Some(rest) = strip_ascii_prefix(prefix, "add ") {
-        (prefix.len() - rest.len(), rest)
     } else {
-        return None;
+        let rest = strip_ascii_prefix(prefix, "add ")?;
+        (prefix.len() - rest.len(), rest)
     };
 
     let candidates = discover_git_root(workspace)
@@ -248,10 +245,9 @@ pub fn remove_file_completion_candidates(
         (prefix.len() - rest.len(), rest)
     } else if let Some(rest) = strip_ascii_prefix(prefix, "remove file ") {
         (prefix.len() - rest.len(), rest)
-    } else if let Some(rest) = strip_ascii_prefix(prefix, "remove ") {
-        (prefix.len() - rest.len(), rest)
     } else {
-        return None;
+        let rest = strip_ascii_prefix(prefix, "remove ")?;
+        (prefix.len() - rest.len(), rest)
     };
 
     let candidates = discover_git_root(workspace)
@@ -271,10 +267,9 @@ pub fn move_file_completion_candidates(
         (prefix.len() - rest.len(), rest)
     } else if let Some(rest) = strip_ascii_prefix(prefix, "move file ") {
         (prefix.len() - rest.len(), rest)
-    } else if let Some(rest) = strip_ascii_prefix(prefix, "move ") {
-        (prefix.len() - rest.len(), rest)
     } else {
-        return None;
+        let rest = strip_ascii_prefix(prefix, "move ")?;
+        (prefix.len() - rest.len(), rest)
     };
 
     let (token_start, token) = last_shell_token(args);
@@ -307,10 +302,9 @@ pub fn cherry_pick_completion_candidates(
         (prefix.len() - rest.len(), rest)
     } else if let Some(rest) = strip_ascii_prefix(prefix, "cherry-pick ") {
         (prefix.len() - rest.len(), rest)
-    } else if let Some(rest) = strip_ascii_prefix(prefix, "cherry pick ") {
-        (prefix.len() - rest.len(), rest)
     } else {
-        return None;
+        let rest = strip_ascii_prefix(prefix, "cherry pick ")?;
+        (prefix.len() - rest.len(), rest)
     };
     let token = token.trim_start();
     let candidates = discover_git_root(workspace)
@@ -330,10 +324,9 @@ pub fn show_completion_candidates(prefix: &str, workspace: &Path) -> Option<(usi
         ("/show ".len(), rest)
     } else if let Some(rest) = strip_ascii_prefix(prefix, "git show ") {
         (prefix.len() - rest.len(), rest)
-    } else if let Some(rest) = strip_ascii_prefix(prefix, "show commit ") {
-        (prefix.len() - rest.len(), rest)
     } else {
-        return None;
+        let rest = strip_ascii_prefix(prefix, "show commit ")?;
+        (prefix.len() - rest.len(), rest)
     };
     let token = token.trim_start();
     let candidates = discover_git_root(workspace)
@@ -384,10 +377,9 @@ pub fn fetch_completion_candidates(prefix: &str, workspace: &Path) -> Option<(us
         ("/fetch ".len(), rest)
     } else if let Some(rest) = strip_ascii_prefix(prefix, "git fetch ") {
         (prefix.len() - rest.len(), rest)
-    } else if let Some(rest) = strip_ascii_prefix(prefix, "fetch ") {
-        (prefix.len() - rest.len(), rest)
     } else {
-        return None;
+        let rest = strip_ascii_prefix(prefix, "fetch ")?;
+        (prefix.len() - rest.len(), rest)
     };
 
     let candidates = discover_git_root(workspace)
@@ -415,10 +407,9 @@ pub fn rebase_completion_candidates(
         ("/rebase ".len(), rest)
     } else if let Some(rest) = strip_ascii_prefix(prefix, "git rebase ") {
         (prefix.len() - rest.len(), rest)
-    } else if let Some(rest) = strip_ascii_prefix(prefix, "rebase ") {
-        (prefix.len() - rest.len(), rest)
     } else {
-        return None;
+        let rest = strip_ascii_prefix(prefix, "rebase ")?;
+        (prefix.len() - rest.len(), rest)
     };
 
     let candidates = discover_git_root(workspace)
