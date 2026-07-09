@@ -82,13 +82,14 @@ use uuid::Uuid;
 use anyhow::Error;
 use commands::ReviewLaunch;
 use commands::{
-    BisectSubcommand, BranchSubcommand, CommandContext, CommandOutcome, CommandState, ExportTarget,
-    LocalCommand, LocalError, PruneTarget, StashSubcommand, add_file_usage_message,
-    amend_usage_message, cherry_pick_usage_message, close_usage_message, comment_usage_message,
-    commit_usage_message, get_comments_usage_message, grep_usage_message, issue_usage_message,
-    merge_usage_message, model_usage_message, move_file_usage_message, open_file_usage_message,
-    parse_local_command, prune_usage_message, pull_usage_message, remove_file_usage_message,
-    restore_usage_message, server_usage_message, sorted_model_names, system_prompt,
+    AutoReviewTarget, BisectSubcommand, BranchSubcommand, CommandContext, CommandOutcome,
+    CommandState, ExportTarget, LocalCommand, LocalError, PruneTarget, StashSubcommand,
+    add_file_usage_message, amend_usage_message, cherry_pick_usage_message, close_usage_message,
+    comment_usage_message, commit_usage_message, get_comments_usage_message, grep_usage_message,
+    issue_usage_message, merge_usage_message, model_usage_message, move_file_usage_message,
+    open_file_usage_message, parse_local_command, prune_usage_message, pull_usage_message,
+    remove_file_usage_message, restore_usage_message, server_usage_message, sorted_model_names,
+    system_prompt,
 };
 use dispatch::*;
 use git::{

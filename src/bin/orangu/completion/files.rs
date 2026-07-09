@@ -17,7 +17,7 @@ use std::{fs, path::Path};
 use walkdir::WalkDir;
 
 use super::*;
-use crate::commands::{AUTO_REVIEW_IMMEDIATE, shell_words, strip_ascii_prefix};
+use crate::commands::{AUTO_REVIEW_ALL, AUTO_REVIEW_IMMEDIATE, shell_words, strip_ascii_prefix};
 use crate::git::{
     discover_git_root, git_current_branch, git_file_commit_hashes, is_protected_branch,
     review_changed_paths,
@@ -146,9 +146,10 @@ fn auto_review_completion_prefix(prefix: &str) -> Option<(usize, &str)> {
 /// typing `t` offers `src/tui.rs`. On main/master every tracked file is a
 /// candidate (gitignored files excluded); on any other branch only the files
 /// that differ from the default branch are, matching what a single-file
-/// `/auto_review` will actually review there. Returns the token start and the
-/// candidate relative paths, or `None` when `prefix` is not an auto-review
-/// argument.
+/// `/auto_review` will actually review there. Also offers the `immediate` and
+/// `all` keywords (see `AUTO_REVIEW_IMMEDIATE` and `AUTO_REVIEW_ALL`) once
+/// their prefix is typed. Returns the token start and the candidate relative
+/// paths, or `None` when `prefix` is not an auto-review argument.
 pub fn auto_review_completion_candidates(
     prefix: &str,
     workspace: &Path,
@@ -176,10 +177,14 @@ pub fn auto_review_completion_candidates(
             })
             .collect()
     };
-    // Offer the `immediate` keyword (start the run at once) when the typed token
-    // is a prefix of it, so `/auto_review imm` completes — and ghosts — to it.
+    // Offer the `immediate` and `all` keywords (start the run at once, review
+    // every project file) when the typed token is a prefix of either, so
+    // `/auto_review imm` and `/auto_review al` complete — and ghost — to them.
     if !token.is_empty() && AUTO_REVIEW_IMMEDIATE.starts_with(&token.to_ascii_lowercase()) {
         candidates.push(AUTO_REVIEW_IMMEDIATE.to_string());
+    }
+    if !token.is_empty() && AUTO_REVIEW_ALL.starts_with(&token.to_ascii_lowercase()) {
+        candidates.push(AUTO_REVIEW_ALL.to_string());
     }
     Some((start, candidates))
 }

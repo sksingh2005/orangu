@@ -189,7 +189,7 @@ pub fn help_text() -> &'static str {
 /export [console|review|auto review|duplicates|pr|statistics] Export the output window (console), the last review report (review), the last auto-review report (auto review), a fresh duplicate-code report (duplicates), open pull requests (pr), or persistent activity history (statistics) to a PDF in the workspace root
 /duplicates [<threshold>]                       Scan source functions (Rust, C/C++, Go, Python, JS/TS, and ~20 more languages) for duplicates; on a non-default branch only the functions it adds/changes are compared against the project; optional threshold is a percentage (default 80%)
 /add_file <path>                                Stage a file or directory with git add
-/auto_review [<file>] [immediate]               LLM auto review in a split view: the whole branch, or one Tab-completed file (the full file on main/master, its changes on a branch); add immediate to start the run at once
+/auto_review [<file>|all] [immediate]           LLM auto review in a split view: the whole branch, one Tab-completed file (the full file on main/master, its changes on a branch), or every Git-tracked project file with all; add immediate to start the run at once
 /amend <message>                                Rewrite the last commit message with git commit --amend
 /bisect [start|good|bad|skip|reset|log]         Binary-search history for the commit that introduced a bug (git bisect); bare /bisect shows the session status
 /branch [<name>|-a|-b|-m|-d <name>]             List, switch, create, rename or delete a branch

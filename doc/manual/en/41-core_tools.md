@@ -735,7 +735,7 @@ review branch
 
 `/auto_review` runs an LLM-driven review of the changes on the current branch, in a full-screen, two-pane view modeled on `/review`. The model reviews the changes overall and each file by itself, sorts what it finds into the **Overall**, **Code**, **Security**, **Memory**, **Performance**, **Test Suite**, and **Documentation** categories, and marks each file approved or rejected. It is available inside a Git repository and requires a connected LLM server.
 
-Enter it with the `/auto_review` command, or the natural-language form `auto review`. Give it a file — `/auto_review <file>` — to review just that one file instead of the whole branch (see *Reviewing a single file* below). The view opens in a **pre-start phase** that waits for you to begin the run (see *Starting the run* below); add the `immediate` keyword — `/auto_review immediate` (or `/auto_review <file> immediate`) — to skip it and start at once.
+Enter it with the `/auto_review` command, or the natural-language form `auto review`. Give it a file — `/auto_review <file>` — to review just that one file instead of the whole branch (see *Reviewing a single file* below), or the `all` keyword — `/auto_review all` — to review every file in the project instead (see *Reviewing every file* below). The view opens in a **pre-start phase** that waits for you to begin the run (see *Starting the run* below); add the `immediate` keyword — `/auto_review immediate` (or `/auto_review <file> immediate`, or `/auto_review all immediate`) — to skip it and start at once.
 
 ### What is reviewed
 
@@ -750,7 +750,11 @@ Like `/review`, the branch must be **up to date (rebased)** against the default 
 - **On `main`/`master`** the whole file is reviewed — a full read of its current content, every line in scope — not a diff. This is the way to have the model review a file that is not part of any in-progress change.
 - **On any other branch** only the file's **changes** against the default branch are reviewed, exactly as in a whole-branch run (the same rebased-branch guard applies).
 
-The natural-language form takes a file too: `auto review <file>` is equivalent to `/auto_review <file>`. The file argument is resolved by **Tab completion** in either form, and it completes on the file's **name, not its location** — typing `t` and pressing Tab offers `src/tui.rs`. The `immediate` keyword Tab-completes (and ghosts) the same way — typing `imm` offers `immediate` — and may be combined with a file in either order. The candidate list matches what will be reviewed: on `main`/`master` it is every tracked file (files ignored by `.gitignore` are excluded); on any other branch it is only the files that differ from the default branch. Selecting a candidate fills in its full repository-relative path; a hand-typed bare name (e.g. `tui.rs`) is resolved too. On a branch, a file with no changes against the default branch is refused with `'<file>' has no changes against <base>.`
+The natural-language form takes a file too: `auto review <file>` is equivalent to `/auto_review <file>`. The file argument is resolved by **Tab completion** in either form, and it completes on the file's **name, not its location** — typing `t` and pressing Tab offers `src/tui.rs`. The `immediate` and `all` keywords Tab-complete (and ghost) the same way — typing `imm` offers `immediate` and typing `al` offers `all` — and either may be combined with a file in either order. The candidate list matches what will be reviewed: on `main`/`master` it is every tracked file (files ignored by `.gitignore` are excluded); on any other branch it is only the files that differ from the default branch. Selecting a candidate fills in its full repository-relative path; a hand-typed bare name (e.g. `tui.rs`) is resolved too. On a branch, a file with no changes against the default branch is refused with `'<file>' has no changes against <base>.`
+
+### Reviewing every file
+
+`/auto_review all` reviews every file `git` tracks in the project instead of the branch diff or a single file — the view, the categories, and the report are exactly the same, just with every tracked file in the checklist. Each file gets the same treatment as a single-file review on `main`/`master`: a full read of its current content, every line in scope, regardless of which branch you are on — `all` reviews what is actually on disk, not a diff, so a branch behind the default branch is reviewed anyway (the rebased-branch guard does not apply here). Untracked files and anything excluded by `.gitignore` are left out — the file list comes straight from `git ls-files`. If `all` is combined with a file argument, `all` wins and the file is ignored; combine it with `immediate` — `/auto_review all immediate` — to skip the pre-start phase and begin reviewing the whole project at once. The natural-language form takes it too: `auto review all`.
 
 ### Layout
 
@@ -884,11 +888,18 @@ Review a single file (Tab-completes on the file name):
 /auto_review src/tui.rs
 ```
 
-Natural-language form (a whole-branch review, or a single file):
+Review every file in the project, starting at once:
+
+```text
+/auto_review all immediate
+```
+
+Natural-language form (a whole-branch review, a single file, or every file):
 
 ```text
 auto review
 auto review src/tui.rs
+auto review all
 ```
 
 \newpage

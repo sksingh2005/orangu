@@ -431,13 +431,13 @@ pub fn parse_natural_language_command(input: &str) -> Option<LocalCommand<'_>> {
         return Some(LocalCommand::Review);
     }
     if let Some(args) = strip_ascii_prefix(input, "auto review ") {
-        let (file, immediate) = parse_auto_review_args(args.trim());
-        if file.is_some() || immediate {
-            return Some(LocalCommand::AutoReview(file.map(Cow::Borrowed), immediate));
+        let (target, immediate) = parse_auto_review_args(args.trim());
+        if !matches!(target, AutoReviewTarget::Branch) || immediate {
+            return Some(LocalCommand::AutoReview(target, immediate));
         }
     }
     if matches_ci(input, &["auto review"]) {
-        return Some(LocalCommand::AutoReview(None, false));
+        return Some(LocalCommand::AutoReview(AutoReviewTarget::Branch, false));
     }
     // Checked before the more specific buffers: "export console" / "export
     // review" / "export auto review" select a buffer, while a bare "export"

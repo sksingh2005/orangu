@@ -473,6 +473,15 @@ mod tests {
     }
 
     #[test]
+    fn auto_review_completes_the_all_keyword() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        // Typing a prefix of `all` offers it as a candidate.
+        let (_, candidates) = auto_review_completion_candidates("/auto_review al", workspace.path())
+            .expect("auto-review argument");
+        assert!(candidates.iter().any(|c| c == "all"), "{candidates:?}");
+    }
+
+    #[test]
     fn export_completes_console_review_auto_review_and_duplicates() {
         // The bare argument offers all six targets, in order.
         let (start, all) = export_completion_candidates("/export ").expect("export argument");

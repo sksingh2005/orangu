@@ -92,6 +92,32 @@ pub fn git_tag_names(repo_root: &Path) -> Vec<String> {
     tags
 }
 
+/// Every file `git` tracks under `workspace` (`git ls-files`, scoped to `workspace`
+/// so a nested workspace only lists its own subtree), as paths relative to
+/// `workspace`. Untracked files (including anything `.gitignore` excludes) never
+/// appear — this is `git`'s own bookkeeping, not a filesystem walk. Used by
+/// `/auto_review all` to review the whole project without picking up scratch or
+/// ignored files. Returns an empty vector outside a Git repository or on error.
+pub fn git_tracked_files(workspace: &Path) -> Vec<String> {
+    let Ok(output) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["ls-files"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// The names of the configured remotes (`git remote`), in `git`'s own listing
 /// order (alphabetical) with `origin` floated to the front when present, so the
 /// conventional default for a fetch is offered first. Returns an empty vector

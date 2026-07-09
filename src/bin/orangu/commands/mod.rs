@@ -236,6 +236,21 @@ pub struct ReviewLaunch {
 /// the pre-start phase. Offered by Tab completion and the inline ghost.
 pub const AUTO_REVIEW_IMMEDIATE: &str = "immediate";
 
+/// The `/auto_review` keyword argument that reviews every file in the project
+/// instead of the branch diff or a single file. Offered by Tab completion and
+/// the inline ghost.
+pub const AUTO_REVIEW_ALL: &str = "all";
+
+/// What `/auto_review` reviews: the branch diff (the default), a single file
+/// (`/auto_review <file>`), or every file in the project (`/auto_review
+/// all`). The `all` keyword takes priority over a file argument if both are
+/// given.
+pub enum AutoReviewTarget<'a> {
+    Branch,
+    File(Cow<'a, str>),
+    All,
+}
+
 /// The `/comment` keyword that submits the last `/review` summary as the
 /// comment body. Matched case-insensitively against the whole argument, so a
 /// `~/.orangu/comments/` template whose name merely starts with `w` is still
@@ -413,9 +428,10 @@ pub enum LocalCommand<'a> {
     Grep(Option<Cow<'a, str>>),
     Search(Option<Cow<'a, str>>),
     Review,
-    /// `/auto_review [<file>] [immediate]`: an optional single-file target and
+    /// `/auto_review [<file>|all] [immediate]`: the review target (the
+    /// branch diff, a single file, or every project file with `all`) and
     /// whether to start the run at once (the `immediate` keyword).
-    AutoReview(Option<Cow<'a, str>>, bool),
+    AutoReview(AutoReviewTarget<'a>, bool),
     /// `/duplicates [<threshold>]`: scan the workspace for duplicated functions
     /// (across every language in [`orangu::duplicates::LANGUAGES`]) and print a
     /// similarity report. The optional argument overrides

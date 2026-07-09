@@ -166,6 +166,41 @@ pub(crate) fn auto_review_file_outcome(
     })
 }
 
+/// Launch an `/auto_review all` of every file in the project: a full read of
+/// each Git-tracked file's current content (the same treatment
+/// `auto_review_file_outcome` gives a single file on main/master), regardless
+/// of the current branch — this reviews what is actually on disk, not a diff,
+/// so being behind the default branch does not matter. Untracked and
+/// gitignored files are never included, since `git ls-files` is the source of
+/// the file list.
+pub(crate) fn auto_review_all_outcome(workspace: &Path, immediate: bool) -> CommandOutcome {
+    let Some(repo_root) = git::discover_git_root(workspace) else {
+        return CommandOutcome::OutputError(
+            "auto review is only available inside a Git repository".to_string(),
+        );
+    };
+
+    let mut paths = git::git_tracked_files(workspace);
+    paths.sort();
+    if paths.is_empty() {
+        return CommandOutcome::Output("No files to review.".to_string());
+    }
+
+    // A file that cannot be read as text (a binary asset, for instance) is
+    // silently left out rather than aborting the whole run — with hundreds of
+    // tracked files one unreadable one should not sink the batch, and binary
+    // assets get no useful review anyway.
+    let files: Vec<ReviewEntry> = paths
+        .into_iter()
+        .filter_map(|path| full_file_review_entry(workspace, &repo_root, &path).ok())
+        .collect();
+    if files.is_empty() {
+        return CommandOutcome::Output("No files to review.".to_string());
+    }
+
+    CommandOutcome::AutoReview(ReviewLaunch { files, immediate })
+}
+
 /// Whether a changed file's repo-relative `path` matches the user's `arg`: the
 /// exact path (what Tab completion fills in), or a trailing path / basename
 /// match so a hand-typed bare name like `tui.rs` still resolves.
@@ -500,12 +535,17 @@ pub(crate) fn handle_command(
             Err(err) => Ok(local_command_error(err)),
         },
         LocalCommand::Review => Ok(review_outcome(workspace, CommandOutcome::Review)),
-        LocalCommand::AutoReview(None, immediate) => Ok(review_outcome(workspace, |mut launch| {
-            launch.immediate = immediate;
-            CommandOutcome::AutoReview(launch)
-        })),
-        LocalCommand::AutoReview(Some(file), immediate) => {
+        LocalCommand::AutoReview(AutoReviewTarget::Branch, immediate) => {
+            Ok(review_outcome(workspace, |mut launch| {
+                launch.immediate = immediate;
+                CommandOutcome::AutoReview(launch)
+            }))
+        }
+        LocalCommand::AutoReview(AutoReviewTarget::File(file), immediate) => {
             Ok(auto_review_file_outcome(workspace, file.trim(), immediate))
+        }
+        LocalCommand::AutoReview(AutoReviewTarget::All, immediate) => {
+            Ok(auto_review_all_outcome(workspace, immediate))
         }
         LocalCommand::Duplicates(threshold) => Ok(CommandOutcome::Duplicates(
             threshold.unwrap_or(orangu::duplicates::DEFAULT_THRESHOLD),
@@ -1191,6 +1231,47 @@ mod tests {
             auto_review_file_outcome(workspace.path(), "other.txt", false),
             CommandOutcome::OutputError(_)
         ));
+    }
+
+    #[test]
+    fn auto_review_all_reviews_every_tracked_file_only() {
+        let _env_lock = crate::process_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let workspace = tempdir().expect("workspace");
+        let home = tempdir().expect("home");
+        let _home = crate::git::EnvVarGuard::set_path("HOME", home.path());
+        crate::git::init_git_for_test(workspace.path());
+        crate::git::git_run(workspace.path(), &["checkout", "-B", "main"]);
+        fs::write(workspace.path().join("README.md"), "one\ntwo\n").expect("file");
+        fs::write(workspace.path().join(".gitignore"), "ignored.txt\n").expect("gitignore");
+        crate::git::git_run(workspace.path(), &["add", "."]);
+        crate::git::git_run(workspace.path(), &["commit", "-m", "base"]);
+
+        // Neither an untracked file nor one excluded by .gitignore is committed
+        // yet, so `all` must leave both out — only what `git` tracks is reviewed.
+        fs::write(workspace.path().join("untracked.rs"), "fn x() {}\n").expect("untracked");
+        fs::write(workspace.path().join("ignored.txt"), "secret\n").expect("ignored");
+
+        match auto_review_all_outcome(workspace.path(), false) {
+            CommandOutcome::AutoReview(launch) => {
+                let paths: Vec<&str> = launch.files.iter().map(|f| f.path.as_str()).collect();
+                assert!(paths.contains(&"README.md"), "{paths:?}");
+                assert!(paths.contains(&".gitignore"), "{paths:?}");
+                assert!(!paths.contains(&"untracked.rs"), "{paths:?}");
+                assert!(!paths.contains(&"ignored.txt"), "{paths:?}");
+
+                // Each tracked file is reviewed whole, as an all-added diff.
+                let readme = launch
+                    .files
+                    .iter()
+                    .find(|f| f.path == "README.md")
+                    .expect("README.md entry");
+                assert!(readme.patch.contains("+one"), "{:?}", readme.patch);
+                assert!(readme.patch.contains("+two"), "{:?}", readme.patch);
+            }
+            _ => panic!("expected an AutoReview outcome for `all`"),
+        }
     }
 
     #[test]

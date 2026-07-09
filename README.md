@@ -97,7 +97,7 @@ On exit it writes a category-grouped report with an approve/reject **Conclusion*
 - Each finding is pinned to its `file:line`, and requests are length-capped and tool-free so reviews stay fast and bounded even on slow local models
 - After the run you can browse the report, override any verdict (approve/reject with your own comment), and remove findings before exporting
 
-Run `/auto_review <file>` to review a single file (the whole file on `main`/`master`, or just its changes on a branch). Like `/review`, the report is copied to the clipboard and reusable with `/export review` and `/comment ... with auto review`.
+Run `/auto_review <file>` to review a single file (the whole file on `main`/`master`, or just its changes on a branch), or `/auto_review all` to review every Git-tracked file in the project (add `immediate` to either form to skip the pre-start phase, e.g. `/auto_review all immediate`). Like `/review`, the report is copied to the clipboard and reusable with `/export review` and `/comment ... with auto review`.
 
 > **Tip:** You can control the chatty nature of local models using the `model_verbosity` (`terse`, `normal`, `verbose`) and `reasoning_effort` options in your `orangu.conf`. 
 > The per-request length cap is `review_max_tokens` (default `512`; `0` disables it). If you review with a model that *thinks* before answering, raise it (e.g. `2048`) so the reasoning tokens don't crowd out the answer — see the [Configuration](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/20-configuration.md) chapter (*Response-token caps*). Set `feedback = on` to get the blinking terminal title and completion bell during a run.
