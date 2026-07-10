@@ -878,9 +878,21 @@ pub struct PullRequestComment {
     pub body: String,
 }
 
+/// One CI check on a pull/merge request — its name and outcome bucket.
+/// `bucket` mirrors `gh pr checks --json bucket`'s categories (`pass`,
+/// `fail`, `pending`, `skipping`, `cancel`); GitLab job statuses are folded
+/// onto the same set by [`gitlab_job_bucket`] so the `/export pr` report can
+/// colour both forges' checks identically.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestCheck {
+    pub name: String,
+    pub bucket: String,
+}
+
 /// A full snapshot of one open pull/merge request for the `/export pr`
 /// report — as much detail as [`fetch_pull_request_details`] can get from the
-/// forge CLI in a single list call.
+/// forge CLI in a single list call, plus its CI checks (fetched separately,
+/// one CLI call per pull request — see [`fetch_pull_request_checks`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PullRequestDetail {
     pub number: u64,
@@ -899,6 +911,7 @@ pub struct PullRequestDetail {
     pub files: Vec<ChangedFile>,
     pub last_comment: Option<PullRequestComment>,
     pub url: String,
+    pub checks: Vec<PullRequestCheck>,
 }
 
 /// Fetch every open pull/merge request in the repository containing
@@ -918,6 +931,13 @@ pub struct PullRequestDetail {
 /// this surfaces CLI/network failures as `Err`, since `/export pr` is an
 /// explicit user action that should report why the report could not be
 /// built rather than silently producing an empty one.
+///
+/// Each pull/merge request's CI checks are then fetched with one further CLI
+/// call per pull request (see [`fetch_pull_request_checks`]) — neither forge's
+/// list endpoint carries per-check detail, so this can't be folded into the
+/// call above. Unlike the list call, a checks failure is never fatal to the
+/// report: a pull request with no CI configured or an unauthenticated CLI
+/// just reports no checks.
 pub fn fetch_pull_request_details(
     workspace: &Path,
     forge: Forge,
@@ -962,7 +982,11 @@ pub fn fetch_pull_request_details(
             }
         ));
     }
-    parse_pull_request_details(&output.stdout, forge)
+    let mut details = parse_pull_request_details(&output.stdout, forge)?;
+    for pr in &mut details {
+        pr.checks = fetch_pull_request_checks(&repo_root, pr.number, forge);
+    }
+    Ok(details)
 }
 
 /// Parse the JSON array printed by `gh pr list --json ...` / `glab api
@@ -1148,6 +1172,9 @@ fn parse_github_pr_detail(entry: &serde_json::Value) -> Option<PullRequestDetail
         files: json_changed_files(entry, "files"),
         last_comment,
         url: json_str(entry, "url"),
+        // Filled by `fetch_pull_request_details` in a follow-up call per
+        // pull request — neither forge's list endpoint carries checks.
+        checks: Vec::new(),
     })
 }
 
@@ -1242,7 +1269,135 @@ fn parse_gitlab_pr_detail(entry: &serde_json::Value) -> Option<PullRequestDetail
         // merge-request list endpoint, not the comments themselves.
         last_comment: None,
         url: json_str(entry, "web_url"),
+        // Filled by `fetch_pull_request_details` in a follow-up call per
+        // merge request — see `fetch_gitlab_checks`.
+        checks: Vec::new(),
     })
+}
+
+/// Fetch one pull/merge request's CI checks, for the `/export pr` report's
+/// final "Checks" section.
+///
+/// GitHub: `gh pr checks <number> --json name,bucket` — a single call that
+/// already sorts each check's raw status into `gh`'s pass/fail/pending/
+/// skipping/cancel buckets. GitLab has no equivalent "checks" command; the
+/// closest is the merge request's most recent pipeline (newest-first from
+/// `.../merge_requests/:iid/pipelines`), whose jobs are fetched in a second
+/// call and folded onto the same buckets by [`gitlab_job_bucket`].
+///
+/// Never errors — a pull request with no CI configured, an unauthenticated
+/// CLI, or (for GitLab) no pipeline at all all just report no checks, so a
+/// missing/broken CI setup can't break the rest of the `/export pr` report.
+pub fn fetch_pull_request_checks(
+    repo_root: &Path,
+    number: u64,
+    forge: Forge,
+) -> Vec<PullRequestCheck> {
+    match forge {
+        Forge::GitHub => fetch_github_checks(repo_root, number),
+        Forge::GitLab => fetch_gitlab_checks(repo_root, number),
+    }
+}
+
+fn command_json(repo_root: &Path, cli: &str, args: &[&str]) -> Option<serde_json::Value> {
+    let output = std::process::Command::new(cli)
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(text.trim()).ok()
+}
+
+fn fetch_github_checks(repo_root: &Path, number: u64) -> Vec<PullRequestCheck> {
+    let number = number.to_string();
+    let Some(value) = command_json(
+        repo_root,
+        "gh",
+        &["pr", "checks", &number, "--json", "name,bucket"],
+    ) else {
+        return Vec::new();
+    };
+    value
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("name").and_then(serde_json::Value::as_str)?;
+            let bucket = entry
+                .get("bucket")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Some(PullRequestCheck {
+                name: name.to_string(),
+                bucket: bucket.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn fetch_gitlab_checks(repo_root: &Path, number: u64) -> Vec<PullRequestCheck> {
+    let pipelines = command_json(
+        repo_root,
+        "glab",
+        &[
+            "api",
+            &format!("projects/:id/merge_requests/{number}/pipelines"),
+        ],
+    );
+    let Some(pipeline_id) = pipelines
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|pipeline| pipeline.get("id"))
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return Vec::new();
+    };
+    let Some(jobs) = command_json(
+        repo_root,
+        "glab",
+        &["api", &format!("projects/:id/pipelines/{pipeline_id}/jobs")],
+    ) else {
+        return Vec::new();
+    };
+    jobs.as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|job| {
+            let name = job.get("name").and_then(serde_json::Value::as_str)?;
+            let status = job
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Some(PullRequestCheck {
+                name: name.to_string(),
+                bucket: gitlab_job_bucket(status).to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Fold a GitLab CI job status onto `gh pr checks --json bucket`'s
+/// categories, so `/export pr` can colour both forges' checks the same way.
+/// An unrecognised status (GitLab has added a few over time) falls back to
+/// empty, which the report renders as "UNKNOWN" rather than guessing.
+fn gitlab_job_bucket(status: &str) -> &'static str {
+    match status {
+        "success" => "pass",
+        "failed" => "fail",
+        "running" | "pending" | "created" | "waiting_for_resource" | "preparing" | "scheduled" => {
+            "pending"
+        }
+        "canceled" => "cancel",
+        "skipped" | "manual" => "skipping",
+        _ => "",
+    }
 }
 
 pub fn try_forge_create_pr(

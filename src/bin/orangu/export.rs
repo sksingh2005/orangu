@@ -67,8 +67,8 @@ use orangu::tui::TranscriptLine;
 
 use crate::VERSION;
 use crate::git::{
-    ForgeWeb, PullRequestDetail, PullRequestReviewer, discover_git_root, forge_web_from_origin,
-    git_repository_name, workspace_branch_name,
+    ForgeWeb, PullRequestCheck, PullRequestDetail, PullRequestReviewer, discover_git_root,
+    forge_web_from_origin, git_repository_name, workspace_branch_name,
 };
 use crate::render::{SyntaxHighlightAssets, syntax_highlight_assets};
 
@@ -131,6 +131,9 @@ const WHITE: (f32, f32, f32) = (1.0, 1.0, 1.0);
 /// Overall-status banner colours (the terminal's status green/red).
 const STATUS_GREEN: (f32, f32, f32) = (80.0 / 255.0, 200.0 / 255.0, 120.0 / 255.0);
 const STATUS_RED: (f32, f32, f32) = (220.0 / 255.0, 80.0 / 255.0, 80.0 / 255.0);
+/// A still-running CI check (`gh pr checks`'s "pending" bucket) — amber,
+/// between the pass/fail greens and reds.
+const STATUS_AMBER: (f32, f32, f32) = (230.0 / 255.0, 165.0 / 255.0, 40.0 / 255.0);
 const GRID_COLOR: (f32, f32, f32) = (0.6, 0.6, 0.6);
 
 const ORANGU_URL: &str = "https://mnemosyne-systems.github.io/orangu/";
@@ -394,10 +397,12 @@ pub fn export_duplicates(
 /// - **Page 2 — table of contents.** One entry per open pull request, `#N
 ///   Title`, linking to its page.
 /// - **Page 3 onward — one page per pull request** (more when it changes
-///   many files): its title linking to the forge, a table of author, dates,
-///   branches, draft/conflict status, comment count, assignees, reviewers
-///   (with their review state), and labels, then the changed files — full
-///   path, one per line, with additions in green and deletions in red.
+///   many files or has many checks): its title linking to the forge, a table
+///   of author, dates, branches, draft/conflict/CI status, comment count,
+///   assignees, reviewers (with their review state), and labels, then the
+///   changed files — full path, one per line, with additions in green and
+///   deletions in red — the last comment, and finally the CI checks, name
+///   and coloured status aligned in a borderless two-column table.
 ///
 /// A repository with no open pull requests still gets its status page,
 /// followed by a short note instead of a table of contents and PR pages.
@@ -437,9 +442,36 @@ pub fn export_pr(workspace: &Path, prs: &[PullRequestDetail], model: &str) -> Re
         let (mut pages_for_pr, cursor_after_files) =
             paginate_from(&build_changed_file_blocks(pr), &pdf.fonts, start_cursor);
         let comment_table_height = last_comment_table_height_mm(pr, &pdf.fonts);
-        if cursor_after_files - comment_table_height < CONTENT_BOTTOM_MM {
+        // The comment table breaks atomically onto a fresh page rather than
+        // wrapping (mirroring `draw_pr_detail_page`), so its post-table
+        // cursor is exactly `height` mm below wherever it started.
+        let cursor_after_comment = if cursor_after_files - comment_table_height < CONTENT_BOTTOM_MM
+        {
             pages_for_pr += 1;
-        }
+            CONTENT_TOP_MM - comment_table_height
+        } else {
+            cursor_after_files - comment_table_height
+        };
+        // The "Checks" heading, then either the checks table or the "No
+        // checks reported." fallback line — mirroring `draw_check_section`.
+        let (heading_pages, cursor_after_heading) = paginate_from(
+            std::slice::from_ref(&checks_heading_block()),
+            &pdf.fonts,
+            cursor_after_comment,
+        );
+        let (rows_pages, _) = if pr.checks.is_empty() {
+            paginate_from(
+                std::slice::from_ref(&no_checks_block()),
+                &pdf.fonts,
+                cursor_after_heading,
+            )
+        } else {
+            paginate_checks_rows(&pr.checks, cursor_after_heading)
+        };
+        // Each `paginate_*` counts the page it started on, already counted
+        // by the previous section's last page — only pages beyond that are
+        // new.
+        pages_for_pr += (heading_pages - 1) + (rows_pages - 1);
         page += pages_for_pr;
     }
 
@@ -525,10 +557,11 @@ fn pr_is_ready(pr: &PullRequestDetail) -> bool {
 }
 
 /// The rows of a pull request's header table: author, dates, branch,
-/// draft/conflict status, comment count, assignees, reviewers (as a status
+/// draft/conflict/CI status, comment count, assignees, reviewers (as a status
 /// icon per name), and labels — whatever the forge returned. Each row carries
 /// whether its value should render bold: `Draft`/`Conflicts` are bold when
-/// `Yes`, so a draft or a conflict catches the eye.
+/// `Yes`, and `CI` is bold when `No`, so a draft, a conflict, or a failing
+/// check catches the eye.
 /// The rows of the pull request export's page 1 status table: the
 /// repository, generation time, the open/ready/conflicting counts, and — when
 /// there is at least one open pull request with a known creation date — the
@@ -612,6 +645,14 @@ fn oldest_and_newest(
     (oldest, newest)
 }
 
+/// Whether a pull request's CI is passing: `false` when at least one check's
+/// bucket is `"fail"`. Pending/running checks, skipped/cancelled ones, and no
+/// checks at all (nothing configured) are not treated as a failure — only an
+/// actual failing check flips this to `false`.
+fn ci_passing(pr: &PullRequestDetail) -> bool {
+    !pr.checks.iter().any(|check| check.bucket == "fail")
+}
+
 fn pr_header_rows(pr: &PullRequestDetail) -> Vec<(String, RowValue, bool)> {
     let conflicts = match pr.conflicting {
         Some(true) => "Yes",
@@ -619,6 +660,7 @@ fn pr_header_rows(pr: &PullRequestDetail) -> Vec<(String, RowValue, bool)> {
         None => "Unknown",
     };
     let draft = if pr.draft { "Yes" } else { "No" };
+    let ci = if ci_passing(pr) { "Yes" } else { "No" };
     vec![
         (
             "Author".to_string(),
@@ -647,6 +689,7 @@ fn pr_header_rows(pr: &PullRequestDetail) -> Vec<(String, RowValue, bool)> {
             RowValue::Text(conflicts.to_string()),
             conflicts == "Yes",
         ),
+        ("CI".to_string(), RowValue::Text(ci.to_string()), ci == "No"),
         (
             "Comments".to_string(),
             RowValue::Text(pr.comment_count.to_string()),
@@ -730,6 +773,90 @@ fn build_changed_file_blocks(pr: &PullRequestDetail) -> Vec<Block> {
         last.space_after_mm += LAST_COMMENT_GAP_MM;
     }
     blocks
+}
+
+/// A CI check's colour and label, from its `gh pr checks --json bucket`
+/// category (GitLab job statuses are folded onto the same categories by
+/// `git::forge::gitlab_job_bucket` before reaching here, so this stays
+/// forge-agnostic). Anything unrecognised — including GitLab statuses with
+/// no clean mapping — renders as a neutral "UNKNOWN" in grid grey rather than
+/// guessing at pass or fail.
+fn check_status_style(bucket: &str) -> (&'static str, (f32, f32, f32)) {
+    match bucket {
+        "pass" => ("PASS", STATUS_GREEN),
+        "fail" => ("FAIL", STATUS_RED),
+        "pending" => ("PENDING", STATUS_AMBER),
+        "skipping" => ("SKIPPED", GRID_COLOR),
+        "cancel" => ("CANCELLED", GRID_COLOR),
+        _ => ("UNKNOWN", GRID_COLOR),
+    }
+}
+
+/// The bold "Checks" label that precedes the pull request report's final
+/// section, whether it renders as the checks table or (when the forge
+/// reported none) the "No checks reported." fallback line.
+fn checks_heading_block() -> Block {
+    Block {
+        spans: vec![Span {
+            text: "Checks".to_string(),
+            bold: true,
+            italic: false,
+            color: None,
+        }],
+        size: BODY_SIZE,
+        indent_mm: 0.0,
+        hanging_mm: 0.0,
+        word_wrap: true,
+        space_after_mm: BODY_SIZE * 0.5 * PT_TO_MM,
+        link: None,
+    }
+}
+
+/// The "No checks reported." line standing in for the checks table when the
+/// forge returned none — matching the "Last comment" table's own N/A
+/// fallback.
+fn no_checks_block() -> Block {
+    Block::paragraph(vec![Span::plain("No checks reported.")])
+}
+
+/// The row height (mm) of the checks table, matching the field table's own
+/// row rhythm (`draw_kv_table`) so every tabular section in the report reads
+/// at the same scale.
+const CHECKS_ROW_HEIGHT_MM: f32 = BODY_SIZE * 1.9 * PT_TO_MM;
+
+/// The checks table's column divider (mm): the margin plus the widest check
+/// name plus a gap, so every row's status lines up regardless of how long
+/// its name is — capped so an unusually long name can't squeeze the status
+/// column (its widest label, "CANCELLED") off the page.
+fn checks_divider_mm(checks: &[PullRequestCheck], fonts: &DocFonts) -> f32 {
+    let x0 = MARGIN_MM;
+    let x1 = PAGE_WIDTH_MM - MARGIN_MM;
+    let name_width = checks
+        .iter()
+        .map(|check| fonts.text_width_mm(&check.name, false, false, BODY_SIZE))
+        .fold(0.0_f32, f32::max);
+    (x0 + name_width + 10.0).min(x1 - 30.0)
+}
+
+/// Simulate [`Pdf::draw_checks_rows`]'s page-break logic exactly (one row
+/// per check, breaking to a fresh page whenever a row would run past the
+/// bottom margin), so the table of contents can compute accurate page
+/// numbers without drawing. Returns the page count and the cursor position
+/// after the last row.
+fn paginate_checks_rows(checks: &[PullRequestCheck], start_cursor_y: f32) -> (usize, f32) {
+    let mut pages = 1;
+    let mut cursor_y = start_cursor_y;
+    for _ in checks {
+        if cursor_y - CHECKS_ROW_HEIGHT_MM < CONTENT_BOTTOM_MM {
+            pages += 1;
+            cursor_y = CONTENT_TOP_MM;
+        }
+        cursor_y -= CHECKS_ROW_HEIGHT_MM;
+    }
+    if !checks.is_empty() {
+        cursor_y -= 8.0;
+    }
+    (pages, cursor_y)
 }
 
 /// The trailing gap (mm) after each Authors-table row, matching the
@@ -2284,10 +2411,12 @@ impl Pdf {
     /// One pull request's detail page: the linked title heading, a field
     /// table (author, dates, branch, draft/conflict status, comment count,
     /// assignees, reviewers, labels), then the changed files — one line per
-    /// file, full path, additions in green and deletions in red. The page is
-    /// assumed freshly started (`new_page` just called); the changed-files
-    /// list spills onto further pages on its own via `draw_blocks`' normal
-    /// overflow handling when there are many files.
+    /// file, full path, additions in green and deletions in red — the "Last
+    /// comment" table, and finally the "Checks" section (see
+    /// `build_check_blocks`). The page is assumed freshly started (`new_page`
+    /// just called); the changed-files list and the checks section each spill
+    /// onto further pages on their own via `draw_blocks`' normal overflow
+    /// handling when there's a lot of either.
     fn draw_pr_detail_page(&mut self, pr: &PullRequestDetail) {
         self.draw_block(&pr_title_block(pr));
         self.draw_kv_table(&pr_header_rows(pr));
@@ -2304,6 +2433,47 @@ impl Pdf {
             None => ("N/A", "N/A"),
         };
         self.draw_last_comment_table(author, body);
+        self.draw_check_section(pr);
+    }
+
+    /// The pull request report's final section: the bold "Checks" heading,
+    /// then either the checks table (see [`Pdf::draw_checks_rows`]) or, when
+    /// the forge reported none, the "No checks reported." fallback line.
+    fn draw_check_section(&mut self, pr: &PullRequestDetail) {
+        self.draw_block(&checks_heading_block());
+        if pr.checks.is_empty() {
+            self.draw_block(&no_checks_block());
+        } else {
+            self.draw_checks_rows(&pr.checks);
+        }
+    }
+
+    /// A borderless two-column table: each check's name (left) and coloured
+    /// status (right), sharing one divider x-position so the columns align
+    /// regardless of name length (see [`checks_divider_mm`]). Breaks to a
+    /// fresh page mid-table when a row would run past the bottom margin,
+    /// mirrored exactly by [`paginate_checks_rows`] for the table of
+    /// contents' page numbering.
+    fn draw_checks_rows(&mut self, checks: &[PullRequestCheck]) {
+        let divider = checks_divider_mm(checks, &self.fonts);
+        for check in checks {
+            if self.cursor_y - CHECKS_ROW_HEIGHT_MM < CONTENT_BOTTOM_MM {
+                self.new_page();
+            }
+            let baseline = self.cursor_y - CHECKS_ROW_HEIGHT_MM * 0.68;
+            self.text(
+                &check.name,
+                false,
+                MARGIN_MM,
+                baseline,
+                BODY_SIZE,
+                TEXT_COLOR,
+            );
+            let (label, color) = check_status_style(&check.bucket);
+            self.text(label, true, divider, baseline, BODY_SIZE, color);
+            self.cursor_y -= CHECKS_ROW_HEIGHT_MM;
+        }
+        self.cursor_y -= 8.0;
     }
 
     /// The "Last comment" table following a pull request's changed files: a
@@ -3526,6 +3696,16 @@ mod tests {
                 body: "Looks good, thanks!".to_string(),
             }),
             url: "https://github.com/o/r/pull/42".to_string(),
+            checks: vec![
+                crate::git::PullRequestCheck {
+                    name: "build".to_string(),
+                    bucket: "pass".to_string(),
+                },
+                crate::git::PullRequestCheck {
+                    name: "test".to_string(),
+                    bucket: "fail".to_string(),
+                },
+            ],
         }
     }
 
@@ -3733,6 +3913,9 @@ mod tests {
         assert_eq!(find_row_text(&rows, "Draft"), Some(("No", false)));
         // "Yes" is bolded, so a draft or a conflict catches the eye.
         assert_eq!(find_row_text(&rows, "Conflicts"), Some(("Yes", true)));
+        // The sample pull request has a failing "test" check, so CI reads
+        // "No" — bolded, the same way a draft or conflict is.
+        assert_eq!(find_row_text(&rows, "CI"), Some(("No", true)));
         assert_eq!(find_row_text(&rows, "Comments"), Some(("3", false)));
         assert_eq!(find_row_text(&rows, "Labels"), Some(("enhancement", false)));
         // Reviewers carries the raw list — icon selection happens at draw
@@ -3758,6 +3941,29 @@ mod tests {
         let rows = pr_header_rows(&pr);
         assert_eq!(find_row_text(&rows, "Draft"), Some(("Yes", true)));
         assert_eq!(find_row_text(&rows, "Conflicts"), Some(("No", false)));
+    }
+
+    #[test]
+    fn ci_passing_is_false_only_when_a_check_actually_failed() {
+        let mut pr = sample_pull_request();
+        // No checks configured at all is not treated as a failure.
+        pr.checks.clear();
+        assert!(ci_passing(&pr));
+
+        pr.checks.push(PullRequestCheck {
+            name: "build".to_string(),
+            bucket: "pending".to_string(),
+        });
+        assert!(
+            ci_passing(&pr),
+            "a still-running check is not a failure either"
+        );
+
+        pr.checks.push(PullRequestCheck {
+            name: "test".to_string(),
+            bucket: "fail".to_string(),
+        });
+        assert!(!ci_passing(&pr));
     }
 
     #[test]
@@ -3834,6 +4040,77 @@ mod tests {
         let mut pr = sample_pull_request();
         pr.files.clear();
         assert!(build_changed_file_blocks(&pr).is_empty());
+    }
+
+    #[test]
+    fn check_status_style_colors_each_bucket() {
+        assert_eq!(check_status_style("pass"), ("PASS", STATUS_GREEN));
+        assert_eq!(check_status_style("fail"), ("FAIL", STATUS_RED));
+        assert_eq!(check_status_style("pending"), ("PENDING", STATUS_AMBER));
+        assert_eq!(check_status_style("skipping"), ("SKIPPED", GRID_COLOR));
+        assert_eq!(check_status_style("cancel"), ("CANCELLED", GRID_COLOR));
+        // An unrecognised bucket (e.g. a GitLab job status with no clean
+        // mapping) renders as a neutral "UNKNOWN" rather than guessing.
+        assert_eq!(check_status_style(""), ("UNKNOWN", GRID_COLOR));
+    }
+
+    #[test]
+    fn checks_heading_and_fallback_line_carry_the_right_text() {
+        assert_eq!(checks_heading_block().spans[0].text, "Checks");
+        assert_eq!(no_checks_block().spans[0].text, "No checks reported.");
+    }
+
+    #[test]
+    fn checks_divider_aligns_with_the_longest_check_name() {
+        let fonts = Pdf::new("t", "m").expect("pdf").fonts;
+        let short = vec![PullRequestCheck {
+            name: "build".to_string(),
+            bucket: "pass".to_string(),
+        }];
+        let long = vec![PullRequestCheck {
+            name: "integration-tests-matrix".to_string(),
+            bucket: "pass".to_string(),
+        }];
+        let short_divider = checks_divider_mm(&short, &fonts);
+        let long_divider = checks_divider_mm(&long, &fonts);
+        assert!(
+            long_divider > short_divider,
+            "a longer check name should push the status column further right"
+        );
+    }
+
+    #[test]
+    fn paginate_checks_rows_is_one_page_when_empty() {
+        let (pages, cursor) = paginate_checks_rows(&[], CONTENT_TOP_MM);
+        assert_eq!(pages, 1);
+        assert_eq!(cursor, CONTENT_TOP_MM, "no rows means no cursor movement");
+    }
+
+    #[test]
+    fn paginate_checks_rows_breaks_onto_a_fresh_page_when_full() {
+        let checks: Vec<PullRequestCheck> = (0..80)
+            .map(|i| PullRequestCheck {
+                name: format!("job-{i}"),
+                bucket: "pass".to_string(),
+            })
+            .collect();
+        let (pages, _) = paginate_checks_rows(&checks, CONTENT_TOP_MM);
+        assert!(pages > 1, "80 checks should overflow a single page");
+    }
+
+    #[test]
+    fn export_pr_paginates_a_pull_request_with_many_checks() {
+        let workspace = tempdir().expect("workspace");
+        let mut pr = sample_pull_request();
+        pr.checks = (0..80)
+            .map(|i| crate::git::PullRequestCheck {
+                name: format!("job-{i}"),
+                bucket: "pass".to_string(),
+            })
+            .collect();
+        let path = export_pr(workspace.path(), std::slice::from_ref(&pr), "gemma").expect("export");
+        let bytes = std::fs::read(&path).expect("read pdf");
+        assert!(bytes.starts_with(b"%PDF"));
     }
 
     #[test]
