@@ -280,9 +280,10 @@ pub(crate) fn handle_command(
                 None => (cmd, ""),
             };
             if let Some(skill) = context.skills.find(name) {
-                return Ok(CommandOutcome::OverridePrompt(
-                    skill.render_activation(arguments),
-                ));
+                return Ok(CommandOutcome::SkillInvoked {
+                    name: name.to_string(),
+                    prompt: skill.render_activation(arguments),
+                });
             }
         }
         if input.trim_start().starts_with('/') {
@@ -1405,7 +1406,8 @@ mod tests {
         .expect("handle command");
 
         match outcome {
-            CommandOutcome::OverridePrompt(prompt) => {
+            CommandOutcome::SkillInvoked { name, prompt } => {
+                assert_eq!(name, "code-review");
                 assert!(prompt.contains("<skill_content name=\"code-review\">"));
                 assert!(prompt.contains("Review focus: auth"));
                 assert!(prompt.contains("<file>references/checklist.md</file>"));

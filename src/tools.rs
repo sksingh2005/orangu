@@ -44,6 +44,7 @@ pub struct ToolExecutor {
     diff_file_cap: usize,
     pub session_dir: Option<PathBuf>,
     pub compression_store: Arc<crate::compression_cache::CompressionStore>,
+    pub tool_counts: Arc<Mutex<std::collections::HashMap<String, usize>>>,
     /// Shared knowledge graph, populated by the startup scan.
     /// `None` while the background scan is still running.
     pub graph_store: Arc<Mutex<Option<GraphStore>>>,
@@ -135,6 +136,7 @@ impl ToolExecutor {
                 session_dir.clone(),
             )),
             session_dir,
+            tool_counts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             graph_store: Arc::new(Mutex::new(None)),
             graph_status: Arc::new(Mutex::new(GraphBuildStatus::default())),
         }
@@ -299,6 +301,11 @@ impl ToolExecutor {
             "graph_lookup" => self.graph_lookup(arguments),
             _ => Err(anyhow!("unknown tool '{}'", name)),
         };
+        if result.is_ok()
+            && let Ok(mut counts) = self.tool_counts.lock()
+        {
+            *counts.entry(name.to_string()).or_insert(0) += 1;
+        }
         if let Ok(mut d) = self.tool_duration.lock() {
             *d += start.elapsed();
         }

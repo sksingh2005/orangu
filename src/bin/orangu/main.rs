@@ -2054,7 +2054,8 @@ async fn run() -> Result<()> {
                 output_state.reset_scroll();
                 continue;
             }
-            CommandOutcome::OverridePrompt(prompt) => {
+            CommandOutcome::SkillInvoked { name, prompt } => {
+                usage_stats.record_skill(&name);
                 prompt_input = prompt;
             }
             CommandOutcome::Unhandled => {}

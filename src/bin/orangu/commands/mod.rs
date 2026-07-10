@@ -119,7 +119,10 @@ pub enum CommandOutcome {
     Unhandled,
     /// The input was intercepted locally and should be replaced with the
     /// provided prompt text before sending anything to the model.
-    OverridePrompt(String),
+    SkillInvoked {
+        name: String,
+        prompt: String,
+    },
     Quiet,
     /// Command ran and produced informational output (success).
     Output(String),

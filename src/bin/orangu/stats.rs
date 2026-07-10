@@ -22,6 +22,7 @@ pub(crate) struct UsageStats {
     pub(crate) total_tokens: usize,
     pub(crate) session_id: String,
     pub(crate) workspace: std::path::PathBuf,
+    pub(crate) skill_counts: std::collections::HashMap<String, usize>,
 }
 
 impl UsageStats {
@@ -33,12 +34,17 @@ impl UsageStats {
             total_tokens: 0,
             session_id: String::new(),
             workspace: std::path::PathBuf::new(),
+            skill_counts: std::collections::HashMap::new(),
         }
     }
 
     pub(crate) fn with_session(mut self, session_id: &str) -> Self {
         self.session_id = session_id.to_string();
         self
+    }
+
+    pub(crate) fn record_skill(&mut self, name: &str) {
+        *self.skill_counts.entry(name.to_string()).or_insert(0) += 1;
     }
 
     pub(crate) fn with_workspace(mut self, workspace: &std::path::Path) -> Self {
@@ -160,6 +166,30 @@ impl UsageStats {
                 for (pattern, count) in hits {
                     out.push_str(&format!("\n  - {} ({}x)", pattern, count));
                 }
+            }
+        }
+
+        if let Ok(counts) = tools.tool_counts.lock() {
+            let total: usize = counts.values().sum();
+            if total > 0 {
+                out.push_str("\n\nTool Invocations:");
+                let mut sorted: Vec<_> = counts.iter().collect();
+                sorted.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
+                for (name, count) in sorted {
+                    let pct = (*count as f64 / total as f64) * 100.0;
+                    out.push_str(&format!("\n  - {:<18.18} ({}x, {:.1}%)", name, count, pct));
+                }
+            }
+        }
+
+        let total_skills: usize = self.skill_counts.values().sum();
+        if total_skills > 0 {
+            out.push_str("\n\nSkill Invocations:");
+            let mut sorted: Vec<_> = self.skill_counts.iter().collect();
+            sorted.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
+            for (name, count) in sorted {
+                let pct = (*count as f64 / total_skills as f64) * 100.0;
+                out.push_str(&format!("\n  - {:<18.18} ({}x, {:.1}%)", name, count, pct));
             }
         }
 
