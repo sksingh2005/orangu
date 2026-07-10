@@ -327,6 +327,68 @@ fn build_command(
     }
 }
 
+fn suggest_maximum_model(groups: &[ModelGroup], cpu: &CpuInfo, gpus: &[crate::system::GpuInfo]) {
+    let mut total_vram = 0;
+    for gpu in gpus {
+        if matches!(
+            gpu.memory_kind,
+            crate::system::MemoryKind::Dedicated | crate::system::MemoryKind::Unknown
+        ) && let Some(vram_total) = gpu.vram_total_bytes
+        {
+            let vram_used = gpu.vram_used_bytes.unwrap_or(0);
+            total_vram += vram_total.saturating_sub(vram_used);
+        }
+    }
+
+    let usable_memory = if total_vram > 0 {
+        total_vram
+    } else {
+        cpu.available_memory_bytes
+    };
+
+    let buffer: u64 = 2 * 1024 * 1024 * 1024; // 2 GB safety buffer
+    let max_model_size = usable_memory.saturating_sub(buffer);
+
+    let mut recommended_group: Option<&ModelGroup> = None;
+    for group in groups {
+        if group.size_bytes <= max_model_size {
+            if let Some(current) = recommended_group {
+                if group.size_bytes > current.size_bytes {
+                    recommended_group = Some(group);
+                }
+            } else {
+                recommended_group = Some(group);
+            }
+        }
+    }
+
+    println!("System Analysis:");
+    println!(
+        "  Usable memory for inference : {}",
+        crate::format_bytes(usable_memory)
+    );
+    if let Some(rec) = recommended_group {
+        println!(
+            "  Recommended downloaded model: {} ({})",
+            rec.label,
+            crate::format_bytes(rec.size_bytes)
+        );
+    } else {
+        println!("  No downloaded model fits comfortably in the usable memory.");
+    }
+
+    let generic_suggestion = if max_model_size >= 42 * 1024 * 1024 * 1024 {
+        "Can comfortably run up to ~70B parameter models (Q4_K_M)."
+    } else if max_model_size >= 20 * 1024 * 1024 * 1024 {
+        "Can comfortably run up to ~32B parameter models (Q4_K_M)."
+    } else if max_model_size >= 6 * 1024 * 1024 * 1024 {
+        "Can comfortably run up to ~8B parameter models (Q4_K_M)."
+    } else {
+        "Can run small models (<3B parameters) or highly quantized larger models."
+    };
+    println!("  Capacity                    : {}\n", generic_suggestion);
+}
+
 /// Runs the interactive wizard: prompts for a role, then a model (scanned
 /// once up front — re-prompting on anything unrecognized rather than
 /// aborting on the first bad entry), then prints a `llama-server` command
@@ -340,6 +402,11 @@ pub fn run_wizard(config: &GgufConfiguration) -> Result<()> {
             config.models.display()
         );
     }
+
+    let cpu = system::detect_cpu();
+    let gpus = system::detect_gpus(cpu.total_memory_bytes);
+    println!("{}", system::format_report(&cpu, &gpus));
+    suggest_maximum_model(&groups, &cpu, &gpus);
 
     println!("Roles");
     for (index, role) in ROLES.iter().enumerate() {
@@ -368,7 +435,6 @@ pub fn run_wizard(config: &GgufConfiguration) -> Result<()> {
 
     let gguf = GgufFile::open(&group.representative_path)
         .with_context(|| format!("failed to re-read {}", group.representative_path.display()))?;
-    let cpu = system::detect_cpu();
     let recommended = build_command(
         role,
         &group.label,
@@ -687,5 +753,52 @@ mod tests {
         );
 
         assert!(!recommended.command.contains("--reasoning-preserve"));
+    }
+
+    fn test_cpu_with_ram(available_memory_bytes: u64) -> CpuInfo {
+        let mut cpu = test_cpu(Some(8));
+        cpu.available_memory_bytes = available_memory_bytes;
+        cpu
+    }
+
+    fn test_gpu(
+        memory_kind: crate::system::MemoryKind,
+        vram_total_bytes: Option<u64>,
+        vram_used_bytes: Option<u64>,
+    ) -> crate::system::GpuInfo {
+        crate::system::GpuInfo {
+            name: "Test GPU".to_string(),
+            vendor: String::new(),
+            driver: None,
+            memory_kind,
+            vram_total_bytes,
+            vram_used_bytes,
+        }
+    }
+
+    #[test]
+    fn suggest_maximum_model_calculates_vram_correctly() {
+        // Test CPU fallback
+        let groups = vec![];
+        let cpu = test_cpu_with_ram(16 * 1024 * 1024 * 1024);
+        let gpus = vec![];
+        // Just calling it to ensure it doesn't panic. Output goes to stdout.
+        suggest_maximum_model(&groups, &cpu, &gpus);
+
+        // Test Dedicated GPU with used VRAM
+        let gpus = vec![test_gpu(
+            crate::system::MemoryKind::Dedicated,
+            Some(24 * 1024 * 1024 * 1024),
+            Some(4 * 1024 * 1024 * 1024),
+        )];
+        suggest_maximum_model(&groups, &cpu, &gpus);
+
+        // Test Unknown GPU (e.g. Windows AMD)
+        let gpus = vec![test_gpu(
+            crate::system::MemoryKind::Unknown,
+            Some(12 * 1024 * 1024 * 1024),
+            None,
+        )];
+        suggest_maximum_model(&groups, &cpu, &gpus);
     }
 }

@@ -449,12 +449,13 @@ suggestions worse than not counting them at all.
 `main.rs` launches `roles::run_wizard` whenever `orangu-gguf` is invoked with
 no subcommand (checked after `--init`/`-s`, both of which still take
 priority): it scans the models directory once (`models::scan_models_dir` +
-`group_models`), prompts for a role, then a model, then prints a tuned
-`llama-server` command line. Model resolution deliberately doesn't reuse
-`models::resolve_show_target` — that function re-scans the directory from
-scratch, and the wizard already has the one scan's `groups` in hand; its own
-`find_group` matches an `NR` or `MODEL` label against that in-memory slice
-instead, avoiding a second, redundant full scan/parse pass.
+`group_models`), detects the system hardware to recommend the maximum model
+that fits in available memory, prompts for a role, then a model, and finally
+prints a tuned `llama-server` command line. Model resolution deliberately
+doesn't reuse `models::resolve_show_target` — that function re-scans the
+directory from scratch, and the wizard already has the one scan's `groups` in
+hand; its own `find_group` matches an `NR` or `MODEL` label against that
+in-memory slice instead, avoiding a second, redundant full scan/parse pass.
 
 `ROLE_PROFILES` is a fixed table of five `RoleProfile`s (`name`,
 `default_ctx_size`) — `resolve_role` matches a 1-based index into it or a
