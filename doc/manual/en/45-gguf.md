@@ -43,27 +43,31 @@ offline instead of needing a live fetch the first time a vision-capable
 model is launched:
 
 ```
-Downloading Qwen3.6-35B-A3B-UD-Q4_K_M.gguf: 100% [1/2]
+Downloading Qwen3.6-35B-A3B-UD-Q4_K_M.gguf: 47% [1/2]
 Downloading mmproj-BF16.gguf: 100% [2/2]
 ```
 
-A multi-part model's every shard downloads together, in order. Progress
-prints as a percentage per file; an interrupted download resumes from where
-it left off next time, and a file already fully present is skipped rather
-than re-fetched. Set `HF_TOKEN` in the environment for a private or gated
-repository.
+A multi-part model's every shard (and a bundled `mmproj`) downloads
+concurrently rather than one at a time, each printing its own progress line
+in place until all are done — a smaller sidecar file like `mmproj-BF16.gguf`
+above typically finishes well before the main model. An interrupted download
+resumes from where it left off next time, and a file already fully present
+is skipped rather than re-fetched. Set `HF_TOKEN` in the environment for a
+private or gated repository.
 
 ## Role wizard: a tuned llama-server command
 
-Running `orangu-gguf` with no subcommand launches an interactive wizard:
-pick one of the five conventional roles `orangu.conf`/`orangu-coordinator.conf`
-already use (`all`, `code`, `review`, `explorer`, `embeddings`, by number or
-name), then pick a model — by `NR` or `MODEL`, same as `show` — and it
-prints a `llama-server` command line tuned for that combination, using the
-detected hardware and the model's own GGUF metadata.
+Running `orangu-gguf` with no subcommand — or `orangu-gguf model` explicitly,
+the same thing under a name — launches an interactive wizard: pick one of
+the five conventional roles `orangu.conf`/`orangu-coordinator.conf` already
+use (`all`, `code`, `review`, `explorer`, `embeddings`, by number or name),
+then pick a model — by `NR` or `MODEL`, same as `show` — and it prints a
+`llama-server` command line tuned for that combination, using the detected
+hardware and the model's own GGUF metadata.
 
 ```sh
 orangu-gguf
+orangu-gguf model
 ```
 
 ```

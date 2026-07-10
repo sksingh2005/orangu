@@ -60,7 +60,7 @@ _orangu_gguf() {
     fi
 
     if [[ $COMP_CWORD -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "system suggest list show download help" -- "$cur") )
+        COMPREPLY=( $(compgen -W "model system suggest list show download help" -- "$cur") )
         return 0
     fi
 }
@@ -101,6 +101,7 @@ _orangu_gguf() {
     case $state in
         command)
             _values 'command' \
+                'model[Pick a role and a model, print a tuned llama-server command line]' \
                 'system[Detect the machine'"'"'s CPU and GPU(s)]' \
                 'suggest[Suggest a GGUF model size for this machine'"'"'s hardware]' \
                 'list[List every .gguf file under the models directory]' \
@@ -130,6 +131,7 @@ function __orangu_gguf_models
     orangu-gguf list 2>/dev/null | awk 'NR>1 {print $1; print $2}'
 end
 
+complete -c orangu-gguf -n '__fish_use_subcommand' -a model    -d 'Pick a role and a model, print a tuned llama-server command line'
 complete -c orangu-gguf -n '__fish_use_subcommand' -a system   -d 'Detect the machine\'s CPU and GPU(s)'
 complete -c orangu-gguf -n '__fish_use_subcommand' -a suggest  -d 'Suggest a GGUF model size for this machine\'s hardware'
 complete -c orangu-gguf -n '__fish_use_subcommand' -a list     -d 'List every .gguf file under the models directory'

@@ -37,14 +37,22 @@
 //! mirrored: `--mtp` companion downloads, `preset.ini` repos, and Docker
 //! registry sources — all out of scope for a first version of a "download
 //! the model" command.
+//!
+//! A multi-part model's shards (and a bundled `mmproj`, when present)
+//! download concurrently rather than one at a time — bounded by rayon's
+//! global thread pool — each reporting its own progress line on a shared
+//! [`ProgressBoard`] so every in-flight file's percentage stays visible at
+//! once until all are done.
 
 use crate::config::GgufConfiguration;
 use anyhow::{Context, Result, anyhow, bail};
+use rayon::prelude::*;
 use serde::Deserialize;
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 const HUB_ENDPOINT: &str = "https://huggingface.co";
@@ -81,10 +89,10 @@ pub fn run_download(config: &GgufConfiguration, spec: &str) -> Result<()> {
         .with_context(|| format!("failed to write {}", refs_dir.join("main").display()))?;
 
     let total = selected.len();
+    let mut tasks = Vec::new();
     for (index, file) in selected.iter().enumerate() {
         let position = (index + 1, total);
         let blob_path = blobs_dir.join(&file.oid);
-        let snapshot_path = snapshot_dir.join(&file.path);
 
         if blob_path.is_file() && fs::metadata(&blob_path)?.len() == file.size {
             println!(
@@ -92,21 +100,26 @@ pub fn run_download(config: &GgufConfiguration, spec: &str) -> Result<()> {
                 file.path, position.0
             );
         } else {
-            let url = format!(
-                "{HUB_ENDPOINT}/{repo}/resolve/{commit}/{}",
-                urlencode_path(&file.path)
-            );
-            download_with_resume(
-                &client,
-                &url,
-                &blob_path,
-                token.as_deref(),
-                &file.path,
-                file.size,
+            tasks.push(DownloadTask {
+                label: file.path.clone(),
+                url: format!(
+                    "{HUB_ENDPOINT}/{repo}/resolve/{commit}/{}",
+                    urlencode_path(&file.path)
+                ),
+                blob_path,
+                size: file.size,
                 position,
-            )?;
+            });
         }
+    }
 
+    if !tasks.is_empty() {
+        download_all(&client, &tasks, token.as_deref())?;
+    }
+
+    for file in &selected {
+        let blob_path = blobs_dir.join(&file.oid);
+        let snapshot_path = snapshot_dir.join(&file.path);
         if let Some(parent) = snapshot_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -499,19 +512,99 @@ fn percent_encode(segment: &str) -> String {
     out
 }
 
-/// Downloads `url` into `dest`, resuming from a `.part` file left over from
-/// an interrupted attempt (via an HTTP `Range` request), and printing
-/// percentage progress against `expected_size` as it goes.
+/// One file still needing a fetch, everything [`download_with_resume`]
+/// needs to run independently of the others on its own thread: `label` is
+/// shown in progress text (the repo-relative path), `position` is this
+/// file's `(1-based index, total)` among every selected file (including
+/// ones already skipped as up to date).
+struct DownloadTask {
+    label: String,
+    url: String,
+    blob_path: PathBuf,
+    size: u64,
+    position: (usize, usize),
+}
+
+/// Tracks one in-place-updating terminal line per concurrent download, so
+/// several files can report progress at once without their redraws
+/// clobbering each other. A single [`Mutex`] around the whole board (rather
+/// than one per line) means each update is an atomic "set this line's text,
+/// then redraw every line" — no interleaving of two threads' writes.
+struct ProgressBoard {
+    lines: Vec<String>,
+    /// Whether the board has drawn at least once yet — the first draw must
+    /// not move the cursor up, since there's nothing above it to overwrite.
+    drawn: bool,
+}
+
+impl ProgressBoard {
+    fn new(line_count: usize) -> Self {
+        Self {
+            lines: vec![String::new(); line_count],
+            drawn: false,
+        }
+    }
+
+    /// Sets `slot`'s line to `text` and redraws the whole board in place.
+    fn update(&mut self, slot: usize, text: String) {
+        self.lines[slot] = text;
+        let mut out = std::io::stdout();
+        if self.drawn {
+            // Move the cursor back up to the first line so every line below
+            // gets overwritten rather than appended below the last draw.
+            write!(out, "\x1b[{}A", self.lines.len()).ok();
+        }
+        self.drawn = true;
+        for line in &self.lines {
+            // \x1b[2K clears the line first — a shorter new line (e.g. once
+            // a percentage's digit count shrinks, which can't happen here,
+            // but also just a differently-sized final "Downloaded" message)
+            // otherwise leaves stray trailing characters from the old one.
+            writeln!(out, "\r\x1b[2K{line}").ok();
+        }
+        out.flush().ok();
+    }
+}
+
+/// Downloads every task concurrently — bounded by rayon's global thread
+/// pool rather than one thread per file, so a model with dozens of shards
+/// doesn't open dozens of simultaneous connections — each reporting into its
+/// own line of a shared [`ProgressBoard`] so every in-flight file's progress
+/// stays visible at once until all are done. Returns the first error
+/// encountered, if any; other in-flight downloads still run to completion
+/// (each writes its own `.part` file, so a later retry only re-fetches
+/// whatever actually failed).
+fn download_all(
+    client: &reqwest::blocking::Client,
+    tasks: &[DownloadTask],
+    token: Option<&str>,
+) -> Result<()> {
+    let board = Mutex::new(ProgressBoard::new(tasks.len()));
+    tasks
+        .par_iter()
+        .enumerate()
+        .try_for_each(|(slot, task)| download_with_resume(client, task, token, slot, &board))
+}
+
+/// Downloads `task.url` into `task.blob_path`, resuming from a `.part` file
+/// left over from an interrupted attempt (via an HTTP `Range` request), and
+/// reporting percentage progress against `task.size` into `board`'s `slot`
+/// line as it goes.
 fn download_with_resume(
     client: &reqwest::blocking::Client,
-    url: &str,
-    dest: &Path,
+    task: &DownloadTask,
     token: Option<&str>,
-    label: &str,
-    expected_size: u64,
-    position: (usize, usize),
+    slot: usize,
+    board: &Mutex<ProgressBoard>,
 ) -> Result<()> {
-    let (index, total) = position;
+    let DownloadTask {
+        label,
+        url,
+        blob_path: dest,
+        size: expected_size,
+        position: (index, total),
+    } = task;
+    let expected_size = *expected_size;
     // Blob filenames are bare content hashes with no extension of their own
     // for `Path::with_extension` to replace, so just append directly.
     let part_path = PathBuf::from(format!("{}.part", dest.display()));
@@ -569,12 +662,17 @@ fn download_with_resume(
             .map(|p| p.min(100))
             && last_printed != Some(percent)
         {
-            print!("\rDownloading {label}: {percent}% [{index}/{total}]");
-            std::io::stdout().flush().ok();
+            board.lock().unwrap().update(
+                slot,
+                format!("Downloading {label}: {percent}% [{index}/{total}]"),
+            );
             last_printed = Some(percent);
         }
     }
-    println!();
+    board
+        .lock()
+        .unwrap()
+        .update(slot, format!("Downloaded {label}: 100% [{index}/{total}]"));
 
     fs::rename(&part_path, dest)
         .with_context(|| format!("failed to finalize {}", dest.display()))?;

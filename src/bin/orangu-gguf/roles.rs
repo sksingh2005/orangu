@@ -306,14 +306,6 @@ fn build_command(
     }
 
     let mut notes = Vec::new();
-    if let Some(max) = context_length
-        && ctx_size < role.default_ctx_size
-    {
-        notes.push(format!(
-            "Context size capped at the model's own maximum ({max}), below the usual {} for {}.",
-            role.default_ctx_size, role.name
-        ));
-    }
     if role.name == "embeddings" && pooling_metadata.is_none() {
         notes.push(format!(
             "No usable pooling_type metadata found on this model — defaulting to \

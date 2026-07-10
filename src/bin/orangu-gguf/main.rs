@@ -47,25 +47,17 @@ const DEFAULT_ARRAY_PREVIEW: usize = 8;
 #[command(
     version = VERSION,
     about = "Inspect machine CPU/GPU hardware and local GGUF model files",
-    long_about = "Inspect machine CPU/GPU hardware and local GGUF model files.\n\nRun with no subcommand for an interactive wizard: pick a role (all/code/review/explorer/embeddings) and a model, and get a llama-server command line tuned for that combination."
+    long_about = "Inspect machine CPU/GPU hardware and local GGUF model files."
 )]
 struct Args {
     /// Path to orangu-gguf.conf. Defaults to ./orangu-gguf.conf, then
-    /// ~/.orangu/orangu-gguf.conf. Needed by `list`/`show`, and by the
-    /// interactive role wizard run with no subcommand.
+    /// ~/.orangu/orangu-gguf.conf.
     #[arg(short, long)]
     config: Option<PathBuf>,
-    /// Interactively create ~/.orangu/orangu-gguf.conf and exit.
+    /// Interactively create ~/.orangu/orangu-gguf.conf.
     #[arg(short, long)]
     init: bool,
-    /// Print the shell completion script for the detected shell and exit.
-    ///
-    /// Detects the current shell from $SHELL. Pipe into your shell's eval or
-    /// drop the output into the appropriate completions directory:
-    ///
-    ///   bash: eval "$(orangu-gguf -s)"
-    ///   zsh:  orangu-gguf -s > ~/.zsh/completions/_orangu-gguf
-    ///   fish: orangu-gguf -s > ~/.config/fish/completions/orangu-gguf.fish
+    /// Print the shell completion script for the detected shell.
     #[arg(short = 's', long = "shell-completions")]
     shell_completions: bool,
     #[command(subcommand)]
@@ -97,6 +89,9 @@ fn print_shell_completions() -> Result<()> {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Pick a role and a model, and print a llama-server command line tuned
+    /// for that combination.
+    Model,
     /// Detect the machine's CPU and GPU(s) and print their statistics.
     System,
     /// Suggest a GGUF model size (not yet a specific model) likely to run
@@ -150,15 +145,8 @@ fn main() -> ExitCode {
         };
     }
 
-    let Some(command) = args.command else {
-        return match load_config(args.config).and_then(|conf| roles::run_wizard(&conf)) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => {
-                eprintln!("error: {err:#}");
-                ExitCode::FAILURE
-            }
-        };
-    };
+    // No subcommand at all runs the same wizard `model` names explicitly.
+    let command = args.command.unwrap_or(Commands::Model);
 
     match run(args.config, command) {
         Ok(()) => ExitCode::SUCCESS,
@@ -171,6 +159,10 @@ fn main() -> ExitCode {
 
 fn run(config_arg: Option<PathBuf>, command: Commands) -> Result<()> {
     match command {
+        Commands::Model => {
+            let conf = load_config(config_arg)?;
+            roles::run_wizard(&conf)
+        }
         Commands::System => {
             let cpu = system::detect_cpu();
             let gpus = system::detect_gpus(cpu.total_memory_bytes);

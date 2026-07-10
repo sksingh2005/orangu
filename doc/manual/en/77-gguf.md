@@ -10,9 +10,9 @@ cache, config-reload, or background process to reason about.
 
 ### Module layout
 
-- `main.rs` — clap `Args`/`Commands` (`system`, `suggest`, `list`, `show`,
-  `download`), dispatch, and `format_show`/`format_bytes` (the latter shared
-  by `system`'s RAM/VRAM figures and `list`'s file sizes).
+- `main.rs` — clap `Args`/`Commands` (`model`, `system`, `suggest`, `list`,
+  `show`, `download`), dispatch, and `format_show`/`format_bytes` (the latter
+  shared by `system`'s RAM/VRAM figures and `list`'s file sizes).
 - `gguf.rs` — the GGUF binary-format reader (`GgufFile::open`).
 - `models.rs` — recursive directory scan, shard grouping, and the Hugging
   Face repo-id/quant-tag reconstruction behind `list`'s `MODEL` column.
@@ -32,7 +32,7 @@ cache, config-reload, or background process to reason about.
   (for everything but the `models` prompt) and `roles.rs` (factored out once
   a second interactive flow needed them).
 - `roles.rs` — the interactive role wizard launched by a bare `orangu-gguf`
-  invocation (no subcommand): see below.
+  invocation (no subcommand) or `orangu-gguf model` explicitly: see below.
 - `shell.rs` — hand-written bash/zsh/fish completion scripts.
 
 ### GGUF parsing (`gguf.rs`)
@@ -235,22 +235,42 @@ independently picked `mmproj-BF16.gguf`), so fetching it up front here means
 to the file list `run_download` fetches, alongside whatever shards the
 primary model itself has.
 
-**Fetching bytes.** `download_with_resume` streams the response body to a
-`<blob>.part` file, resuming from wherever that file left off via an HTTP
+**Fetching bytes, concurrently.** `run_download` first walks `selected`
+sequentially just to decide what needs fetching at all — a blob already
+present on disk with a matching size is skipped entirely rather than
+re-verified byte-for-byte (cheap and good enough; matches the practicality
+bar the rest of this tool holds to elsewhere, e.g. the element-count
+quantization guess), printed immediately with an `[index/total]` suffix.
+Everything left becomes a `DownloadTask` (label, URL, blob path, size, and
+that same `(index, total)` position), and `download_all` hands the whole
+batch to rayon's `par_iter().try_for_each` — bounded by rayon's global
+thread pool rather than one OS thread per file, so a model with dozens of
+shards doesn't open dozens of simultaneous connections. This means a sharded
+model's shards, and a bundled mmproj sidecar, download at the same time
+instead of one at a time; `run_download` only does the symlink-placement
+pass (`link_or_copy`, below) after every download has finished.
+
+Each parallel task's own `download_with_resume` streams its response body to
+a `<blob>.part` file, resuming from wherever that file left off via an HTTP
 `Range` request if one already exists from an interrupted attempt (falling
 back to a full restart if the server doesn't honor it, signaled by a `200`
 instead of the expected `206`). Progress is a plain percentage against the
 tree API's own reported file size — not the response's `Content-Length`,
-which would only cover the *remaining* bytes on a resumed request — plus a
-trailing `[index/total]` (`run_download` enumerates `selected`, 1-based, to
-pass this position through), so a multi-file download (a sharded model, or
-the mmproj sidecar above) reads as progress through the whole batch rather
-than restarting a bare percentage at 0% with no indication of how many
-files remain. A blob already present on disk with a matching size is
-skipped entirely rather than re-verified byte-for-byte (cheap and good
-enough; matches the practicality bar the rest of this tool holds to
-elsewhere, e.g. the element-count quantization guess) — its skip message
-gets the same `[index/total]` suffix for consistency.
+which would only cover the *remaining* bytes on a resumed request. Since
+several tasks report progress at once, each writes into its own line of a
+`ProgressBoard` shared behind a single `Mutex` (one mutex around the whole
+board, not one per line, so a "set this line, then redraw every line" update
+is atomic and two threads' redraws can't interleave); `ProgressBoard::update`
+redraws in place with `\x1b[{n}A` (cursor up `n` lines) followed by
+`\x1b[2K` (clear line) per row, so every in-flight file's percentage stays
+visible at once until all are done, at which point its line switches from
+`Downloading` to a final `Downloaded <label>: 100% [index/total]` — kept at
+100% rather than dropped, so every line stays in the same
+`<verb> <label>: <percent>% [index/total]` shape whether still in flight or
+finished. If a task fails, the others still
+run to completion rather than being cancelled (each writes its own `.part`
+file, so a later retry only re-fetches whatever actually failed);
+`download_all` surfaces the first error once every task has finished.
 
 **Placing the file.** `link_or_copy` computes the same relative symlink
 target the real Hugging Face cache uses (`../` once per path component
@@ -465,11 +485,14 @@ supplies once nothing else in the sum counts it.
 
 ### The role wizard (`roles.rs`)
 
-`main.rs` launches `roles::run_wizard` whenever `orangu-gguf` is invoked with
-no subcommand (checked after `--init`/`-s`, both of which still take
-priority): it scans the models directory once (`models::scan_models_dir` +
-`group_models`), prompts for a role, then a model, then prints a tuned
-`llama-server` command line. Model resolution deliberately doesn't reuse
+`main.rs` launches `roles::run_wizard` for `Commands::Model`, and a bare
+`orangu-gguf` invocation with no subcommand at all defaults to exactly that
+same variant (`args.command.unwrap_or(Commands::Model)`, checked after
+`--init`/`-s`, both of which still take priority) — one dispatch path, not
+two copies of the same branch. `run_wizard` scans the models directory once
+(`models::scan_models_dir` + `group_models`), prompts for a role, then a
+model, then prints a tuned `llama-server` command line. Model resolution
+deliberately doesn't reuse
 `models::resolve_show_target` — that function re-scans the directory from
 scratch, and the wizard already has the one scan's `groups` in hand; its own
 `find_group` matches an `NR` or `MODEL` label against that in-memory slice
