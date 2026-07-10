@@ -69,9 +69,7 @@ const KV_CACHE_BITS: f64 = 8.0;
 /// against, from a bare minimum up to the role wizard's own largest default
 /// (262144, for `all`/`review`) — since KV cache grows linearly with context,
 /// the model size that comfortably fits shrinks as context grows.
-const CONTEXT_LADDER: &[u64] = &[
-    1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144,
-];
+const CONTEXT_LADDER: &[u64] = &[1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
 
 /// A curated ladder of common open-weight model parameter counts (in
 /// billions), spanning the range real Hugging Face GGUF releases actually
@@ -198,8 +196,7 @@ fn push_suggestion_block(out: &mut String, label: &str, budget: u64) {
             .iter()
             .zip(&headers)
             .map(|((_, bits_per_weight), header)| {
-                let suggestion = match suggest_param_count(budget, context_size, *bits_per_weight)
-                {
+                let suggestion = match suggest_param_count(budget, context_size, *bits_per_weight) {
                     Some(params) => format!("~{} parameters", format_param_count(params)),
                     None => "-".to_string(),
                 };
