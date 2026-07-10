@@ -41,8 +41,10 @@ The report covers:
 - total tool execution time,
 - total tokens generated (counted with the bundled tokenizer),
 - average tokens per second,
-- context cache statistics (reads, hits, misses, rate, bytes saved), and
-- context compression statistics (lines saved, patterns applied).
+- context cache statistics (reads, hits, misses, rate, bytes saved),
+- context compression statistics (lines saved, patterns applied),
+- tool invocation statistics (counts, percentages), and
+- skill invocation statistics (counts, percentages).
 
 ### Examples
 
