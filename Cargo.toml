@@ -14,6 +14,10 @@ path = "src/bin/orangu/main.rs"
 name = "orangu-coordinator"
 path = "src/bin/orangu-coordinator/main.rs"
 
+[[bin]]
+name = "orangu-gguf"
+path = "src/bin/orangu-gguf/main.rs"
+
 [dependencies]
 anyhow = "1.0.100"
 arboard = { version = "3.6.1", default-features = false }
@@ -26,7 +30,7 @@ ignore = "0.4.24"
 markdown = "1.0.0"
 printpdf = { version = "0.10.0", default-features = false, features = ["text_layout"] }
 regex = "1.10"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream", "blocking"] }
 rust-fontconfig = "4.4.4"
 rustyline = "18.0.1"
 rayon = "1.10.0"
@@ -71,6 +75,7 @@ tree-sitter-go = "0.25.0"
 tree-sitter-java = "0.23.5"
 tree-sitter-cpp = "0.23.4"
 tree-sitter-typescript = "0.23.2"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5.0"

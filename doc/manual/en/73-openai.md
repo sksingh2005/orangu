@@ -135,18 +135,23 @@ session, and on-disk persistence across tab switches and restarts.
 Embedding model
 
 Semantic `/search` needs a server serving an embedding model. Start one with
-`--embedding` (switches the server to the embeddings endpoint), `--pooling last`
-(the pooling strategy the model expects), `-np N` (the number of requests the
-server processes in parallel), and a physical batch size (`-b`/`-ub`) large
-enough for embedding requests that batch several chunks together:
+`--embedding` (switches the server to the embeddings endpoint), `--pooling`
+(the pooling strategy the model expects — read its own `pooling_type`
+metadata rather than assuming; embeddinggemma's is `mean`), `-np N` (the
+number of requests the server processes in parallel), `--kv-unified` (a
+single shared KV buffer across all of those parallel slots, since `-np`
+here is set explicitly rather than left on `auto`, which is otherwise when
+llama.cpp enables it by default), and a physical batch size (`-b`/`-ub`)
+large enough for embedding requests that batch several chunks together:
 
 ```sh
 llama-server -hf ggml-org/embeddinggemma-300M-GGUF \
              --port 8100 \
              --embedding \
-             --pooling last \
+             --pooling mean \
              --ctx-size 8192 \
              -np 8 \
+             --kv-unified \
              -b 2048 \
              -ub 2048 \
              --fit on
