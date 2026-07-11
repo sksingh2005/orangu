@@ -243,7 +243,7 @@ Suggested model size (Dedicated)
   128K     -                  -                    -
   256K     -                  -                    -
 
-Suggested model size (Shared)
+Suggested model size (Combined)
   Estimated budget : 66.17 GiB
 
   Context  Suggestion (Q2_K)  Suggestion (Q4_K_M)  Suggestion (Q8_0)
@@ -271,11 +271,15 @@ Two such tables are printed, sized against two different budgets:
 - **Dedicated**: the sum of every **dedicated** GPU's VRAM alone (multiple
   dedicated cards add up, matching `-sm layer`'s multi-GPU tensor split) —
   everything fits in real VRAM, no spillover.
-- **Shared**: the sum of *every* GPU's own reported total, dedicated and
+- **Combined**: the sum of *every* GPU's own reported total, dedicated and
   shared alike (a shared/integrated GPU's is already the system's total RAM,
   per the note above) — the more permissive figure, representing every
   device `--fit on` could spread layers across at once. Falls back to the
-  CPU's own total RAM when there's no GPU detected at all.
+  CPU's own total RAM when there's no GPU detected at all. Inherently
+  optimistic: the shared part of the pool is the same RAM the OS and
+  everything else on the machine live in, so treat it as a hardware
+  ceiling, not a promise — with dedicated VRAM added on top it can even
+  exceed the machine's total RAM.
 
 The memory-estimation formula mirrors [Sam McLeod's GGUF VRAM
 Estimator](https://smcleod.net/vram-estimator/) (read directly from its

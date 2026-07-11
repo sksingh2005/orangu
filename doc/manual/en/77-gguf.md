@@ -414,10 +414,15 @@ Since `suggest` runs before any model is chosen, there's no real GGUF file
 to read `hidden_size`/`layers` from (unlike `roles.rs`'s
 `architecture_metadata_u64`, which reads them from an actual model).
 `estimate_hidden_dims` instead estimates both from the parameter count
-alone, via the standard transformer parameter-count approximation params ≈
-12 × layers × hidden_size² (solved for `hidden_size = sqrt(params / 12)`,
-then `layers` from that) — the exact same fallback smcleod's own calculator
-uses when it has no real GGUF metadata to read either.
+alone. The standard transformer parameter-count approximation (params ≈ 12
+× layers × hidden_size²) is one equation with two unknowns, so the split is
+underdetermined; it's resolved by putting everything into the hidden size
+(`hidden_size = sqrt(params / 12)`), which makes `layers` work out to
+exactly 1 by construction. The KV-cache estimate built on it therefore
+scales as context × √params — which tracks modern GQA-era models well
+(their per-layer KV width shrinks as depth grows, so total KV grows
+sublinearly in parameters), and matches the fallback smcleod's own
+calculator uses when it has no real GGUF metadata to read either.
 
 `DEFAULT_BITS_PER_WEIGHT` (4.83, Q4_K_M) and `KV_CACHE_BITS` (8, Q8_0) match
 this project's own established defaults (`download.rs`'s
@@ -444,7 +449,7 @@ even the smallest rung (1B) doesn't (rendered as `-`).
 
 **Two budgets, two tables.** `format_suggestion` computes two separate
 budgets and prints a labeled `push_suggestion_block` for each, `"Suggested
-model size (Dedicated)"` and `"Suggested model size (Shared)"`. Both sum each
+model size (Dedicated)"` and `"Suggested model size (Combined)"`. Both sum each
 eligible GPU's own `vram_total_bytes` — deliberately *not* reduced by
 `vram_used_bytes`, since `suggest` estimates the hardware's own capability
 (this file's module doc — "likely to run comfortably on this machine",

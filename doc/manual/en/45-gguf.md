@@ -214,7 +214,7 @@ Suggested model size (Dedicated)
   128K     -                  -                    -
   256K     -                  -                    -
 
-Suggested model size (Shared)
+Suggested model size (Combined)
   Estimated budget : 66.17 GiB
 
   Context  Suggestion (Q2_K)  Suggestion (Q4_K_M)  Suggestion (Q8_0)
@@ -235,11 +235,15 @@ model (in parameters) is likely to run comfortably — as a table, one row per
 context length (1K to 256K tokens) and one column per quantization (`Q2_K`,
 `Q4_K_M` — this project's own default — and `Q8_0`), not a specific model
 recommendation yet, just a size class to aim `download` at once you know
-what to look for. Two such tables are printed: one sized against dedicated
-GPU VRAM alone (everything fits in real VRAM, no spillover), and one against
-every GPU's memory combined — dedicated and shared alike, a
-shared/integrated GPU's already being the system's total RAM — falling back
-to the CPU's own total RAM when there's no GPU at all.
+what to look for. Two such tables are printed: **Dedicated**, sized against
+dedicated GPU VRAM alone (everything fits in real VRAM, no spillover), and
+**Combined**, against every GPU's memory combined — dedicated and shared
+alike, a shared/integrated GPU's already being the system's total RAM —
+falling back to the CPU's own total RAM when there's no GPU at all. The
+combined figure is inherently optimistic: the shared part of the pool is
+the same RAM the OS and everything else on the machine live in, so treat it
+as a hardware ceiling rather than a promise — with dedicated VRAM added on
+top it can even exceed the machine's total RAM.
 
 The memory-estimation formula mirrors [Sam McLeod's GGUF VRAM
 Estimator](https://smcleod.net/vram-estimator/) and the general shape of

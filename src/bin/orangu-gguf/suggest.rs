@@ -80,9 +80,17 @@ const PARAM_LADDER_BILLIONS: &[f64] = &[
     12.0, 9.0, 8.0, 7.0, 4.0, 3.0, 2.0, 1.0,
 ];
 
-/// Estimates hidden size and layer count from a parameter count alone, via
-/// the standard transformer-parameter approximation params ≈ 12 × layers ×
-/// hidden_size².
+/// Estimates hidden size and layer count from a parameter count alone.
+///
+/// The standard transformer approximation (params ≈ 12 × layers ×
+/// hidden_size²) is one equation with two unknowns, so the split is
+/// underdetermined: this resolves it by putting everything into the hidden
+/// size (`hidden = √(params ÷ 12)`), which makes `layers` work out to
+/// exactly 1 — by construction, not by accident. The KV-cache estimate
+/// built on it therefore scales as context × √params, which tracks modern
+/// GQA-era models well (their per-layer KV width shrinks as depth grows,
+/// so total KV grows sublinearly in parameters), and matches what smcleod's
+/// own calculator falls back to without real GGUF metadata to read.
 fn estimate_hidden_dims(params_billion: f64) -> (f64, f64) {
     let params = params_billion * 1e9;
     let hidden_size = (params / 12.0).sqrt();
@@ -198,7 +206,11 @@ fn dedicated_vram_budget_bytes(gpus: &[GpuInfo]) -> u64 {
 /// budget, representing every device `--fit on` could spread layers across
 /// at once. Falls back to the CPU's own total RAM when that sum is `0` (no
 /// GPU detected at all). Like [`dedicated_vram_budget_bytes`], deliberately
-/// not reduced by currently-used memory — see its doc for why.
+/// not reduced by currently-used memory — see its doc for why. A combined
+/// figure is inherently optimistic: the shared part of the pool is the same
+/// RAM the OS and everything else on the machine live in, so it's a
+/// hardware ceiling, not a promise — it can even exceed the machine's total
+/// RAM when dedicated VRAM is added on top.
 fn combined_gpu_budget_bytes(cpu: &CpuInfo, gpus: &[GpuInfo]) -> u64 {
     let total: u64 = gpus
         .iter()
@@ -278,7 +290,7 @@ pub fn format_suggestion(cpu: &CpuInfo, gpus: &[GpuInfo]) -> String {
     );
     push_suggestion_block(
         &mut out,
-        "Suggested model size (Shared)",
+        "Suggested model size (Combined)",
         combined_gpu_budget_bytes(cpu, gpus),
     );
 
@@ -526,7 +538,7 @@ mod tests {
         assert!(report.contains("CPU"));
         assert!(report.contains("GPU"));
         assert!(report.contains("Suggested model size (Dedicated)"));
-        assert!(report.contains("Suggested model size (Shared)"));
+        assert!(report.contains("Suggested model size (Combined)"));
         assert!(report.contains("Suggestion (Q2_K)"));
         assert!(report.contains("Suggestion (Q4_K_M)"));
         assert!(report.contains("Suggestion (Q8_0)"));
@@ -536,7 +548,7 @@ mod tests {
         let dedicated_section = report
             .split("(Dedicated)")
             .nth(1)
-            .and_then(|rest| rest.split("(Shared)").next())
+            .and_then(|rest| rest.split("(Combined)").next())
             .unwrap();
         assert!(dedicated_section.contains("4.00 GiB"));
     }
