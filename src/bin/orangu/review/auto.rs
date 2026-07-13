@@ -2033,7 +2033,6 @@ pub(crate) fn auto_review_graph_conn_status(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn print_auto_review_screen(
     state: &AutoReviewState,
     viewport: &ViewportState,
@@ -2043,6 +2042,7 @@ pub(crate) fn print_auto_review_screen(
     input: &str,
     cursor: usize,
     ghost: &str,
+    print_screen_fn: &mut impl FnMut(AutoReviewScreenArgs<'_>),
 ) {
     let report_lines = state.report_lines();
     let status_text = state.status_text();
@@ -2065,47 +2065,43 @@ pub(crate) fn print_auto_review_screen(
             text: reject.editor.as_str(),
             cursor: reject.editor.cursor(),
         });
-    print!("{CLEAR_TERMINAL_SEQUENCE}");
-    print!(
-        "{}",
-        render_auto_review_screen(AutoReviewScreenArgs {
-            files: &state.files,
-            selected: state.selected,
-            // Pulsing the index on the render tick makes the dot blink.
-            reviewing: state.reviewing.filter(|_| blink_on),
-            browsing: state.done || state.cancelled,
-            // Pre-start phase: the run has not begun and is neither done nor
-            // cancelled.
-            prestart: !state.run_started && !state.done && !state.cancelled,
-            modes: &state.modes,
-            reject,
-            diff,
-            report_lines: &report_lines,
-            // Highlight the Up/Down item cursor only while browsing the report.
-            selected_lines: if state.done || state.cancelled {
-                state.selected_item_span()
-            } else {
-                None
-            },
-            scroll: state.scroll,
-            x_offset: state.x_offset,
-            status: &status_text,
-            input,
-            cursor,
-            ghost,
-            current_model: chrome.current_model,
-            prompt_branch: chrome.prompt_branch,
-            left_status,
-            pending_count: chrome.pending_count,
-            graph_status: state
-                .graph_status
-                .lock()
-                .ok()
-                .map(|status| auto_review_graph_conn_status(*status)),
-            actual_width: viewport.actual_width,
-            actual_height: viewport.actual_height,
-        })
-    );
+    print_screen_fn(AutoReviewScreenArgs {
+        files: &state.files,
+        selected: state.selected,
+        // Pulsing the index on the render tick makes the dot blink.
+        reviewing: state.reviewing.filter(|_| blink_on),
+        browsing: state.done || state.cancelled,
+        // Pre-start phase: the run has not begun and is neither done nor
+        // cancelled.
+        prestart: !state.run_started && !state.done && !state.cancelled,
+        modes: &state.modes,
+        reject,
+        diff,
+        report_lines: &report_lines,
+        // Highlight the Up/Down item cursor only while browsing the report.
+        selected_lines: if state.done || state.cancelled {
+            state.selected_item_span()
+        } else {
+            None
+        },
+        scroll: state.scroll,
+        x_offset: state.x_offset,
+        status: &status_text,
+        input,
+        cursor,
+        ghost,
+        current_model: chrome.current_model,
+        prompt_branch: chrome.prompt_branch,
+        left_status,
+        pending_count: chrome.pending_count,
+        graph_status: state
+            .graph_status
+            .lock()
+            .ok()
+            .map(|status| auto_review_graph_conn_status(*status)),
+        actual_width: viewport.actual_width,
+        actual_height: viewport.actual_height,
+    });
 }
 
 /// Drive a whole `/auto_review` run: each file's per-category requests, the
@@ -2131,6 +2127,7 @@ pub(crate) async fn run_auto_review_mode(
     graph_store: std::sync::Arc<std::sync::Mutex<Option<orangu::graph::store::GraphStore>>>,
     graph_status: std::sync::Arc<std::sync::Mutex<orangu::graph::status::GraphBuildStatus>>,
     unattended: bool,
+    print_screen_fn: &mut impl FnMut(AutoReviewScreenArgs<'_>),
 ) -> Result<AutoReviewState> {
     let immediate = launch.immediate;
     let mut state = AutoReviewState::new(launch);
@@ -2147,7 +2144,7 @@ pub(crate) async fn run_auto_review_mode(
         if !state.files.is_empty() {
             state.selected = Some(0);
         }
-        match run_auto_review_prestart(&mut state, viewport, chrome, terminal)? {
+        match run_auto_review_prestart(&mut state, viewport, chrome, terminal, print_screen_fn)? {
             PreStartOutcome::Start => {}
             PreStartOutcome::Exit => return Ok(state),
         }
@@ -2254,6 +2251,7 @@ pub(crate) async fn run_auto_review_mode(
                 viewport,
                 chrome,
                 feedback,
+                print_screen_fn,
             )
             .await?;
             // Reset to just the system message: the next category's request
@@ -2330,6 +2328,7 @@ pub(crate) async fn run_auto_review_mode(
                     viewport,
                     chrome,
                     feedback,
+                    print_screen_fn,
                 )
                 .await?;
                 scratch.rollback(session_start);
@@ -2401,6 +2400,7 @@ pub(crate) async fn run_auto_review_mode(
             viewport,
             chrome,
             feedback,
+            print_screen_fn,
         )
         .await?;
         match outcome {
@@ -2437,7 +2437,15 @@ pub(crate) async fn run_auto_review_mode(
     // lands in the output window and any chained command (e.g. `export auto
     // review`) runs next.
     if !exit_requested && !unattended {
-        run_auto_review_browse(&mut state, viewport, chrome, workspace, terminal, skills)?;
+        run_auto_review_browse(
+            &mut state,
+            viewport,
+            chrome,
+            workspace,
+            terminal,
+            skills,
+            print_screen_fn,
+        )?;
     }
     Ok(state)
 }
@@ -2461,6 +2469,7 @@ pub(crate) fn run_auto_review_prestart(
     viewport: &mut ViewportState,
     chrome: ReviewChrome<'_>,
     terminal: &str,
+    print_screen_fn: &mut impl FnMut(AutoReviewScreenArgs<'_>),
 ) -> Result<PreStartOutcome> {
     let mut escape_cancel = EscapeCancelState::default();
     loop {
@@ -2474,7 +2483,17 @@ pub(crate) fn run_auto_review_prestart(
         let left_width = viewport.actual_width.saturating_sub(right_width + 1).max(1);
         state.clamp(body_height, left_width);
         state.status = auto_review_prestart_status(state);
-        print_auto_review_screen(state, viewport, chrome, None, false, "", 0, "");
+        print_auto_review_screen(
+            state,
+            viewport,
+            chrome,
+            None,
+            false,
+            "",
+            0,
+            "",
+            print_screen_fn,
+        );
         std::io::stdout().flush()?;
 
         let (code, modifiers) = match event::read()? {
@@ -2669,6 +2688,7 @@ pub(crate) async fn run_auto_review_request(
     viewport: &mut ViewportState,
     chrome: ReviewChrome<'_>,
     feedback: bool,
+    print_screen_fn: &mut impl FnMut(AutoReviewScreenArgs<'_>),
 ) -> Result<AutoReviewRequestOutcome> {
     let streamed_state = Arc::new(Mutex::new(StreamRenderState::default()));
     let prompt_output = Arc::clone(&streamed_state);
@@ -2811,7 +2831,7 @@ pub(crate) async fn run_auto_review_request(
                     };
                     set_terminal_title(Some(&title));
                 }
-                print_auto_review_screen(state, viewport, chrome, status, blink_on, "", 0, "");
+                print_auto_review_screen(state, viewport, chrome, status, blink_on, "", 0, "", print_screen_fn);
                 std::io::stdout().flush()?;
             }
         }
@@ -2887,6 +2907,7 @@ pub(crate) fn run_auto_review_browse(
     workspace: &Path,
     terminal: &str,
     skills: &orangu::skills::SkillRegistry,
+    print_screen_fn: &mut impl FnMut(AutoReviewScreenArgs<'_>),
 ) -> Result<()> {
     let mut escape_cancel = EscapeCancelState::default();
     // The browse-phase input window: `/open_file <path>` or `open <path>` here
@@ -2924,6 +2945,7 @@ pub(crate) fn run_auto_review_browse(
             input_state.as_str(),
             input_state.cursor(),
             &ghost,
+            print_screen_fn,
         );
         std::io::stdout().flush()?;
 

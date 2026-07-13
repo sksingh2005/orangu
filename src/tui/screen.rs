@@ -19,6 +19,18 @@ use crate::workspaces::WorkspacePlacement;
 use std::time::Duration;
 use terminal_size::{Height, Width, terminal_size};
 
+#[derive(Clone, Copy)]
+pub struct MainScreenLayout {
+    pub horizontal_tab_area: Option<ratatui::layout::Rect>,
+    pub top_bar_area: ratatui::layout::Rect,
+    pub above_prompt_content_area: ratatui::layout::Rect,
+    pub vertical_tab_area: Option<ratatui::layout::Rect>,
+    pub header_area: ratatui::layout::Rect,
+    pub output_area: ratatui::layout::Rect,
+    pub prompt_area: ratatui::layout::Rect,
+    pub padded_prompt_area: ratatui::layout::Rect,
+}
+
 /// The workspace tab bar to draw: how many tabs are open, which is active
 /// (0-based, left to right) and where the bar sits relative to the screen.
 #[derive(Clone, Copy)]
@@ -47,6 +59,7 @@ const THINKING_TEXT: &str = "Thinking";
 const WORKING_TEXT: &str = "Working";
 const THINKING_SHADE_LEVELS: &[u8] = &[230, 210, 190, 170, 150, 130, 110, 90];
 
+#[derive(Clone)]
 pub struct ScreenRenderArgs<'a> {
     pub version: &'a str,
     pub current_model: &'a str,
@@ -63,7 +76,7 @@ pub struct ScreenRenderArgs<'a> {
     pub scroll_offset: usize,
     pub left_status: Option<StatusFragment>,
     pub pending_count: usize,
-    pub pending_line: Option<&'a str>,
+    pub pending_lines: &'a [TranscriptLine],
     pub input: &'a str,
     pub cursor: usize,
     pub ghost: &'a str,
@@ -164,191 +177,339 @@ fn tab_gutter_cell(
     }
 }
 
-pub fn render_screen(args: ScreenRenderArgs<'_>) -> String {
-    let width = args.virtual_width.max(1);
-    let actual_width = args.actual_width.max(1);
-    let actual_height = args.actual_height.max(1);
-
-    // Where the workspace tab bar sits. Top/bottom take a row of the screen;
-    // left/right take a gutter column from the banner and output region.
-    let placement = args.tab_bar.map(|view| view.placement);
-    let top_row = usize::from(placement == Some(WorkspacePlacement::Top));
-    let bottom_row = usize::from(placement == Some(WorkspacePlacement::Bottom));
-    let left = placement == Some(WorkspacePlacement::Left);
-    let right = placement == Some(WorkspacePlacement::Right);
-    let has_dots = !args.tab_statuses.is_empty();
-    let gutter = match args.tab_bar {
-        Some(view) if left || right => tab_gutter_width(view, has_dots),
-        _ => 0,
+pub fn main_screen_layout(
+    actual_width: usize,
+    actual_height: usize,
+    prompt_branch: Option<&str>,
+    input: &str,
+    tab_bar: Option<WorkspaceTabsView>,
+    tab_statuses: &[TabStatus],
+    has_output_content: bool,
+) -> MainScreenLayout {
+    let area = ratatui::layout::Rect {
+        x: 0,
+        y: 0,
+        width: actual_width.max(1) as u16,
+        height: actual_height.max(1) as u16,
     };
-    let inner_width = actual_width.saturating_sub(gutter).max(1);
-    // The prompt frame keeps the full width; a bottom bar shrinks its height.
-    let frame_height = actual_height.saturating_sub(bottom_row).max(1);
+    let placement = tab_bar.map(|view| view.placement);
 
-    // Computed once and reused for both the header and the prompt frame's
-    // status line below, so the two never disagree about whether "Automatic"
-    // should be shown.
-    let current_model = display_model_name(args.status.is_coordinator, args.current_model);
+    let (horizontal_tab_area, main_area) = match placement {
+        Some(WorkspacePlacement::Top) => {
+            let chunks = ratatui::layout::Layout::default()
+                .direction(ratatui::layout::Direction::Vertical)
+                .constraints([
+                    ratatui::layout::Constraint::Length(1),
+                    ratatui::layout::Constraint::Min(0),
+                ])
+                .split(area);
+            (Some(chunks[0]), chunks[1])
+        }
+        Some(WorkspacePlacement::Bottom) => {
+            let chunks = ratatui::layout::Layout::default()
+                .direction(ratatui::layout::Direction::Vertical)
+                .constraints([
+                    ratatui::layout::Constraint::Min(0),
+                    ratatui::layout::Constraint::Length(1),
+                ])
+                .split(area);
+            (Some(chunks[1]), chunks[0])
+        }
+        _ => (None, area),
+    };
 
-    let header = render_header(
-        args.version,
-        current_model,
-        args.endpoint,
-        args.workspace,
-        args.status,
-        args.banner,
-        inner_width,
-    );
-    let header_line_count = header.lines().count();
-    let prompt_prefix = prompt_prefix(args.prompt_branch);
-    let input_lines = wrapped_input_lines(args.input, actual_width, &prompt_prefix);
-    let prompt_frame_height = input_lines.len() + 3;
+    let prompt_prefix = prompt_prefix(prompt_branch);
+    let input_lines = wrapped_input_lines(input, actual_width.max(1), &prompt_prefix);
+    let prompt_frame_height = (input_lines.len() + 3) as u16;
+    let main_chunks = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            ratatui::layout::Constraint::Min(0),
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Length(prompt_frame_height),
+        ])
+        .split(main_area);
+    let above_prompt_area = main_chunks[0];
+    let prompt_area = main_chunks[2];
 
-    // Priority: prompt frame first, then banner, then output.
-    let rows_above_prompt = frame_height.saturating_sub(prompt_frame_height);
-    // Banner = header lines + 1 blank separator line; truncate to what fits.
-    let full_banner_height = header_line_count + 1;
-    let banner_rows = full_banner_height.min(rows_above_prompt);
-    // A top bar takes one row from the output area.
-    let available_output_rows =
-        available_output_rows(rows_above_prompt, banner_rows).saturating_sub(top_row);
+    let above_prompt_chunks = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Min(0),
+        ])
+        .split(above_prompt_area);
+    let top_bar_area = above_prompt_chunks[1];
+    let above_prompt_content_area = above_prompt_chunks[2];
 
-    let mut output_lines = args
-        .transcript
-        .iter()
-        .map(|line| {
-            let (rendered, offset) = match line {
-                TranscriptLine::UserInput(_) => (render_transcript_line(line, inner_width), 0),
-                _ => (render_transcript_line(line, width), args.x_offset),
-            };
-            clip_line(&rendered, offset, inner_width)
-        })
-        .collect::<Vec<_>>();
-    if let Some(pending_line) = args.pending_line {
-        if pending_line.is_empty() {
-            output_lines.push(String::new());
+    let has_dots = !tab_statuses.is_empty();
+    let (vertical_tab_area, central_area) = match placement {
+        Some(WorkspacePlacement::Left) => {
+            let w = tab_gutter_width(tab_bar.expect("left placement has tab bar"), has_dots) as u16;
+            let chunks = ratatui::layout::Layout::default()
+                .direction(ratatui::layout::Direction::Horizontal)
+                .constraints([
+                    ratatui::layout::Constraint::Length(w),
+                    ratatui::layout::Constraint::Min(0),
+                ])
+                .split(above_prompt_content_area);
+            (Some(chunks[0]), chunks[1])
+        }
+        Some(WorkspacePlacement::Right) => {
+            let w =
+                tab_gutter_width(tab_bar.expect("right placement has tab bar"), has_dots) as u16;
+            let chunks = ratatui::layout::Layout::default()
+                .direction(ratatui::layout::Direction::Horizontal)
+                .constraints([
+                    ratatui::layout::Constraint::Min(0),
+                    ratatui::layout::Constraint::Length(w),
+                ])
+                .split(above_prompt_content_area);
+            (Some(chunks[1]), chunks[0])
+        }
+        _ => (None, above_prompt_content_area),
+    };
+
+    let is_landing_mode = !has_output_content && input.is_empty();
+    let (header_area, output_area) = if is_landing_mode {
+        let v_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(9),
+                ratatui::layout::Constraint::Min(0),
+            ])
+            .split(central_area);
+        let area_width = v_chunks[1].width;
+        let left_pad = area_width.saturating_sub(85) / 2;
+        let h_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Length(left_pad),
+                ratatui::layout::Constraint::Length(85),
+                ratatui::layout::Constraint::Min(0),
+            ])
+            .split(v_chunks[1]);
+        (h_chunks[1], ratatui::layout::Rect::default())
+    } else {
+        let margin = ratatui::layout::Margin {
+            horizontal: 2,
+            vertical: 0,
+        };
+        let output_area = if central_area.width > 4 {
+            central_area.inner(margin)
         } else {
-            output_lines.extend(
-                pending_line
-                    .lines()
-                    .map(|l| clip_line(l, args.x_offset, inner_width)),
-            );
+            central_area
+        };
+        (ratatui::layout::Rect::default(), output_area)
+    };
+
+    let padded_prompt_area = ratatui::layout::Rect {
+        x: prompt_area.x + 2,
+        y: prompt_area.y,
+        width: prompt_area.width.saturating_sub(4),
+        height: prompt_area.height,
+    };
+
+    MainScreenLayout {
+        horizontal_tab_area,
+        top_bar_area,
+        above_prompt_content_area,
+        vertical_tab_area,
+        header_area,
+        output_area,
+        prompt_area,
+        padded_prompt_area,
+    }
+}
+
+pub fn draw_screen(frame: &mut ratatui::Frame, args: ScreenRenderArgs<'_>) {
+    let area = frame.area();
+    frame.render_widget(
+        ratatui::widgets::Block::default().style(ratatui::style::Style::default()),
+        area,
+    );
+    let actual_width = args.actual_width.max(1);
+    let placement = args.tab_bar.map(|view| view.placement);
+    let prompt_prefix = prompt_prefix(args.prompt_branch);
+    let layout = main_screen_layout(
+        actual_width,
+        args.actual_height,
+        args.prompt_branch,
+        args.input,
+        args.tab_bar,
+        args.tab_statuses,
+        !args.transcript.is_empty() || !args.pending_lines.is_empty(),
+    );
+
+    // Render Top Bar
+    let top_bar = crate::tui::widgets::TopBarWidget {
+        branch: args.prompt_branch,
+        workspace: args.workspace,
+    };
+    frame.render_widget(top_bar, layout.top_bar_area);
+
+    // Render Horizontal Tab Bar
+    if let Some(tab_area) = layout.horizontal_tab_area {
+        let view = args.tab_bar.unwrap();
+        let bar = horizontal_tab_bar(view, actual_width, args.tab_statuses);
+        if let Ok(text) = ansi_to_tui::IntoText::into_text(&bar) {
+            frame.render_widget(ratatui::widgets::Paragraph::new(text), tab_area);
         }
     }
+
+    // Render Vertical Tab Bar
+    if let Some(tab_area) = layout.vertical_tab_area {
+        let view = args.tab_bar.unwrap();
+        let left = placement == Some(WorkspacePlacement::Left);
+        let mut gutter_lines = Vec::new();
+        for row in 0..layout.above_prompt_content_area.height as usize {
+            let cell = tab_gutter_cell(view, row, left, args.tab_statuses);
+            gutter_lines.push(cell);
+        }
+        let gutter_str = gutter_lines.join("\r\n");
+        if let Ok(text) = ansi_to_tui::IntoText::into_text(&gutter_str) {
+            frame.render_widget(ratatui::widgets::Paragraph::new(text), tab_area);
+        }
+    }
+
+    if layout.header_area.height > 0 {
+        let header_widget = crate::tui::widgets::HeaderWidget {
+            version: args.version,
+            current_model: args.current_model,
+            endpoint: args.endpoint,
+            workspace: args.workspace,
+            status: args.status,
+            alignment: args.banner,
+        };
+        frame.render_widget(header_widget, layout.header_area);
+    }
+
+    // Render Output
+    let inner_width = layout.output_area.width as usize;
+    let available_output_rows = layout.output_area.height as usize;
+    let mut output_lines = Vec::new();
+    let mut user_inputs = Vec::new();
+
+    for line in args.transcript.iter() {
+        let start_index = output_lines.len();
+        let rendered = render_transcript_line_multi(line, inner_width);
+
+        let is_user_input = matches!(line, TranscriptLine::UserInput(_));
+
+        for r in rendered {
+            let offset = if is_user_input { 0 } else { args.x_offset };
+            output_lines.push(clip_line(&r, offset, inner_width));
+        }
+
+        if is_user_input {
+            let end_index = output_lines.len();
+            user_inputs.push((start_index, output_lines[start_index..end_index].to_vec()));
+        }
+    }
+
+    for line in args.pending_lines.iter() {
+        let rendered = render_transcript_line_multi(line, inner_width);
+        for r in rendered {
+            output_lines.push(clip_line(&r, args.x_offset, inner_width));
+        }
+    }
+
     let max_scroll_offset = output_lines.len().saturating_sub(available_output_rows);
     let scroll_offset = args.scroll_offset.min(max_scroll_offset);
     let visible_end = output_lines.len().saturating_sub(scroll_offset);
     let visible_start = visible_end.saturating_sub(available_output_rows);
-    let visible_lines = &output_lines[visible_start..visible_end];
+    let mut visible_lines = output_lines[visible_start..visible_end].to_vec();
 
-    // The banner and output region, as rows at `inner_width`.
-    let mut upper: Vec<String> = Vec::new();
-    if banner_rows > 0 {
-        let shown_header_lines = banner_rows.min(header_line_count);
-        for line in header.split("\r\n").take(shown_header_lines) {
-            upper.push(clip_line(line, 0, inner_width));
-        }
-        if banner_rows > header_line_count {
-            upper.push(String::new());
-        }
-    }
-    upper.extend(visible_lines.iter().cloned());
-
-    let mut screen = String::new();
-
-    // Pre-compute the horizontal bar string once; used by at most one of the
-    // top/bottom branches (they are mutually exclusive), but computing upfront
-    // avoids repeating the Vec+join allocation if this function is ever called
-    // in a context where placement could be re-evaluated.
-    let h_tab_bar: Option<String> = if top_row == 1 || bottom_row == 1 {
-        args.tab_bar
-            .map(|view| horizontal_tab_bar(view, actual_width, args.tab_statuses))
-    } else {
-        None
-    };
-
-    // Top tab bar.
-    if top_row == 1
-        && let Some(ref bar) = h_tab_bar
+    if let Some(sticky_idx) = user_inputs
+        .iter()
+        .rposition(|(start, _)| *start < visible_start)
     {
-        screen.push_str(bar);
-        screen.push_str("\r\n");
-    }
+        let (_, sticky_lines) = &user_inputs[sticky_idx];
+        let next_start = user_inputs
+            .get(sticky_idx + 1)
+            .map(|(s, _)| *s)
+            .unwrap_or(usize::MAX);
 
-    // Banner and output, with a left/right gutter when placed vertically.
-    if let (true, Some(view)) = (left || right, args.tab_bar) {
-        for row in 0..rows_above_prompt {
-            let content = upper.get(row).cloned().unwrap_or_default();
-            let cell = tab_gutter_cell(view, row, left, args.tab_statuses);
-            if left {
-                screen.push_str(&cell);
-                screen.push_str(&content);
-            } else {
-                let pad = inner_width.saturating_sub(visible_line_width(&content));
-                screen.push_str(&content);
-                for _ in 0..pad {
-                    screen.push(' ');
-                }
-                screen.push_str(&cell);
-            }
-            screen.push_str("\r\n");
+        let space_available = next_start.saturating_sub(visible_start);
+        let draw_count = sticky_lines
+            .len()
+            .min(space_available)
+            .min(visible_lines.len());
+
+        let lines_to_draw = &sticky_lines[sticky_lines.len() - draw_count..];
+        for i in 0..draw_count {
+            visible_lines[i] = lines_to_draw[i].clone();
         }
-    } else if !upper.is_empty() {
-        screen.push_str(&upper.join("\r\n"));
-        screen.push_str("\r\n");
     }
 
-    if let Some(candidates) = args.dropdown_candidates
-        && !candidates.is_empty()
-    {
-        let pf_height = frame_height.max(banner_rows + input_lines.len() + 3);
-        let pf_top_row = (pf_height.saturating_sub(input_lines.len() + 2)).max(banner_rows + 1);
-        screen.push_str(&render_dropdown_popup(
-            candidates,
-            args.dropdown_selected,
-            pf_top_row,
-            actual_width,
-        ));
+    // Append status line directly at the end of the transcript view if we are scrolled to bottom
+    if scroll_offset == 0 {
+        let mut left_str = String::new();
+        let mut left_used = 0;
+        if let Some(left) = &args.left_status {
+            left_str.push_str(&left.rendered);
+            left_used += left.visible_width;
+        } else if args.pending_count > 0 {
+            let pending = format!("Pending: {}", args.pending_count);
+            left_str.push_str(&format!("\x1b[38;2;220;220;100m{}\x1b[0m", pending));
+            left_used += pending.chars().count();
+        }
+
+        if left_used > 0 {
+            visible_lines.push(left_str);
+        }
     }
 
-    screen.push_str(&render_prompt_frame(PromptFrameArgs {
-        header_height: banner_rows,
+    let output_str = visible_lines.join("\r\n");
+    if let Ok(text) = ansi_to_tui::IntoText::into_text(&output_str) {
+        frame.render_widget(ratatui::widgets::Paragraph::new(text), layout.output_area);
+    }
+
+    // Render Prompt Frame
+    let current_model =
+        crate::tui::header::display_model_name(args.status.is_coordinator, args.current_model);
+    let prompt_widget = crate::tui::widgets::PromptFrameWidget {
         current_model,
-        left_status: args.left_status,
-        pending_count: args.pending_count,
-        // The Graph status dot is `/auto_review`-only (see
-        // `AutoReviewScreenArgs::graph_status`) — the main chat screen keeps
-        // its `Pending: N` display exactly as before.
-        graph_status: None,
         prompt_prefix: &prompt_prefix,
         input: args.input,
         cursor: args.cursor,
         ghost: args.ghost,
-        height: frame_height,
-        actual_width,
         valid_command_len: args.valid_command_len,
-    }));
+    };
+    frame.render_widget(prompt_widget, layout.padded_prompt_area);
 
-    // Bottom tab bar on the last terminal row.
-    if bottom_row == 1
-        && let Some(ref bar) = h_tab_bar
-    {
-        screen.push_str(&format!("\x1b[{actual_height};1H{bar}"));
-        // Writing the bar moved the cursor to the last row; put it back in the
-        // input area so keystrokes land in the right place.
-        let input_height = input_lines.len();
-        let pf_height = frame_height.max(banner_rows + input_height + 3);
-        let pf_top_row = (pf_height.saturating_sub(input_height + 2)).max(banner_rows + 1);
-        let pf_input_start = pf_top_row + 1;
-        let pf_prompt_width = prompt_prefix.chars().count();
-        let (cr_offset, cc_offset) =
-            cursor_position(args.input, args.cursor, actual_width, &prompt_prefix);
-        let cr = pf_input_start + cr_offset;
-        let cc = (1 + pf_prompt_width + cc_offset).max(1);
-        screen.push_str(&format!("\x1b[{cr};{cc}H"));
+    // Render Dropdown natively so it floats correctly
+    if let Some(candidates) = args.dropdown_candidates {
+        if !candidates.is_empty() {
+            let pf_top_row = layout.padded_prompt_area.y;
+            let (dropdown_rect, dropdown_lines) = render_dropdown_popup(
+                candidates,
+                args.dropdown_selected,
+                pf_top_row as usize,
+                actual_width,
+            );
+            frame.render_widget(ratatui::widgets::Clear, dropdown_rect);
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(dropdown_lines),
+                dropdown_rect,
+            );
+        }
     }
 
-    screen
+    // Set cursor position using Ratatui
+    let (cr_offset, cc_offset) = cursor_position(
+        args.input,
+        args.cursor,
+        layout.padded_prompt_area.width.saturating_sub(4) as usize,
+        &prompt_prefix,
+    );
+    let pf_input_start = layout.padded_prompt_area.y + 1;
+    let pf_prompt_width = prompt_prefix.chars().count();
+    let cr = pf_input_start as usize + cr_offset;
+    let cc = (1 + pf_prompt_width + cc_offset).max(1);
+    frame.set_cursor_position((layout.padded_prompt_area.x + cc as u16, cr as u16));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -363,22 +524,18 @@ pub fn output_view_rows(
     actual_width: usize,
     actual_height: usize,
 ) -> usize {
-    let header = render_header(
-        version,
-        current_model,
-        endpoint,
-        workspace,
-        status,
-        Banner::Left,
+    let _ = (version, current_model, endpoint, workspace, status);
+    main_screen_layout(
         actual_width,
-    );
-    let header_line_count = header.lines().count();
-    let prompt_prefix = prompt_prefix(prompt_branch);
-    let input_lines = wrapped_input_lines(input, actual_width.max(1), &prompt_prefix);
-    let prompt_frame_height = input_lines.len() + 3;
-    let rows_above_prompt = actual_height.saturating_sub(prompt_frame_height);
-    let banner_rows = (header_line_count + 1).min(rows_above_prompt);
-    available_output_rows(rows_above_prompt, banner_rows)
+        actual_height,
+        prompt_branch,
+        input,
+        None,
+        &[],
+        true,
+    )
+    .output_area
+    .height as usize
 }
 
 pub fn render_thinking_status(frame: usize, elapsed: Duration) -> StatusFragment {
@@ -522,10 +679,6 @@ fn format_elapsed_timer(elapsed: Duration) -> String {
     format!("({})", format_status_duration(elapsed))
 }
 
-fn available_output_rows(rows_above_prompt: usize, banner_rows: usize) -> usize {
-    rows_above_prompt.saturating_sub(banner_rows)
-}
-
 /// Render the bottom prompt frame with absolute cursor positioning: the top
 /// separator, the input window, the bottom separator, and the status line.
 pub fn render_prompt_frame(args: PromptFrameArgs<'_>) -> String {
@@ -611,15 +764,62 @@ pub fn render_prompt_frame(args: PromptFrameArgs<'_>) -> String {
     frame
 }
 
-fn render_transcript_line(line: &TranscriptLine, width: usize) -> String {
+pub fn render_transcript_line_multi(line: &TranscriptLine, width: usize) -> Vec<String> {
     match line {
-        TranscriptLine::Plain(content) | TranscriptLine::Wide(content) => content.clone(),
+        TranscriptLine::Plain(content) | TranscriptLine::Wide(content) => vec![content.clone()],
+        TranscriptLine::Collapsible {
+            title,
+            content,
+            expanded,
+            ..
+        } => {
+            let mut lines = Vec::new();
+            let marker = if *expanded { "▼" } else { "◈" };
+            lines.push(format!("  \x1b[38;5;244m{} {}\x1b[0m", marker, title));
+            if *expanded {
+                for line in content.lines() {
+                    lines.push(format!(
+                        "    \x1b[38;5;240m│\x1b[0m \x1b[38;5;244m{}\x1b[0m",
+                        line
+                    ));
+                }
+            }
+            lines
+        }
         TranscriptLine::UserInput(content) => {
-            let padding = width.saturating_sub(content.chars().count());
-            format!(
-                "{USER_INPUT_BACKGROUND}{content}{}{ANSI_RESET}",
-                " ".repeat(padding)
-            )
+            let mut lines = Vec::new();
+            let content = content.trim_start_matches("> ");
+
+            let wrapped = wrapped_input_lines(&format!("  ❯ {}", content), width, "    ");
+
+            // Gap above
+            lines.push(String::new());
+
+            // Inside top padding
+            lines.push(format!(
+                "\x1b[48;2;45;35;20m{}\x1b[0m ",
+                " ".repeat(width.saturating_sub(1))
+            ));
+
+            for l in wrapped {
+                let padding = width.saturating_sub(1).saturating_sub(l.chars().count());
+                lines.push(format!(
+                    "\x1b[48;2;45;35;20m{}{}\x1b[0m ",
+                    l,
+                    " ".repeat(padding)
+                ));
+            }
+
+            // Inside bottom padding
+            lines.push(format!(
+                "\x1b[48;2;45;35;20m{}\x1b[0m ",
+                " ".repeat(width.saturating_sub(1))
+            ));
+
+            // Gap below
+            lines.push(String::new());
+
+            lines
         }
     }
 }
@@ -631,20 +831,19 @@ pub(crate) fn wrapped_input_lines(input: &str, width: usize, prompt_prefix: &str
     }
 
     let mut lines = Vec::new();
-    let mut current = String::new();
 
-    for ch in input.chars() {
-        current.push(ch);
-        if current.chars().count() == input_width {
-            lines.push(current);
-            current = String::new();
+    for paragraph in input.split('\n') {
+        let mut current = String::new();
+        for ch in paragraph.chars() {
+            current.push(ch);
+            if current.chars().count() == input_width {
+                lines.push(current);
+                current = String::new();
+            }
         }
-    }
-
-    if current.is_empty() {
-        lines.push(String::new());
-    } else {
-        lines.push(current);
+        if !current.is_empty() || paragraph.is_empty() {
+            lines.push(current);
+        }
     }
 
     lines
@@ -661,12 +860,9 @@ pub(crate) fn cursor_position(
     (prefix_chars / input_width, prefix_chars % input_width)
 }
 
-/// The input-window prompt prefix: `<branch>> ` on a branch, `> ` otherwise.
-pub fn prompt_prefix(branch_name: Option<&str>) -> String {
-    match branch_name {
-        Some(branch_name) if !branch_name.trim().is_empty() => format!("{branch_name}> "),
-        _ => "> ".to_string(),
-    }
+/// The input-window prompt prefix: always `> ` (branch name is shown in top bar).
+pub fn prompt_prefix(_branch_name: Option<&str>) -> String {
+    "> ".to_string()
 }
 
 /// Center `text` (which may carry ANSI color codes — its width is measured
@@ -752,7 +948,7 @@ fn render_rolling_text(text: &str, frame: usize) -> String {
     rendered
 }
 
-fn truncate_to_width(input: &str, width: usize) -> String {
+pub(crate) fn truncate_to_width(input: &str, width: usize) -> String {
     input.chars().take(width).collect()
 }
 
@@ -761,20 +957,23 @@ fn render_dropdown_popup(
     selected: usize,
     bottom_row: usize,
     actual_width: usize,
-) -> String {
-    let mut popup = String::new();
+) -> (ratatui::layout::Rect, Vec<ratatui::text::Line<'static>>) {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+
     let max_height = 10.min(candidates.len());
     let start_idx = selected
         .saturating_sub(max_height / 2)
         .min(candidates.len().saturating_sub(max_height));
     let display_candidates = &candidates[start_idx..start_idx + max_height];
 
-    let top_row = bottom_row.saturating_sub(display_candidates.len()).max(1);
+    let top_row = bottom_row.saturating_sub(display_candidates.len());
+    let max_width = actual_width.min(100);
+
+    let mut lines = Vec::new();
 
     for (i, (cmd, desc)) in display_candidates.iter().enumerate() {
-        let row = top_row + i;
         let is_selected = (start_idx + i) == selected;
-        let max_width = actual_width.min(100); // don't stretch too far
 
         let mut cmd_padded = cmd.clone();
         if cmd_padded.chars().count() < 32 {
@@ -785,26 +984,41 @@ fn render_dropdown_popup(
         let visible_len = cmd_padded.chars().count() + 1 + desc_truncated.chars().count();
         let padding = max_width.saturating_sub(visible_len);
 
-        let line = if is_selected {
-            format!(
-                "\x1b[49m\x1b[38;2;240;160;80m\x1b[1m{} \x1b[22m\x1b[38;2;120;120;120m{}{}\x1b[0m",
-                cmd_padded,
-                desc_truncated,
-                " ".repeat(padding)
-            )
+        let cmd_style = if is_selected {
+            Style::default()
+                .fg(Color::Rgb(240, 160, 80))
+                .add_modifier(Modifier::BOLD)
         } else {
-            format!(
-                "\x1b[49m\x1b[38;2;120;120;120m{} \x1b[38;2;120;120;120m{}{}\x1b[0m",
-                cmd_padded,
-                desc_truncated,
-                " ".repeat(padding)
-            )
+            Style::default().fg(Color::Rgb(120, 120, 120))
         };
 
-        popup.push_str(&format!("\x1b[{row};1H{line}"));
+        let desc_style = Style::default().fg(Color::Rgb(120, 120, 120));
+        let bg_style = if is_selected {
+            Style::default().bg(Color::Rgb(40, 40, 40))
+        } else {
+            Style::default()
+        };
+
+        let line = Line::from(vec![
+            Span::styled(format!("{} ", cmd_padded), cmd_style),
+            Span::styled(
+                format!("{}{}", desc_truncated, " ".repeat(padding)),
+                desc_style,
+            ),
+        ])
+        .style(bg_style);
+
+        lines.push(line);
     }
 
-    popup
+    let rect = ratatui::layout::Rect {
+        x: 0,
+        y: top_row as u16,
+        width: max_width as u16,
+        height: display_candidates.len() as u16,
+    };
+
+    (rect, lines)
 }
 
 /// Render `text` as a user-input line — a dark background spanning the full
@@ -925,15 +1139,15 @@ mod tests {
     }
 
     #[test]
-    fn prompt_prefix_uses_branch_name() {
-        assert_eq!(prompt_prefix(Some("main")), "main> ");
+    fn prompt_prefix_omits_branch_name() {
+        assert_eq!(prompt_prefix(Some("main")), "> ");
         assert_eq!(prompt_prefix(None), "> ");
     }
 
     #[test]
     fn wrapped_input_lines_respect_prompt_width() {
         assert_eq!(
-            wrapped_input_lines("abc", 8, "main> "),
+            wrapped_input_lines("abc", 4, "> "),
             vec!["ab".to_string(), "c".to_string()]
         );
     }
@@ -979,20 +1193,24 @@ mod tests {
     }
 
     #[test]
-    fn available_output_rows_matches_current_layout_math() {
-        // header=8 lines, prompt_frame=4, height=24
-        // rows_above_prompt = 24-4 = 20, banner_rows = min(9, 20) = 9
-        assert_eq!(available_output_rows(20, 9), 11);
-    }
-
-    #[test]
-    fn transcript_input_highlight_fills_the_row() {
-        let rendered =
-            render_transcript_line(&TranscriptLine::UserInput("> Hello World!".to_string()), 20);
-
-        assert_eq!(
-            rendered,
-            format!("{USER_INPUT_BACKGROUND}> Hello World!      {ANSI_RESET}")
+    fn output_view_rows_matches_current_layout_math() {
+        let rows = output_view_rows(
+            "0.0.0",
+            "model",
+            "endpoint",
+            std::path::Path::new("."),
+            Some("main"),
+            HeaderStatus {
+                workspace_ok: true,
+                server_ok: ConnStatus::Ok,
+                model_ok: ConnStatus::Ok,
+                is_coordinator: false,
+            },
+            "abc",
+            80,
+            24,
         );
+
+        assert_eq!(rows, 17);
     }
 }

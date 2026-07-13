@@ -47,20 +47,28 @@ pub(crate) fn set_terminal_title(title: Option<&str>) {
 pub(crate) fn ring_terminal_bell() {
     print!("\x07");
 }
+use ratatui::{Terminal, backend::CrosstermBackend};
+use std::io::Stdout;
 
-pub(crate) struct TerminalUiGuard;
+pub(crate) struct TerminalUiGuard {
+    pub terminal: Terminal<CrosstermBackend<Stdout>>,
+}
 
 impl TerminalUiGuard {
     pub(crate) fn new() -> Result<Self> {
         enable_raw_mode()?;
-        execute!(std::io::stdout(), EnterAlternateScreen)?;
-        // Keyboard enhancement is not supported on all terminals (e.g. Windows legacy console).
-        // If it fails, we gracefully ignore the error.
+        execute!(
+            std::io::stdout(),
+            crossterm::event::EnableMouseCapture,
+            EnterAlternateScreen
+        )?;
         let _ = execute!(
             std::io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
-        Ok(Self)
+        let backend = CrosstermBackend::new(std::io::stdout());
+        let terminal = Terminal::new(backend)?;
+        Ok(Self { terminal })
     }
 }
 
@@ -94,39 +102,37 @@ impl Drop for RawModePauseGuard {
     }
 }
 
-pub fn print_screen(render: RenderContext<'_>, screen: ScreenState<'_>) {
-    // Only hint a completion while the cursor sits at the end of what was typed.
-    // Slash commands take priority over natural-language bindings; for the latter,
-    // `ghost_index` selects which candidate to preview (cycled with Shift+Tab).
-    // Structured argument completions (branches, tags, files, models, servers)
-    // fall last, previewing the first candidate Tab would fill in.
-    let structured_ghost = completion::input_ghost_suffix(
-        screen.input,
-        screen.cursor,
-        screen.ghost_index,
-        render.workspace,
-        render.server_names,
-        render.available_models,
-        render.skills,
-    );
-    let ghost = structured_ghost.as_deref().unwrap_or("");
-    let mut valid_command_len = 0;
-    if screen.input.starts_with('/') {
-        let first_word = screen.input.split_whitespace().next().unwrap_or("");
-        if crate::slash_command::SlashCommand::iter().any(|c| c.command() == first_word)
-            || render
-                .skills
-                .find(first_word.trim_start_matches('/'))
-                .is_some()
-        {
-            valid_command_len = first_word.chars().count();
+impl TerminalUiGuard {
+    pub fn print_screen(&mut self, render: RenderContext<'_>, screen: ScreenState<'_>) {
+        // Only hint a completion while the cursor sits at the end of what was typed.
+        // Slash commands take priority over natural-language bindings; for the latter,
+        // `ghost_index` selects which candidate to preview (cycled with Shift+Tab).
+        // Structured argument completions (branches, tags, files, models, servers)
+        // fall last, previewing the first candidate Tab would fill in.
+        let structured_ghost = completion::input_ghost_suffix(
+            screen.input,
+            screen.cursor,
+            screen.ghost_index,
+            render.workspace,
+            render.server_names,
+            render.available_models,
+            render.skills,
+        );
+        let ghost = structured_ghost.as_deref().unwrap_or("");
+        let mut valid_command_len = 0;
+        if screen.input.starts_with('/') {
+            let first_word = screen.input.split_whitespace().next().unwrap_or("");
+            if crate::slash_command::SlashCommand::iter().any(|c| c.command() == first_word)
+                || render
+                    .skills
+                    .find(first_word.trim_start_matches('/'))
+                    .is_some()
+            {
+                valid_command_len = first_word.chars().count();
+            }
         }
-    }
 
-    print!("{CLEAR_TERMINAL_SEQUENCE}");
-    print!(
-        "{}",
-        render_screen(ScreenRenderArgs {
+        let args = ScreenRenderArgs {
             version: VERSION,
             current_model: render.current_model,
             endpoint: render.endpoint,
@@ -140,7 +146,7 @@ pub fn print_screen(render: RenderContext<'_>, screen: ScreenState<'_>) {
             scroll_offset: screen.scroll_offset,
             left_status: screen.left_status,
             pending_count: screen.pending_count,
-            pending_line: screen.pending_line,
+            pending_lines: screen.pending_lines,
             input: screen.input,
             cursor: screen.cursor,
             ghost,
@@ -155,6 +161,12 @@ pub fn print_screen(render: RenderContext<'_>, screen: ScreenState<'_>) {
             },
             dropdown_selected: screen.dropdown.map_or(0, |d| d.selected_index),
             valid_command_len,
-        })
-    );
+        };
+
+        self.terminal
+            .draw(|f| {
+                orangu::tui::renderer::render(f, &args);
+            })
+            .unwrap();
+    }
 }

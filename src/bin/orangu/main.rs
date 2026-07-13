@@ -64,9 +64,9 @@ use orangu::{
         AutoReviewDiffView, AutoReviewFileMode, AutoReviewRejectView, AutoReviewScreenArgs,
         FEEDBACK_ERR, FEEDBACK_OK, ReviewCommentEditor, ReviewEntry, ReviewFeedbackView,
         ReviewScreenArgs, ReviewStatus, ScreenRenderArgs, StatusFragment, TabStatus,
-        WorkspaceTabsView, auto_review_pane_body_height, render_auto_review_screen,
-        render_review_screen, render_screen, render_thinking_status, render_tool_running_status,
-        render_working_status, review_pane_body_height, terminal_height, terminal_width,
+        WorkspaceTabsView, auto_review_pane_body_height, render_thinking_status,
+        render_tool_running_status, render_working_status, review_pane_body_height,
+        terminal_height, terminal_width,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -359,7 +359,7 @@ async fn run() -> Result<()> {
         }
     }
 
-    let _terminal_ui_guard = TerminalUiGuard::new()?;
+    let mut _terminal_ui_guard = TerminalUiGuard::new()?;
 
     let vw = terminal_width();
     let vh = terminal_height();
@@ -929,6 +929,7 @@ async fn run() -> Result<()> {
                     deferred_tab: &mut deferred_tab_during_wait,
                     parked_tabs: ring.parked(),
                 },
+                &mut |r, s| _terminal_ui_guard.print_screen(r, s),
             )
             .await;
             match pr_result {
@@ -1079,6 +1080,10 @@ async fn run() -> Result<()> {
             .map(|_| StatusFragment::plain(format!("Resuming session {session_id}")));
         // The branch sync takes priority on the left of the status bar while it
         // runs and for a few seconds after it completes.
+        let mut print_screen = |r: RenderContext<'_>, s: ScreenState<'_>| {
+            _terminal_ui_guard.print_screen(r, s);
+        };
+
         let left_status = if sync_handle.is_some() {
             Some(StatusFragment::plain("Syncing with origin…".to_string()))
         } else {
@@ -1095,7 +1100,7 @@ async fn run() -> Result<()> {
                 scroll_offset: output_state.scroll_offset(),
                 left_status,
                 pending_count: pending_commands.len(),
-                pending_line: None,
+                pending_lines: &[],
                 input: input_state.as_str(),
                 cursor: input_state.cursor(),
                 ghost_index: input_state.ghost_index,
@@ -1147,7 +1152,7 @@ async fn run() -> Result<()> {
                     render,
                     skills: &skills,
                 },
-                print_screen,
+                &mut print_screen,
                 max_idle,
             )? {
                 InputResult::Submitted(line) => {
@@ -1189,8 +1194,6 @@ async fn run() -> Result<()> {
             }
         };
 
-        output_state.push_input(&format!("> {next_input}"));
-        output_state.reset_scroll();
         startup_notice_until = None;
         print_screen(
             render,
@@ -1199,7 +1202,7 @@ async fn run() -> Result<()> {
                 scroll_offset: output_state.scroll_offset(),
                 left_status: None,
                 pending_count: pending_commands.len(),
-                pending_line: None,
+                pending_lines: &[],
                 input: input_state.as_str(),
                 cursor: input_state.cursor(),
                 ghost_index: input_state.ghost_index,
@@ -1524,6 +1527,7 @@ async fn run() -> Result<()> {
                         parked_tabs: ring.parked(),
                     },
                     handle,
+                    &mut |r, s| _terminal_ui_guard.print_screen(r, s),
                 )
                 .await?;
                 match result {
@@ -1589,6 +1593,7 @@ async fn run() -> Result<()> {
                         parked_tabs: ring.parked(),
                     },
                     handle,
+                    &mut |r, s| _terminal_ui_guard.print_screen(r, s),
                 )
                 .await?;
                 match result {
@@ -1657,6 +1662,7 @@ async fn run() -> Result<()> {
                     handle,
                     &mut rx,
                     control,
+                    &mut |r, s| _terminal_ui_guard.print_screen(r, s),
                 )
                 .await?;
                 match result {
@@ -1721,6 +1727,20 @@ async fn run() -> Result<()> {
                         &workspace,
                         &server_names,
                         &available_models,
+                        &mut |args: orangu::tui::ReviewScreenArgs<'_>| {
+                            _terminal_ui_guard
+                                .terminal
+                                .draw(|f| {
+                                    let old = orangu::tui::render_review_screen(args);
+                                    if let Ok(text) = ansi_to_tui::IntoText::into_text(&old) {
+                                        f.render_widget(
+                                            ratatui::widgets::Paragraph::new(text),
+                                            f.area(),
+                                        );
+                                    }
+                                })
+                                .unwrap();
+                        },
                     )? {
                         ReviewSignal::Exit => break,
                         ReviewSignal::OpenFile { path } => {
@@ -1795,6 +1815,21 @@ async fn run() -> Result<()> {
                                 &input_state,
                                 &mut viewport,
                                 chrome,
+                                &mut |args: orangu::tui::ReviewScreenArgs<'_>| {
+                                    _terminal_ui_guard
+                                        .terminal
+                                        .draw(|f| {
+                                            let old = orangu::tui::render_review_screen(args);
+                                            if let Ok(text) = ansi_to_tui::IntoText::into_text(&old)
+                                            {
+                                                f.render_widget(
+                                                    ratatui::widgets::Paragraph::new(text),
+                                                    f.area(),
+                                                );
+                                            }
+                                        })
+                                        .unwrap();
+                                },
                             )
                             .await?;
                             let lines = match result {
@@ -1923,6 +1958,20 @@ async fn run() -> Result<()> {
                     // once and returns as soon as the run finishes, so a
                     // chained `export auto review` can pick up the report.
                     current_chain.is_some(),
+                    &mut |args: orangu::tui::AutoReviewScreenArgs<'_>| {
+                        _terminal_ui_guard
+                            .terminal
+                            .draw(|f| {
+                                let old = orangu::tui::render_auto_review_screen(args);
+                                if let Ok(text) = ansi_to_tui::IntoText::into_text(&old) {
+                                    f.render_widget(
+                                        ratatui::widgets::Paragraph::new(text),
+                                        f.area(),
+                                    );
+                                }
+                            })
+                            .unwrap();
+                    },
                 )
                 .await?;
 
@@ -2179,6 +2228,7 @@ async fn run() -> Result<()> {
                 deferred_tab: &mut deferred_tab_during_wait,
                 parked_tabs: ring.parked(),
             },
+            &mut |r, s| _terminal_ui_guard.print_screen(r, s),
         )
         .await
         {
@@ -2387,9 +2437,10 @@ fn prepare_submitted_input(
     history.push(trimmed.to_string());
     append_history_entry(history_path, trimmed)?;
 
+    output_state.push_input(&format!("> {trimmed}"));
+    output_state.reset_scroll();
+
     if trimmed.starts_with('#') {
-        output_state.push_input(&format!("> {trimmed}"));
-        output_state.reset_scroll();
         return Ok(None);
     }
 

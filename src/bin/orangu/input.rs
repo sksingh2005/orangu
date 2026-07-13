@@ -35,8 +35,6 @@ use super::completion::{
     natural_language_ghost_suffix_at,
 };
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 pub const ESC_CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 pub const CTRL_C_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const CTRL_C_EXIT_MESSAGE: &str = "Press Ctrl+c again to quit";
@@ -178,7 +176,7 @@ pub struct ScreenState<'a> {
     pub scroll_offset: usize,
     pub left_status: Option<StatusFragment>,
     pub pending_count: usize,
-    pub pending_line: Option<&'a str>,
+    pub pending_lines: &'a [TranscriptLine],
     pub input: &'a str,
     pub cursor: usize,
     pub ghost_index: usize,
@@ -293,6 +291,56 @@ impl OutputState {
         self.scroll_offset = 0;
     }
 
+    pub fn toggle_collapse(&mut self, id: usize) -> bool {
+        for line in &mut self.transcript {
+            if let TranscriptLine::Collapsible {
+                id: line_id,
+                expanded,
+                ..
+            } = line
+            {
+                if *line_id == id {
+                    *expanded = !*expanded;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn collapsible_id_at(
+        &self,
+        click_y: usize,
+        available_output_rows: usize,
+        inner_width: usize,
+        _x_offset: usize,
+    ) -> Option<usize> {
+        let mut visual_lines = Vec::new();
+        for line in &self.transcript {
+            let rendered = orangu::tui::render_transcript_line_multi(line, inner_width);
+            let _is_user_input = matches!(line, TranscriptLine::UserInput(_));
+            for _ in rendered {
+                let id = if let TranscriptLine::Collapsible { id, .. } = line {
+                    Some(*id)
+                } else {
+                    None
+                };
+                visual_lines.push(id);
+            }
+        }
+
+        let max_scroll_offset = visual_lines.len().saturating_sub(available_output_rows);
+        let scroll_offset = self.scroll_offset.min(max_scroll_offset);
+        let visible_end = visual_lines.len().saturating_sub(scroll_offset);
+        let visible_start = visible_end.saturating_sub(available_output_rows);
+
+        if click_y < (visible_end.saturating_sub(visible_start)) {
+            visual_lines.get(visible_start + click_y).copied().flatten()
+        } else {
+            None
+        }
+    }
+
     pub fn reset_scroll(&mut self) {
         self.scroll_offset = 0;
     }
@@ -312,10 +360,7 @@ impl OutputState {
     }
 
     pub fn push_input(&mut self, text: &str) {
-        self.push_lines(
-            text.lines()
-                .map(|line| TranscriptLine::UserInput(line.to_owned())),
-        );
+        self.push_lines(std::iter::once(TranscriptLine::UserInput(text.to_owned())));
     }
 
     pub fn push_lines<I>(&mut self, lines: I)
@@ -337,7 +382,83 @@ impl OutputState {
     }
 
     pub fn push_markdown(&mut self, text: &str) {
-        self.push_text(&super::render::render_markdown_for_console(text));
+        self.push_parsed(text, false);
+    }
+
+    pub fn push_parsed(&mut self, text: &str, is_streaming: bool) {
+        let mut remaining = text;
+        let mut next_id = self.transcript.len() + 1000;
+
+        while !remaining.is_empty() {
+            let think_pos = remaining.find("<think>");
+            let tool_pos = remaining.find("<tool_call");
+
+            let (tag_type, start_idx) = match (think_pos, tool_pos) {
+                (Some(t1), Some(t2)) if t1 < t2 => ("think", t1),
+                (Some(_t1), Some(t2)) => ("tool_call", t2),
+                (Some(t1), None) => ("think", t1),
+                (None, Some(t2)) => ("tool_call", t2),
+                (None, None) => {
+                    if !remaining.trim().is_empty() {
+                        self.push_text(&crate::render::render_markdown_for_console(remaining));
+                    }
+                    break;
+                }
+            };
+
+            let before = &remaining[..start_idx];
+            if !before.trim().is_empty() {
+                self.push_text(&crate::render::render_markdown_for_console(before));
+            }
+
+            let title: String;
+            let tag_end: usize;
+            let end_tag: &str;
+
+            if tag_type == "think" {
+                title = "Thought".to_string();
+                tag_end = start_idx + "<think>".len();
+                end_tag = "</think>";
+            } else {
+                let tag_str = &remaining[start_idx..];
+                if let Some(close_bracket) = tag_str.find('>') {
+                    let full_open_tag = &tag_str[..=close_bracket];
+                    if let Some(name_start) = full_open_tag.find("name=\"") {
+                        let name_part = &full_open_tag[name_start + 6..];
+                        if let Some(name_end) = name_part.find('"') {
+                            title = format!("Tool Call: {}", &name_part[..name_end]);
+                        } else {
+                            title = "Tool Call".to_string();
+                        }
+                    } else {
+                        title = "Tool Call".to_string();
+                    }
+                    tag_end = start_idx + close_bracket + 1;
+                } else {
+                    tag_end = start_idx + "<tool_call".len();
+                    title = "Tool Call".to_string();
+                }
+                end_tag = "</tool_call>";
+            }
+
+            remaining = &remaining[tag_end..];
+
+            let (content, after) = if let Some(end_idx) = remaining.find(end_tag) {
+                (&remaining[..end_idx], &remaining[end_idx + end_tag.len()..])
+            } else {
+                (remaining, "")
+            };
+
+            let expanded = is_streaming;
+            self.push_lines(std::iter::once(TranscriptLine::Collapsible {
+                id: next_id,
+                title,
+                content: content.trim().to_string(),
+                expanded,
+            }));
+            next_id += 1;
+            remaining = after;
+        }
     }
 
     pub fn max_content_width(&self) -> usize {
@@ -381,6 +502,7 @@ pub struct InputState {
     pub history_index: Option<usize>,
     pub history_draft: String,
     pub dropdown: Option<DropdownState>,
+    pub last_mouse_click: Option<(std::time::Instant, u16, u16)>,
 }
 
 impl InputState {
@@ -606,10 +728,10 @@ pub fn read_input(
     input_state: &mut InputState,
     interrupt_state: &mut InterruptState,
     output_state: &mut OutputState,
-    pending_count: usize,
+    _pending_count: usize,
     viewport: &mut ViewportState,
     input_context: InputContext<'_>,
-    print_screen_fn: impl Fn(RenderContext<'_>, ScreenState<'_>),
+    mut print_screen_fn: impl FnMut(RenderContext<'_>, ScreenState<'_>),
     max_idle: Duration,
 ) -> anyhow::Result<InputResult> {
     use crossterm::event;
@@ -653,8 +775,8 @@ pub fn read_input(
                     transcript: output_state.lines(),
                     scroll_offset: output_state.scroll_offset(),
                     left_status: None,
-                    pending_count,
-                    pending_line: None,
+                    pending_count: 0,
+                    pending_lines: &[],
                     input: input_state.as_str(),
                     cursor: input_state.cursor(),
                     ghost_index: input_state.ghost_index,
@@ -925,32 +1047,30 @@ pub fn handle_input_event(
                 }
                 (KeyCode::PageUp, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
                     interrupt_state.reset();
-                    output_state.page_up(orangu::tui::output_view_rows(
-                        VERSION,
-                        input_context.render.current_model,
-                        input_context.render.endpoint,
-                        input_context.render.workspace,
-                        input_context.render.prompt_branch,
-                        input_context.render.header_status,
-                        input_state.as_str(),
+                    let layout = orangu::tui::main_screen_layout(
                         input_context.render.actual_width,
                         input_context.render.actual_height,
-                    ));
+                        input_context.render.prompt_branch,
+                        input_state.as_str(),
+                        input_context.render.tab_bar,
+                        input_context.render.tab_statuses,
+                        true,
+                    );
+                    output_state.page_up(layout.output_area.height as usize);
                     redraw = true;
                 }
                 (KeyCode::PageDown, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
                     interrupt_state.reset();
-                    output_state.page_down(orangu::tui::output_view_rows(
-                        VERSION,
-                        input_context.render.current_model,
-                        input_context.render.endpoint,
-                        input_context.render.workspace,
-                        input_context.render.prompt_branch,
-                        input_context.render.header_status,
-                        input_state.as_str(),
+                    let layout = orangu::tui::main_screen_layout(
                         input_context.render.actual_width,
                         input_context.render.actual_height,
-                    ));
+                        input_context.render.prompt_branch,
+                        input_state.as_str(),
+                        input_context.render.tab_bar,
+                        input_context.render.tab_statuses,
+                        true,
+                    );
+                    output_state.page_down(layout.output_area.height as usize);
                     redraw = true;
                 }
                 (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
@@ -964,6 +1084,56 @@ pub fn handle_input_event(
                     redraw = true;
                 }
                 _ => {}
+            }
+        }
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            row,
+            ..
+        }) => {
+            let now = std::time::Instant::now();
+            let mut is_double_click = false;
+
+            if let Some((last_time, last_row, _last_col)) = input_state.last_mouse_click {
+                if last_row == row
+                    && now.duration_since(last_time) < std::time::Duration::from_millis(500)
+                {
+                    is_double_click = true;
+                    input_state.last_mouse_click = None;
+                } else {
+                    input_state.last_mouse_click = Some((now, row, 0));
+                }
+            } else {
+                input_state.last_mouse_click = Some((now, row, 0));
+            }
+
+            if is_double_click {
+                let layout = orangu::tui::main_screen_layout(
+                    input_context.render.actual_width,
+                    input_context.render.actual_height,
+                    input_context.render.prompt_branch,
+                    input_state.as_str(),
+                    input_context.render.tab_bar,
+                    input_context.render.tab_statuses,
+                    !output_state.lines().is_empty(),
+                );
+
+                let output_y = usize::from(layout.output_area.y);
+                let output_height = usize::from(layout.output_area.height);
+                if (row as usize) >= output_y && (row as usize) < output_y + output_height {
+                    let click_y = (row as usize) - output_y;
+
+                    if let Some(id) = output_state.collapsible_id_at(
+                        click_y,
+                        output_height,
+                        usize::from(layout.output_area.width),
+                        input_context.render.x_offset,
+                    ) {
+                        if output_state.toggle_collapse(id) {
+                            redraw = true;
+                        }
+                    }
+                }
             }
         }
         _ => {}

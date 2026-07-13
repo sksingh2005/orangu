@@ -28,6 +28,7 @@ pub(crate) async fn wait_for_response(
     llm_start: std::time::Instant,
     tool_time_before: std::time::Duration,
     wait_context: WaitContext<'_>,
+    print_screen_fn: &mut impl FnMut(RenderContext<'_>, ScreenState<'_>),
 ) -> Result<WaitResult> {
     // Snapshot messages so we can restore a clean session on ESC-cancel.
     let saved_messages = session.messages().to_vec();
@@ -85,6 +86,7 @@ pub(crate) async fn wait_for_response(
         },
         profile,
         wait_context,
+        print_screen_fn,
     )
     .await
 }
@@ -97,8 +99,9 @@ pub(crate) async fn wait_for_pending_response(
     profile: &LlmConfiguration,
     pr: PendingResponse,
     wait_context: WaitContext<'_>,
+    print_screen_fn: &mut impl FnMut(RenderContext<'_>, ScreenState<'_>),
 ) -> Result<WaitResult> {
-    drive_handle(session, pr, profile, wait_context).await
+    drive_handle(session, pr, profile, wait_context, print_screen_fn).await
 }
 
 /// The shared polling loop used by both [`wait_for_response`] and
@@ -110,6 +113,7 @@ async fn drive_handle(
     pr: PendingResponse,
     profile: &LlmConfiguration,
     wait_context: WaitContext<'_>,
+    print_screen_fn: &mut impl FnMut(RenderContext<'_>, ScreenState<'_>),
 ) -> Result<WaitResult> {
     let PendingResponse {
         stream_state: streamed_state,
@@ -151,8 +155,14 @@ async fn drive_handle(
     let quote_line = thinking_quote.map(|q| format!("\x1b[2m{q}\x1b[0m"));
 
     {
+        let mut parsed_state = crate::input::OutputState::default();
+        if let Some(q) = quote_line.as_deref() {
+            parsed_state.push_text(q);
+        }
+        let parsed_lines = parsed_state.lines();
+
         let live = live_tab_statuses(parked_tabs, render.tab_bar);
-        print_screen(
+        print_screen_fn(
             RenderContext {
                 tab_statuses: &live,
                 ..render
@@ -162,7 +172,7 @@ async fn drive_handle(
                 scroll_offset: output_state.scroll_offset(),
                 left_status: initial_status,
                 pending_count: pending_commands.len(),
-                pending_line: quote_line.as_deref(),
+                pending_lines: parsed_lines,
                 input: input_state.as_str(),
                 cursor: input_state.cursor(),
                 ghost_index: input_state.ghost_index,
@@ -192,17 +202,20 @@ async fn drive_handle(
                             .unwrap_or_default();
                         if let Some(pending_line) =
                             final_pending_line(&final_state.output, &response)
-                                .map(|line| render_markdown_for_console(&line))
                         {
+                            let mut parsed_state = crate::input::OutputState::default();
+                            parsed_state.push_parsed(&pending_line, true);
+                            let parsed_lines = parsed_state.lines();
+
                             let live = live_tab_statuses(parked_tabs, render.tab_bar);
-                            print_screen(
+                            print_screen_fn(
                                 RenderContext { tab_statuses: &live, ..render },
                                 ScreenState {
                                     transcript: output_state.lines(),
                                     scroll_offset: output_state.scroll_offset(),
                                     left_status: None,
                                     pending_count: pending_commands.len(),
-                                    pending_line: Some(pending_line.as_str()),
+                                    pending_lines: parsed_lines,
                                     input: input_state.as_str(),
                                     cursor: input_state.cursor(),
                                     ghost_index: input_state.ghost_index,
@@ -345,20 +358,25 @@ async fn drive_handle(
                         thinking_frame,
                         tokenizer.as_ref(),
                     );
-                    let pending_line = if last_rendered_output.is_empty() {
-                        quote_line.clone().unwrap_or_default()
+                    let mut parsed_state = crate::input::OutputState::default();
+                    if last_rendered_output.is_empty() {
+                        if let Some(q) = quote_line.clone() {
+                            parsed_state.push_text(&q);
+                        }
                     } else {
-                        render_markdown_for_console(&last_rendered_output)
-                    };
+                        parsed_state.push_parsed(&last_rendered_output, true);
+                    }
+                    let pending_lines = parsed_state.lines();
+
                     let live = live_tab_statuses(parked_tabs, render.tab_bar);
-                    print_screen(
+                    print_screen_fn(
                         RenderContext { tab_statuses: &live, ..render },
                         ScreenState {
                             transcript: output_state.lines(),
                             scroll_offset: output_state.scroll_offset(),
                             left_status,
                             pending_count: pending_commands.len(),
-                            pending_line: Some(pending_line.as_str()),
+                            pending_lines,
                             input: input_state.as_str(),
                             cursor: input_state.cursor(),
                             ghost_index: input_state.ghost_index,
@@ -375,6 +393,7 @@ async fn drive_handle(
 pub(crate) async fn wait_for_local_command<T: Send + 'static>(
     wait_context: WaitContext<'_>,
     mut handle: tokio::task::JoinHandle<anyhow::Result<T>>,
+    print_screen_fn: &mut impl FnMut(RenderContext<'_>, ScreenState<'_>),
 ) -> anyhow::Result<anyhow::Result<T>> {
     let WaitContext {
         mut render,
@@ -442,14 +461,14 @@ pub(crate) async fn wait_for_local_command<T: Send + 'static>(
                 }
                 let left_status = Some(render_tool_running_status(frame, elapsed));
                 let live = live_tab_statuses(parked_tabs, render.tab_bar);
-                print_screen(
+                print_screen_fn(
                     RenderContext { tab_statuses: &live, ..render },
                     ScreenState {
                         transcript: output_state.lines(),
                         scroll_offset: output_state.scroll_offset(),
                         left_status,
                         pending_count: pending_commands.len(),
-                        pending_line: None,
+                        pending_lines: &[],
                         input: input_state.as_str(),
                         cursor: input_state.cursor(),
             ghost_index: input_state.ghost_index,
@@ -469,6 +488,7 @@ pub(crate) async fn wait_for_streaming_command(
     mut handle: tokio::task::JoinHandle<anyhow::Result<()>>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
     control: Option<crate::commands::StreamControl>,
+    print_screen_fn: &mut impl FnMut(RenderContext<'_>, ScreenState<'_>),
 ) -> anyhow::Result<anyhow::Result<()>> {
     let cancel = control.as_ref().map(|c| c.cancel.clone());
     let progress = control.as_ref().map(|c| c.progress.clone());
@@ -578,14 +598,14 @@ pub(crate) async fn wait_for_streaming_command(
                     _ => render_tool_running_status(frame, elapsed),
                 });
                 let live = live_tab_statuses(parked_tabs, render.tab_bar);
-                print_screen(
+                print_screen_fn(
                     RenderContext { tab_statuses: &live, ..render },
                     ScreenState {
                         transcript: output_state.lines(),
                         scroll_offset: output_state.scroll_offset(),
                         left_status,
                         pending_count: pending_commands.len(),
-                        pending_line: None,
+                        pending_lines: &[],
                         input: input_state.as_str(),
                         cursor: input_state.cursor(),
             ghost_index: input_state.ghost_index,

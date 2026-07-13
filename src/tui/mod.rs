@@ -16,9 +16,11 @@
 mod auto_review;
 mod header;
 mod helper;
+pub mod renderer;
 mod review;
 mod screen;
 mod text;
+pub mod widgets;
 
 pub use auto_review::*;
 pub use header::*;
@@ -32,12 +34,19 @@ pub enum TranscriptLine {
     Plain(String),
     UserInput(String),
     Wide(String),
+    Collapsible {
+        id: usize,
+        title: String,
+        content: String,
+        expanded: bool,
+    },
 }
 
 impl TranscriptLine {
     pub fn as_str(&self) -> &str {
         match self {
             TranscriptLine::Plain(s) | TranscriptLine::UserInput(s) | TranscriptLine::Wide(s) => s,
+            TranscriptLine::Collapsible { content, .. } => content,
         }
     }
 }

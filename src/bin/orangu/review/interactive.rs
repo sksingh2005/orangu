@@ -532,6 +532,7 @@ pub(crate) fn print_review_screen(
     chrome: ReviewChrome<'_>,
     left_status: Option<StatusFragment>,
     ghost: &str,
+    print_screen_fn: &mut impl FnMut(ReviewScreenArgs<'_>),
 ) {
     let feedback = state.feedback.as_ref().map(|feedback| ReviewFeedbackView {
         title: &feedback.title,
@@ -550,29 +551,25 @@ pub(crate) fn print_review_screen(
             cursor: editor.input.cursor(),
         });
     let commented_lines = state.commented_lines();
-    print!("{CLEAR_TERMINAL_SEQUENCE}");
-    print!(
-        "{}",
-        render_review_screen(ReviewScreenArgs {
-            files: &state.files,
-            selected: state.selected,
-            line: state.line,
-            scroll: state.scroll,
-            x_offset: state.x_offset,
-            feedback,
-            comment_editor,
-            commented_lines: &commented_lines,
-            current_model: chrome.current_model,
-            prompt_branch: chrome.prompt_branch,
-            input: input_state.as_str(),
-            cursor: input_state.cursor(),
-            ghost,
-            left_status,
-            pending_count: chrome.pending_count,
-            actual_width: viewport.actual_width,
-            actual_height: viewport.actual_height,
-        })
-    );
+    print_screen_fn(ReviewScreenArgs {
+        files: &state.files,
+        selected: state.selected,
+        line: state.line,
+        scroll: state.scroll,
+        x_offset: state.x_offset,
+        feedback,
+        comment_editor,
+        commented_lines: &commented_lines,
+        current_model: chrome.current_model,
+        prompt_branch: chrome.prompt_branch,
+        input: input_state.as_str(),
+        cursor: input_state.cursor(),
+        ghost,
+        left_status,
+        pending_count: chrome.pending_count,
+        actual_width: viewport.actual_width,
+        actual_height: viewport.actual_height,
+    });
 }
 
 /// Run the review event loop until the user exits or asks for an LLM review.
@@ -584,6 +581,7 @@ pub(crate) fn run_review_mode(
     workspace: &Path,
     server_names: &[String],
     available_models: &[String],
+    print_screen_fn: &mut impl FnMut(ReviewScreenArgs<'_>),
 ) -> Result<ReviewSignal> {
     let mut escape_cancel = EscapeCancelState::default();
     loop {
@@ -608,7 +606,15 @@ pub(crate) fn run_review_mode(
             chrome.skills,
         )
         .unwrap_or_default();
-        print_review_screen(state, input_state, viewport, chrome, None, &ghost);
+        print_review_screen(
+            state,
+            input_state,
+            viewport,
+            chrome,
+            None,
+            &ghost,
+            print_screen_fn,
+        );
         std::io::stdout().flush()?;
 
         let (code, modifiers) = match event::read()? {
@@ -820,6 +826,7 @@ pub(crate) async fn run_review_request(
     input_state: &InputState,
     viewport: &mut ViewportState,
     chrome: ReviewChrome<'_>,
+    print_screen_fn: &mut impl FnMut(ReviewScreenArgs<'_>),
 ) -> Result<ReviewRequestOutcome> {
     let checkpoint = session.checkpoint();
     let mut future = Box::pin(session.prompt(prompt, profile, tools, |_| {}, |_| {}, |_| {}));
@@ -864,7 +871,7 @@ pub(crate) async fn run_review_request(
                 let frame = (started.elapsed().as_millis()
                     / THINKING_FRAME_INTERVAL.as_millis().max(1)) as usize;
                 let status = render_thinking_status(frame, started.elapsed());
-                print_review_screen(state, input_state, viewport, chrome, Some(status), "");
+                print_review_screen(state, input_state, viewport, chrome, Some(status), "", print_screen_fn);
                 std::io::stdout().flush()?;
             }
         }
