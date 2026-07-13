@@ -82,6 +82,8 @@ pub struct AutoReviewScreenArgs<'a> {
     /// browsing afterwards. `None` shows no highlight (the run has ended and
     /// nothing has been picked).
     pub selected: Option<usize>,
+    /// Scroll offset of the file checklist in the right pane.
+    pub list_offset: usize,
     /// The rendered report lines shown in the left pane.
     pub report_lines: &'a [String],
     /// The line range (start inclusive, end exclusive, into `report_lines`) of

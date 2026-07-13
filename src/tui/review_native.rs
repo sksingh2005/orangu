@@ -14,6 +14,11 @@ pub fn draw_review_screen(frame: &mut ratatui::Frame, args: ReviewScreenArgs<'_>
     let area = frame.area();
     let width = area.width.max(1);
     let height = area.height.max(1);
+    frame.render_widget(
+        ratatui::widgets::Block::default()
+            .style(ratatui::style::Style::default().bg(ratatui::style::Color::Black)),
+        area,
+    );
 
     let prefix = prompt_prefix(args.prompt_branch);
     let input_lines_count = wrapped_input_lines(args.input, width as usize, &prefix).len();
@@ -45,6 +50,9 @@ pub fn draw_review_screen(frame: &mut ratatui::Frame, args: ReviewScreenArgs<'_>
         cursor: args.cursor,
         ghost: args.ghost,
         valid_command_len: 0,
+        left_status: args.left_status.as_ref(),
+        pending_count: args.pending_count,
+        graph_status: None,
     };
     frame.render_widget(prompt_widget, prompt_area);
 }
@@ -61,7 +69,7 @@ fn draw_review_feedback_panel(
 
     lines.push(Line::from(Span::styled(
         clip_line(&header_text, 0, width),
-        Style::default().add_modifier(Modifier::REVERSED),
+        theme.cursor_line_bg,
     )));
 
     if let Some(question) = feedback.question {
@@ -80,11 +88,11 @@ fn draw_review_feedback_panel(
         } else {
             String::new()
         };
-        if let Ok(text) = ansi_to_tui::IntoText::into_text(&content) {
-            if let Some(line) = text.lines.into_iter().next() {
-                lines.push(line);
-                continue;
-            }
+        if let Ok(text) = ansi_to_tui::IntoText::into_text(&content)
+            && let Some(line) = text.lines.into_iter().next()
+        {
+            lines.push(line);
+            continue;
         }
         lines.push(Line::from(content));
     }
@@ -100,38 +108,63 @@ fn draw_review_panes(
     theme: &Theme,
 ) {
     let right_width = crate::tui::review::review_right_width(args.files, width) as u16;
-    let left_width = width.saturating_sub(right_width as usize + 1).max(1) as u16;
-    let body_height = area.height.saturating_sub(1) as usize;
+    let left_width = width.saturating_sub(right_width as usize).max(1) as u16;
+
+    let main_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(area);
+
+    let header_area = main_layout[0];
+    let panes_area = main_layout[1];
 
     let layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(left_width),
-            Constraint::Length(1),
             Constraint::Length(right_width),
         ])
-        .split(area);
+        .split(panes_area);
 
     let left_area = layout[0];
-    let sep_area = layout[1];
-    let right_area = layout[2];
+    let right_area = layout[1];
 
-    // Left Pane Title
-    let mut left_lines = Vec::new();
-    let title = format!(
-        "Review: {}  Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+o Review  Alt+c Comment  Alt+e Open  Alt+x Exit",
-        args.prompt_branch.unwrap_or("(detached HEAD)"),
+    let left_inner_area = left_area.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let body_height = left_inner_area.height as usize;
+    let right_body_height = right_area.height.saturating_sub(1) as usize;
+
+    // Header Badges
+    let mut header_spans = vec![Span::raw(format!(
+        "Review: {}  ",
+        args.prompt_branch.unwrap_or("(detached HEAD)")
+    ))];
+    let badge_style = Style::default().bg(Color::DarkGray).fg(Color::White);
+    let badges = [
+        ("Alt+j/k", "Switch file"),
+        ("Alt+a", "Approve"),
+        ("Alt+r", "Reject"),
+        ("Alt+o", "Review"),
+        ("Alt+c", "Comment"),
+        ("Alt+e", "Open"),
+        ("Alt+x", "Exit"),
+    ];
+    for (i, (key, desc)) in badges.iter().enumerate() {
+        header_spans.push(Span::styled(format!(" {key} "), badge_style));
+        header_spans.push(Span::raw(format!(" {desc}")));
+        if i < badges.len() - 1 {
+            header_spans.push(Span::raw("  "));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(header_spans))
+            .block(ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::BOTTOM)),
+        header_area,
     );
-    left_lines.push(Line::from(Span::styled(
-        clip_line(&title, 0, left_area.width as usize),
-        Style::default(),
-    )));
 
-    // Separator Title
-    let mut sep_lines = Vec::new();
-    sep_lines.push(Line::from(Span::styled("│", theme.muted)));
-
-    // Right Pane Title
+    // Right Pane
     let mut right_lines = Vec::new();
     let right_header = format!("Files ({})", args.files.len());
     right_lines.push(Line::from(Span::styled(
@@ -139,11 +172,7 @@ fn draw_review_panes(
         Style::default(),
     )));
 
-    let list_start = if args.selected >= body_height {
-        args.selected - body_height + 1
-    } else {
-        0
-    };
+    let list_start = args.list_offset;
 
     let selected_lines: &[String] = args
         .files
@@ -156,7 +185,7 @@ fn draw_review_panes(
     let mut diff_index = args.scroll;
     let mut lines_pushed = 0;
 
-    for row_idx in 0..body_height {
+    for row_idx in 0..right_body_height {
         // Right side
         let file_index = list_start + row_idx;
         if let Some(file) = args.files.get(file_index) {
@@ -173,108 +202,111 @@ fn draw_review_panes(
 
             let mut line = Line::from(right_spans);
             if file_index == args.selected {
-                line = line.style(Style::default().add_modifier(Modifier::REVERSED));
+                line = line.style(theme.selected_file);
             }
             right_lines.push(line);
         } else {
             right_lines.push(Line::raw(""));
         }
+    }
 
-        sep_lines.push(Line::from(Span::styled("│", theme.muted)));
+    // Left side
+    let mut left_lines = Vec::new();
+    for _row_idx in 0..body_height {
+        if let Some(editor) = &args.comment_editor
+            && diff_index == args.line + 1
+            && !box_shown
+            && lines_pushed < body_height
+        {
+            box_shown = true;
 
-        // Left side
-        if let Some(editor) = &args.comment_editor {
-            if diff_index == args.line + 1 && !box_shown && lines_pushed < body_height {
-                box_shown = true;
+            // Add editor rows here directly to left_lines
+            let inner_width = left_inner_area.width as usize;
 
-                // Add editor rows here directly to left_lines
-                let inner_width = left_area.width.saturating_sub(2).max(1) as usize;
+            let chosen = if editor.selector_focused {
+                Span::styled(
+                    format!(" {} ", editor.category),
+                    theme.comment_bg.add_modifier(Modifier::REVERSED),
+                )
+            } else {
+                Span::styled(format!("[{}]", editor.category), theme.comment_bg)
+            };
 
-                let chosen = if editor.selector_focused {
-                    Span::styled(
-                        format!(" {} ", editor.category),
-                        theme.comment_bg.add_modifier(Modifier::REVERSED),
-                    )
-                } else {
-                    Span::styled(format!("[{}]", editor.category), theme.comment_bg)
-                };
+            let mut spans1 = vec![
+                Span::styled("▕ ", theme.comment_bg.fg(Color::Rgb(120, 160, 120))),
+                Span::styled("Category: ", theme.comment_bg),
+                chosen,
+                Span::styled("  ", theme.comment_bg),
+                Span::styled(
+                    "↑/↓ Category · Tab Switch focus",
+                    theme.comment_bg.fg(Color::DarkGray),
+                ),
+            ];
+            let w1 = spans1.iter().map(|s| s.width()).sum::<usize>();
+            let pad1 = " ".repeat(inner_width.saturating_sub(w1.saturating_sub(2))); // subtract 2 for ▕
+            spans1.push(Span::styled(pad1, theme.comment_bg));
+            left_lines.push(Line::from(spans1));
+            lines_pushed += 1;
 
-                let mut spans1 = vec![
-                    Span::styled("▕ ", theme.comment_bg.fg(Color::Rgb(120, 160, 120))),
-                    Span::styled("Category: ", theme.comment_bg),
-                    chosen,
-                    Span::styled("  ", theme.comment_bg),
-                    Span::styled(
-                        "↑/↓ Category · Tab Switch focus",
-                        theme.comment_bg.fg(Color::DarkGray),
-                    ),
-                ];
-                let w1 = spans1.iter().map(|s| s.width()).sum::<usize>();
-                let pad1 = " ".repeat(inner_width.saturating_sub(w1.saturating_sub(2))); // subtract 2 for ▕ 
-                spans1.push(Span::styled(pad1, theme.comment_bg));
-                left_lines.push(Line::from(spans1));
-                lines_pushed += 1;
+            let wrapped = wrapped_input_lines(editor.text, inner_width, "");
+            let (cursor_row, cursor_col) =
+                cursor_position(editor.text, editor.cursor, inner_width, "");
+            let start =
+                cursor_row.saturating_sub(crate::tui::review::REVIEW_COMMENT_BOX_HEIGHT - 1);
 
-                let wrapped = wrapped_input_lines(editor.text, inner_width, "");
-                let (cursor_row, cursor_col) =
-                    cursor_position(editor.text, editor.cursor, inner_width, "");
-                let start =
-                    cursor_row.saturating_sub(crate::tui::review::REVIEW_COMMENT_BOX_HEIGHT - 1);
+            for r in 0..crate::tui::review::REVIEW_COMMENT_BOX_HEIGHT {
+                if lines_pushed >= body_height {
+                    break;
+                }
+                let idx = start + r;
+                let content = wrapped.get(idx).cloned().unwrap_or_default();
+                let mut spans = vec![Span::styled(
+                    "▕ ",
+                    theme.comment_bg.fg(Color::Rgb(120, 160, 120)),
+                )];
 
-                for r in 0..crate::tui::review::REVIEW_COMMENT_BOX_HEIGHT {
-                    if lines_pushed >= body_height {
-                        break;
-                    }
-                    let idx = start + r;
-                    let content = wrapped.get(idx).cloned().unwrap_or_default();
-                    let mut spans = vec![Span::styled(
-                        "▕ ",
-                        theme.comment_bg.fg(Color::Rgb(120, 160, 120)),
-                    )];
-
-                    if idx == cursor_row && !editor.selector_focused {
-                        // caret
-                        let chars: Vec<char> = content.chars().collect();
-                        if cursor_col < chars.len() {
-                            let (before, rest) = content.split_at(
-                                content
-                                    .char_indices()
-                                    .nth(cursor_col)
-                                    .map(|(i, _)| i)
-                                    .unwrap_or(0),
-                            );
-                            let (caret, after) = rest.split_at(
-                                rest.char_indices()
-                                    .nth(1)
-                                    .map(|(i, _)| i)
-                                    .unwrap_or(rest.len()),
-                            );
-                            spans.push(Span::styled(before.to_string(), theme.comment_bg));
-                            spans.push(Span::styled(
-                                caret.to_string(),
-                                theme.comment_bg.add_modifier(Modifier::REVERSED),
-                            ));
-                            spans.push(Span::styled(after.to_string(), theme.comment_bg));
-                        } else if chars.len() < inner_width {
-                            spans.push(Span::styled(content.clone(), theme.comment_bg));
-                            spans.push(Span::styled(
-                                " ",
-                                theme.comment_bg.add_modifier(Modifier::REVERSED),
-                            ));
-                        } else {
-                            spans.push(Span::styled(content.clone(), theme.comment_bg));
-                        }
+                if idx == cursor_row && !editor.selector_focused {
+                    // caret
+                    let chars: Vec<char> = content.chars().collect();
+                    if cursor_col < chars.len() {
+                        let (before, rest) = content.split_at(
+                            content
+                                .char_indices()
+                                .nth(cursor_col)
+                                .map(|(i, _)| i)
+                                .unwrap_or(0),
+                        );
+                        let (caret, after) = rest.split_at(
+                            rest.char_indices()
+                                .nth(1)
+                                .map(|(i, _)| i)
+                                .unwrap_or(rest.len()),
+                        );
+                        spans.push(Span::styled(before.to_string(), theme.comment_bg));
+                        spans.push(Span::styled(
+                            caret.to_string(),
+                            theme.comment_bg.add_modifier(Modifier::REVERSED),
+                        ));
+                        spans.push(Span::styled(after.to_string(), theme.comment_bg));
+                    } else if chars.len() < inner_width {
+                        spans.push(Span::styled(content.clone(), theme.comment_bg));
+                        spans.push(Span::styled(
+                            " ",
+                            theme.comment_bg.add_modifier(Modifier::REVERSED),
+                        ));
                     } else {
                         spans.push(Span::styled(content.clone(), theme.comment_bg));
                     }
-
-                    let w = spans.iter().map(|s| s.width()).sum::<usize>();
-                    let pad = " ".repeat(inner_width.saturating_sub(w.saturating_sub(2)));
-                    spans.push(Span::styled(pad, theme.comment_bg));
-
-                    left_lines.push(Line::from(spans));
-                    lines_pushed += 1;
+                } else {
+                    spans.push(Span::styled(content.clone(), theme.comment_bg));
                 }
+
+                let w = spans.iter().map(|s| s.width()).sum::<usize>();
+                let pad = " ".repeat(inner_width.saturating_sub(w.saturating_sub(2)));
+                spans.push(Span::styled(pad, theme.comment_bg));
+
+                left_lines.push(Line::from(spans));
+                lines_pushed += 1;
             }
         }
 
@@ -282,11 +314,7 @@ fn draw_review_panes(
             if let Some(diff_line) = selected_lines.get(diff_index) {
                 let mut spans = Vec::new();
                 let is_cursor = diff_index == args.line;
-                let clipped = clip_line(
-                    diff_line,
-                    args.x_offset,
-                    left_area.width.saturating_sub(2) as usize,
-                );
+                let clipped = clip_line(diff_line, args.x_offset, left_inner_area.width as usize);
 
                 if let Ok(text) = ansi_to_tui::IntoText::into_text(&clipped) {
                     if let Some(parsed_line) = text.lines.into_iter().next() {
@@ -307,7 +335,7 @@ fn draw_review_panes(
                     spans.push(Span::styled("●", theme.warning));
                 } else {
                     let w = spans.iter().map(|s| s.width()).sum::<usize>();
-                    let pad = " ".repeat(left_area.width.saturating_sub(w as u16) as usize);
+                    let pad = " ".repeat(left_inner_area.width.saturating_sub(w as u16) as usize);
                     spans.push(Span::raw(pad));
                 }
 
@@ -324,7 +352,15 @@ fn draw_review_panes(
         }
     }
 
-    frame.render_widget(Paragraph::new(left_lines), left_area);
-    frame.render_widget(Paragraph::new(sep_lines), sep_area);
-    frame.render_widget(Paragraph::new(right_lines), right_area);
+    frame.render_widget(
+        Paragraph::new(left_lines)
+            .block(ratatui::widgets::Block::bordered().border_style(theme.muted)),
+        left_area,
+    );
+    frame.render_widget(
+        Paragraph::new(right_lines).block(
+            ratatui::widgets::Block::default().padding(ratatui::widgets::Padding::new(1, 1, 1, 0)),
+        ),
+        right_area,
+    );
 }

@@ -408,6 +408,7 @@ pub(crate) struct AutoReviewState {
     /// browsing afterwards. `None` once the run ends, until the user
     /// navigates.
     pub(crate) selected: Option<usize>,
+    pub(crate) list_offset: usize,
     /// The report item highlighted in the left pane while browsing: an index
     /// into `build_report`'s item list, moved by Up/Down and acted on by `-`.
     /// `None` until the user navigates (or once the report has no items left).
@@ -467,6 +468,16 @@ pub(crate) struct AutoReviewState {
 }
 
 impl AutoReviewState {
+    pub(crate) fn update_list_offset(&mut self, right_body_height: usize) {
+        if let Some(selected) = self.selected {
+            if selected < self.list_offset {
+                self.list_offset = selected;
+            } else if selected >= self.list_offset + right_body_height {
+                self.list_offset = selected.saturating_sub(right_body_height).saturating_add(1);
+            }
+        }
+    }
+
     pub(crate) fn new(launch: ReviewLaunch) -> Self {
         // The `deep` launch keyword starts every file in Deep mode instead of
         // the usual per-file Normal default — the same Deep the Alt+m
@@ -480,6 +491,7 @@ impl AutoReviewState {
         Self {
             files: launch.files,
             selected: None,
+            list_offset: 0,
             selected_item: None,
             reviewing: None,
             scroll: 0,
@@ -2033,6 +2045,7 @@ pub(crate) fn auto_review_graph_conn_status(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn print_auto_review_screen(
     state: &AutoReviewState,
     viewport: &ViewportState,
@@ -2068,6 +2081,7 @@ pub(crate) fn print_auto_review_screen(
     print_screen_fn(AutoReviewScreenArgs {
         files: &state.files,
         selected: state.selected,
+        list_offset: state.list_offset,
         // Pulsing the index on the render tick makes the dot blink.
         reviewing: state.reviewing.filter(|_| blink_on),
         browsing: state.done || state.cancelled,
@@ -2480,9 +2494,22 @@ pub(crate) fn run_auto_review_prestart(
             viewport.actual_width,
         );
         let right_width = orangu::tui::review_right_width(&state.files, viewport.actual_width);
-        let left_width = viewport.actual_width.saturating_sub(right_width + 1).max(1);
+        let left_width = viewport.actual_width.saturating_sub(right_width).max(1);
         state.clamp(body_height, left_width);
         state.status = auto_review_prestart_status(state);
+
+        let prefix = orangu::tui::screen::prompt_prefix(chrome.prompt_branch);
+        let prompt_frame_height =
+            orangu::tui::screen::wrapped_input_lines("", viewport.actual_width, &prefix).len() + 3;
+        // The native layout uses two rows for the mode header, plus the
+        // right pane's one-row top padding and `Files` heading.
+        let right_body_height = viewport
+            .actual_height
+            .saturating_sub(prompt_frame_height)
+            .saturating_sub(4)
+            .max(1);
+        state.update_list_offset(right_body_height);
+
         print_auto_review_screen(
             state,
             viewport,
@@ -2499,6 +2526,33 @@ pub(crate) fn run_auto_review_prestart(
         let (code, modifiers) = match event::read()? {
             Event::Resize(width, height) => {
                 viewport.on_resize(usize::from(width), usize::from(height));
+                continue;
+            }
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind, column, row, ..
+            }) => {
+                match kind {
+                    crossterm::event::MouseEventKind::ScrollUp => {
+                        state.scroll = state.scroll.saturating_sub(3);
+                    }
+                    crossterm::event::MouseEventKind::ScrollDown => {
+                        state.scroll = state.scroll.saturating_add(3);
+                    }
+                    crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                        if column as usize >= left_width =>
+                    {
+                        let list_start = state.list_offset;
+                        if row >= 4 {
+                            let click_y = (row - 4) as usize;
+                            let file_index = list_start + click_y;
+                            if file_index < state.files.len() {
+                                state.selected = Some(file_index);
+                                state.scroll = 0;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
                 continue;
             }
             Event::Key(KeyEvent {
@@ -2680,6 +2734,7 @@ pub(crate) fn auto_review_terminal_title_dot(reviewing_deep: bool) -> &'static s
 /// response length, so a review can neither start tool rounds nor generate
 /// unbounded output. The report stays scrollable while the model works;
 /// `Esc` `Esc` cancels the run and `Alt+x` exits the mode.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_auto_review_request(
     scratch: &mut ChatSession,
     prompt: &str,
@@ -2729,6 +2784,18 @@ pub(crate) async fn run_auto_review_request(
                     let (code, modifiers) = match event::read()? {
                         Event::Resize(width, height) => {
                             viewport.on_resize(usize::from(width), usize::from(height));
+                            continue;
+                        }
+                        Event::Mouse(crossterm::event::MouseEvent { kind, .. }) => {
+                            match kind {
+                                crossterm::event::MouseEventKind::ScrollUp => {
+                                    state.scroll = state.scroll.saturating_sub(3);
+                                }
+                                crossterm::event::MouseEventKind::ScrollDown => {
+                                    state.scroll = state.scroll.saturating_add(3);
+                                }
+                                _ => {}
+                            }
                             continue;
                         }
                         Event::Key(KeyEvent { code, modifiers, kind, .. })
@@ -2792,7 +2859,7 @@ pub(crate) async fn run_auto_review_request(
                 }
                 let right_width =
                     orangu::tui::review_right_width(&state.files, viewport.actual_width);
-                let left_width = viewport.actual_width.saturating_sub(right_width + 1).max(1);
+                let left_width = viewport.actual_width.saturating_sub(right_width).max(1);
                 state.clamp(body_height, left_width);
                 let frame = (started.elapsed().as_millis()
                     / THINKING_FRAME_INTERVAL.as_millis().max(1)) as usize;
@@ -2922,7 +2989,7 @@ pub(crate) fn run_auto_review_browse(
             viewport.actual_width,
         );
         let right_width = orangu::tui::review_right_width(&state.files, viewport.actual_width);
-        let left_width = viewport.actual_width.saturating_sub(right_width + 1).max(1);
+        let left_width = viewport.actual_width.saturating_sub(right_width).max(1);
         state.clamp(body_height, left_width);
         state.ensure_item_visible(body_height);
         // Preview the file/command Tab would fill in, exactly like `/review`.
@@ -2936,6 +3003,24 @@ pub(crate) fn run_auto_review_browse(
             skills,
         )
         .unwrap_or_default();
+
+        let prefix = orangu::tui::screen::prompt_prefix(chrome.prompt_branch);
+        let prompt_frame_height = orangu::tui::screen::wrapped_input_lines(
+            input_state.as_str(),
+            viewport.actual_width,
+            &prefix,
+        )
+        .len()
+            + 3;
+        // The native layout uses two rows for the mode header, plus the
+        // right pane's one-row top padding and `Files` heading.
+        let right_body_height = viewport
+            .actual_height
+            .saturating_sub(prompt_frame_height)
+            .saturating_sub(4)
+            .max(1);
+        state.update_list_offset(right_body_height);
+
         print_auto_review_screen(
             state,
             viewport,
@@ -2952,6 +3037,33 @@ pub(crate) fn run_auto_review_browse(
         let (code, modifiers) = match event::read()? {
             Event::Resize(width, height) => {
                 viewport.on_resize(usize::from(width), usize::from(height));
+                continue;
+            }
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind, column, row, ..
+            }) => {
+                match kind {
+                    crossterm::event::MouseEventKind::ScrollUp => {
+                        state.scroll = state.scroll.saturating_sub(3);
+                    }
+                    crossterm::event::MouseEventKind::ScrollDown => {
+                        state.scroll = state.scroll.saturating_add(3);
+                    }
+                    crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                        if column as usize >= left_width =>
+                    {
+                        let list_start = state.list_offset;
+                        if row >= 4 {
+                            let click_y = (row - 4) as usize;
+                            let file_index = list_start + click_y;
+                            if file_index < state.files.len() {
+                                state.selected = Some(file_index);
+                                state.scroll = 0;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
                 continue;
             }
             Event::Key(KeyEvent {

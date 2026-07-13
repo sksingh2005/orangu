@@ -95,6 +95,7 @@ pub(crate) mod test_fixtures {
         ReviewScreenArgs {
             files,
             selected,
+            list_offset: 0,
             line: 0,
             scroll,
             x_offset: 0,
@@ -122,6 +123,7 @@ pub(crate) mod test_fixtures {
         AutoReviewScreenArgs {
             files,
             selected: None,
+            list_offset: 0,
             reviewing: None,
             browsing: false,
             prestart: false,

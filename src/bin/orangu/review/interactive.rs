@@ -61,6 +61,7 @@ pub(crate) fn review_category_name(category: usize) -> &'static str {
 pub(crate) struct ReviewState {
     pub(crate) files: Vec<ReviewEntry>,
     pub(crate) selected: usize,
+    pub(crate) list_offset: usize,
     /// Index of the highlighted line within the selected file's diff (moved
     /// with Up/Down).
     pub(crate) line: usize,
@@ -103,10 +104,22 @@ pub(crate) struct ReviewChrome<'a> {
 }
 
 impl ReviewState {
+    pub(crate) fn update_list_offset(&mut self, right_body_height: usize) {
+        if self.selected < self.list_offset {
+            self.list_offset = self.selected;
+        } else if self.selected >= self.list_offset + right_body_height {
+            self.list_offset = self
+                .selected
+                .saturating_sub(right_body_height)
+                .saturating_add(1);
+        }
+    }
+
     pub(crate) fn new(launch: ReviewLaunch) -> Self {
         Self {
             files: launch.files,
             selected: 0,
+            list_offset: 0,
             line: 0,
             scroll: 0,
             x_offset: 0,
@@ -554,6 +567,7 @@ pub(crate) fn print_review_screen(
     print_screen_fn(ReviewScreenArgs {
         files: &state.files,
         selected: state.selected,
+        list_offset: state.list_offset,
         line: state.line,
         scroll: state.scroll,
         x_offset: state.x_offset,
@@ -573,6 +587,7 @@ pub(crate) fn print_review_screen(
 }
 
 /// Run the review event loop until the user exits or asks for an LLM review.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_review_mode(
     state: &mut ReviewState,
     viewport: &mut ViewportState,
@@ -592,7 +607,7 @@ pub(crate) fn run_review_mode(
             viewport.actual_width,
         );
         let right_width = orangu::tui::review_right_width(&state.files, viewport.actual_width);
-        let left_width = viewport.actual_width.saturating_sub(right_width + 1).max(1);
+        let left_width = viewport.actual_width.saturating_sub(right_width).max(1);
         state.clamp(body_height, left_width, viewport.actual_width);
         // Preview the file/command Tab would fill in, the same way the main
         // prompt does, so `/open_file ` and `open ` complete project files.
@@ -606,6 +621,24 @@ pub(crate) fn run_review_mode(
             chrome.skills,
         )
         .unwrap_or_default();
+
+        let prefix = orangu::tui::screen::prompt_prefix(chrome.prompt_branch);
+        let input_lines_count = orangu::tui::screen::wrapped_input_lines(
+            input_state.as_str(),
+            viewport.actual_width,
+            &prefix,
+        )
+        .len();
+        let prompt_frame_height = input_lines_count + 3;
+        // The native layout uses two rows for the mode header, plus the
+        // right pane's one-row top padding and `Files` heading.
+        let right_body_height = viewport
+            .actual_height
+            .saturating_sub(prompt_frame_height)
+            .saturating_sub(4)
+            .max(1);
+        state.update_list_offset(right_body_height);
+
         print_review_screen(
             state,
             input_state,
@@ -620,6 +653,37 @@ pub(crate) fn run_review_mode(
         let (code, modifiers) = match event::read()? {
             Event::Resize(width, height) => {
                 viewport.on_resize(usize::from(width), usize::from(height));
+                continue;
+            }
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind, column, row, ..
+            }) => {
+                match kind {
+                    crossterm::event::MouseEventKind::ScrollUp => {
+                        state.scroll = state.scroll.saturating_sub(3);
+                    }
+                    crossterm::event::MouseEventKind::ScrollDown => {
+                        state.scroll = state.scroll.saturating_add(3);
+                    }
+                    crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                        if column as usize >= left_width =>
+                    {
+                        let list_start = state.list_offset;
+                        // Rows 0-1 are the mode header, row 2 is the
+                        // right pane's top padding, and row 3 is its
+                        // heading; file entries start at row 4.
+                        if row >= 4 {
+                            let click_y = (row - 4) as usize;
+                            let file_index = list_start + click_y;
+                            if file_index < state.files.len() {
+                                state.selected = file_index;
+                                state.line = 0;
+                                state.scroll = 0;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
                 continue;
             }
             Event::Key(KeyEvent {
@@ -903,6 +967,7 @@ mod tests {
                 },
             ],
             selected: 0,
+            list_offset: 0,
             line: 0,
             scroll: 7,
             x_offset: 5,
@@ -955,6 +1020,7 @@ mod tests {
                 patch: String::new(),
             }],
             selected: 0,
+            list_offset: 0,
             line: 0,
             scroll: 0,
             x_offset: 0,
@@ -1000,6 +1066,7 @@ mod tests {
         let mut state = ReviewState {
             files: vec![entry("a.txt"), entry("b.txt")],
             selected: 0,
+            list_offset: 0,
             line: 3,
             scroll: 0,
             x_offset: 0,
@@ -1071,6 +1138,7 @@ mod tests {
                 patch: String::new(),
             }],
             selected: 0,
+            list_offset: 0,
             line: 2,
             scroll: 0,
             x_offset: 0,
@@ -1112,6 +1180,7 @@ mod tests {
                     ReviewScreenArgs {
                         files: &state.files,
                         selected: state.selected,
+                        list_offset: state.list_offset,
                         line: state.line,
                         scroll: state.scroll,
                         x_offset: state.x_offset,
@@ -1159,6 +1228,7 @@ mod tests {
                 patch: String::new(),
             }],
             selected: 0,
+            list_offset: 0,
             line: 1,
             scroll: 0,
             x_offset: 0,
@@ -1367,6 +1437,7 @@ mod tests {
                 patch: String::new(),
             }],
             selected: 0,
+            list_offset: 0,
             line: 2,
             scroll: 0,
             x_offset: 0,

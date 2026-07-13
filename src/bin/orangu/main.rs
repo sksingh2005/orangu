@@ -109,7 +109,7 @@ use git::{
 use input::{
     EscapeCancelState, IDLE_STATUS_REFRESH_INTERVAL, InputContext, InputResult, InputState,
     InterruptState, OutputState, PendingResponse, RenderContext, ScreenState, StreamRenderState,
-    ViewportState, WaitContext, WaitResult, handle_input_event, read_input,
+    ViewportState, WaitContext, WaitResult, read_input,
 };
 use models::*;
 use render::{format_tools, render_markdown_for_console, show_file_output};
@@ -2074,6 +2074,7 @@ async fn run() -> Result<()> {
                     manual::ManualChrome {
                         current_model: &active_model_id,
                         prompt_branch: prompt_branch.as_deref(),
+                        pending_count: pending_commands.len(),
                     },
                     &mut _terminal_ui_guard,
                 )?;

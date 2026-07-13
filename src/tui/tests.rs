@@ -117,7 +117,11 @@ fn test_render_native_auto_review_screen() {
         diff_lines: vec![],
         patch: String::new(),
     }];
-    let report_lines = vec!["## Correctness".to_string(), "- pending".to_string()];
+    let report_lines = vec![
+        "## Correctness".to_string(),
+        "\x1b[1mOverall\x1b[0m".to_string(),
+        "\x1b[2m(pending)\x1b[0m".to_string(),
+    ];
 
     terminal
         .draw(|f| {
@@ -126,6 +130,7 @@ fn test_render_native_auto_review_screen() {
                 AutoReviewScreenArgs {
                     files: &files,
                     selected: Some(0),
+                    list_offset: 0,
                     report_lines: &report_lines,
                     selected_lines: Some((1, 2)),
                     scroll: 0,
@@ -162,4 +167,8 @@ fn test_render_native_auto_review_screen() {
     assert!(content.contains("Auto review: main"));
     assert!(content.contains("src/main.rs"));
     assert!(content.contains("File: src/main.rs"));
+    assert!(content.contains("Overall"));
+    assert!(content.contains("(pending)"));
+    assert!(!content.contains("[1m"));
+    assert!(!content.contains("[2m"));
 }

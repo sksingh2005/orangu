@@ -229,6 +229,7 @@ impl ChatSession {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn prompt<F, G, H, I>(
         &mut self,
         user_input: &str,

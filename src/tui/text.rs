@@ -14,6 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar;
 
 pub fn clip_ratatui_line<'a>(
     line: &Line<'a>,
@@ -36,13 +37,11 @@ pub fn clip_ratatui_line<'a>(
 
         let mut content = String::new();
         for ch in span.content.chars() {
-            let ch_width = 1;
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
             if x_offset > 0 {
-                if x_offset >= ch_width {
-                    x_offset -= ch_width;
-                } else {
-                    x_offset = 0;
-                }
+                // A viewport cannot render half of a wide character, so skip
+                // the entire character when its leading cell is clipped.
+                x_offset = x_offset.saturating_sub(ch_width);
                 continue;
             }
 

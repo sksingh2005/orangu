@@ -2371,6 +2371,7 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-zig",
  "ttf-parser",
+ "unicode-width",
  "uuid",
  "walkdir",
 ]

@@ -299,11 +299,10 @@ impl OutputState {
                 expanded,
                 ..
             } = line
+                && *line_id == id
             {
-                if *line_id == id {
-                    *expanded = !*expanded;
-                    return true;
-                }
+                *expanded = !*expanded;
+                return true;
             }
         }
         false
@@ -314,32 +313,61 @@ impl OutputState {
         click_y: usize,
         available_output_rows: usize,
         inner_width: usize,
-        _x_offset: usize,
+        has_status_line: bool,
     ) -> Option<usize> {
         let mut visual_lines = Vec::new();
+        let mut user_inputs = Vec::new();
         for line in &self.transcript {
+            let start = visual_lines.len();
             let rendered = orangu::tui::render_transcript_line_multi(line, inner_width);
-            let _is_user_input = matches!(line, TranscriptLine::UserInput(_));
-            for _ in rendered {
-                let id = if let TranscriptLine::Collapsible { id, .. } = line {
-                    Some(*id)
-                } else {
-                    None
-                };
-                visual_lines.push(id);
+            let id = match line {
+                TranscriptLine::Collapsible { id, .. } => Some(*id),
+                _ => None,
+            };
+            visual_lines.extend(std::iter::repeat_n(id, rendered.len()));
+            if matches!(line, TranscriptLine::UserInput(_)) {
+                user_inputs.push((start, visual_lines[start..].to_vec()));
             }
         }
 
-        let max_scroll_offset = visual_lines.len().saturating_sub(available_output_rows);
-        let scroll_offset = self.scroll_offset.min(max_scroll_offset);
-        let visible_end = visual_lines.len().saturating_sub(scroll_offset);
-        let visible_start = visible_end.saturating_sub(available_output_rows);
-
-        if click_y < (visible_end.saturating_sub(visible_start)) {
-            visual_lines.get(visible_start + click_y).copied().flatten()
+        // Keep this mapping identical to `draw_screen`: while at the bottom,
+        // a status row consumes one transcript row and the latest prior user
+        // prompt is pinned at the top of the visible view.
+        let max_scroll_offset = if has_status_line {
+            visual_lines
+                .len()
+                .saturating_sub(available_output_rows.saturating_sub(1))
         } else {
-            None
+            visual_lines.len().saturating_sub(available_output_rows)
+        };
+        let scroll_offset = self.scroll_offset.min(max_scroll_offset);
+        let text_rows = if has_status_line && scroll_offset == 0 {
+            available_output_rows.saturating_sub(1)
+        } else {
+            available_output_rows
+        };
+        let visible_end = visual_lines.len().saturating_sub(scroll_offset);
+        let visible_start = visible_end.saturating_sub(text_rows);
+        let mut visible_lines = visual_lines[visible_start..visible_end].to_vec();
+
+        if let Some(sticky_idx) = user_inputs
+            .iter()
+            .rposition(|(start, _)| *start < visible_start)
+        {
+            let (_, sticky_lines) = &user_inputs[sticky_idx];
+            let next_start = user_inputs
+                .get(sticky_idx + 1)
+                .map(|(start, _)| *start)
+                .unwrap_or(usize::MAX);
+            let draw_count = sticky_lines
+                .len()
+                .min(next_start.saturating_sub(visible_start))
+                .min(visible_lines.len());
+            visible_lines[..draw_count]
+                .clone_from_slice(&sticky_lines[sticky_lines.len() - draw_count..]);
         }
+
+        visible_lines.get(click_y).copied().flatten()
     }
 
     pub fn reset_scroll(&mut self) {
@@ -450,12 +478,22 @@ impl OutputState {
                 (remaining, "")
             };
 
-            let expanded = is_streaming;
+            // During streaming, keep only the newest thinking/tool block open.
+            // Earlier blocks are complete context and should fold away when the
+            // model starts the next block, matching the transcript behavior of
+            // the finalized response.
+            if is_streaming {
+                for line in &mut self.transcript {
+                    if let TranscriptLine::Collapsible { expanded, .. } = line {
+                        *expanded = false;
+                    }
+                }
+            }
             self.push_lines(std::iter::once(TranscriptLine::Collapsible {
                 id: next_id,
                 title,
                 content: content.trim().to_string(),
-                expanded,
+                expanded: is_streaming,
             }));
             next_id += 1;
             remaining = after;
@@ -729,7 +767,7 @@ pub fn read_input(
     input_state: &mut InputState,
     interrupt_state: &mut InterruptState,
     output_state: &mut OutputState,
-    _pending_count: usize,
+    pending_count: usize,
     viewport: &mut ViewportState,
     input_context: InputContext<'_>,
     mut print_screen_fn: impl FnMut(RenderContext<'_>, ScreenState<'_>),
@@ -745,13 +783,14 @@ pub fn read_input(
             return Ok(InputResult::Refresh);
         }
 
-        let result = handle_input_event(
+        let result = handle_input_event_with_status(
             event::read()?,
             input_state,
             interrupt_state,
             output_state,
             viewport,
             input_context,
+            pending_count,
         );
 
         if let Some(outcome) = result.outcome {
@@ -789,6 +828,7 @@ pub fn read_input(
     }
 }
 
+#[cfg(test)]
 pub fn handle_input_event(
     event: Event,
     input_state: &mut InputState,
@@ -796,6 +836,26 @@ pub fn handle_input_event(
     output_state: &mut OutputState,
     viewport: &mut ViewportState,
     input_context: InputContext<'_>,
+) -> InputEventResult {
+    handle_input_event_with_status(
+        event,
+        input_state,
+        interrupt_state,
+        output_state,
+        viewport,
+        input_context,
+        0,
+    )
+}
+
+pub fn handle_input_event_with_status(
+    event: Event,
+    input_state: &mut InputState,
+    interrupt_state: &mut InterruptState,
+    output_state: &mut OutputState,
+    viewport: &mut ViewportState,
+    input_context: InputContext<'_>,
+    pending_count: usize,
 ) -> InputEventResult {
     let mut redraw = false;
 
@@ -1128,11 +1188,10 @@ pub fn handle_input_event(
                         click_y,
                         output_height,
                         usize::from(layout.output_area.width),
-                        input_context.render.x_offset,
-                    ) {
-                        if output_state.toggle_collapse(id) {
-                            redraw = true;
-                        }
+                        pending_count > 0,
+                    ) && output_state.toggle_collapse(id)
+                    {
+                        redraw = true;
                     }
                 }
             }
@@ -1400,6 +1459,48 @@ mod tests {
         assert!(
             matches!(output_state.lines().get(1), Some(TranscriptLine::Plain(s)) if s == "plain output")
         );
+    }
+
+    #[test]
+    fn streaming_collapses_previous_thinking_or_tool_blocks() {
+        let mut output_state = OutputState::default();
+
+        output_state.push_parsed(
+            "<think>first thought</think>between<tool_call name=\"read\">file</tool_call>",
+            true,
+        );
+
+        let collapsibles = output_state
+            .lines()
+            .iter()
+            .filter_map(|line| match line {
+                TranscriptLine::Collapsible {
+                    title, expanded, ..
+                } => Some((title.as_str(), *expanded)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            collapsibles,
+            vec![("Thought", false), ("Tool Call: read", true)]
+        );
+    }
+
+    #[test]
+    fn finalized_output_starts_collapsed() {
+        let mut output_state = OutputState::default();
+        output_state.push_markdown("<think>done</think><tool_call name=\"read\">file</tool_call>");
+
+        assert!(output_state.lines().iter().all(|line| {
+            matches!(
+                line,
+                TranscriptLine::Collapsible {
+                    expanded: false,
+                    ..
+                }
+            )
+        }));
     }
 
     #[test]

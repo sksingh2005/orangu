@@ -7,7 +7,10 @@ use ratatui::{
 };
 use std::path::Path;
 
-use crate::tui::header::{Banner, ConnStatus, HeaderStatus, display_model_name};
+use crate::tui::{
+    StatusFragment,
+    header::{Banner, ConnStatus, HeaderStatus, display_model_name},
+};
 
 const CLIENT_LOGO_ART: &[&str] = &[
     " ██████  ██████   █████  ███    ██  ██████  ██    ██ ",
@@ -134,6 +137,9 @@ pub struct PromptFrameWidget<'a> {
     pub cursor: usize,
     pub ghost: &'a str,
     pub valid_command_len: usize,
+    pub left_status: Option<&'a StatusFragment>,
+    pub pending_count: usize,
+    pub graph_status: Option<ConnStatus>,
 }
 
 impl<'a> Widget for PromptFrameWidget<'a> {
@@ -215,11 +221,50 @@ impl<'a> Widget for PromptFrameWidget<'a> {
             .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(Style::default().fg(Color::DarkGray));
 
-        if !self.current_model.is_empty() {
-            block = block.title_bottom(
-                ratatui::text::Line::from(self.current_model)
-                    .alignment(ratatui::layout::Alignment::Right),
-            );
+        let mut status_spans = self
+            .left_status
+            .and_then(|status| {
+                ansi_to_tui::IntoText::into_text(&status.rendered)
+                    .ok()
+                    .and_then(|text| text.lines.into_iter().next())
+                    .map(|line| line.spans)
+            })
+            .unwrap_or_default();
+
+        if self.graph_status.is_some() || self.pending_count > 0 {
+            if !status_spans.is_empty() {
+                status_spans.push(Span::raw("  "));
+            }
+            if let Some(status) = self.graph_status {
+                let color = match status {
+                    ConnStatus::Pending => Color::White,
+                    ConnStatus::Ok => Color::Green,
+                    ConnStatus::Failed => Color::Red,
+                };
+                status_spans.push(Span::raw("Graph: "));
+                status_spans.push(Span::styled("●", Style::default().fg(color)));
+            }
+            if self.pending_count > 0 {
+                if self.graph_status.is_some() {
+                    status_spans.push(Span::raw("   "));
+                }
+                status_spans.push(Span::styled(
+                    format!("Pending: {}", self.pending_count),
+                    Style::default().fg(Color::Rgb(220, 220, 100)),
+                ));
+            }
+        }
+
+        let status_width = status_spans.iter().map(Span::width).sum::<usize>();
+        let model_width = self.current_model.chars().count();
+        let title_width = width.saturating_sub(2);
+        if model_width <= title_width {
+            let gap = title_width.saturating_sub(status_width + model_width);
+            status_spans.push(Span::raw(" ".repeat(gap)));
+            status_spans.push(Span::raw(self.current_model));
+            block = block.title_bottom(Line::from(status_spans));
+        } else if !status_spans.is_empty() {
+            block = block.title_bottom(Line::from(status_spans));
         }
 
         Paragraph::new(lines).block(block).render(input_area, buf);

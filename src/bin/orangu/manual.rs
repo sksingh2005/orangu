@@ -27,7 +27,7 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use orangu::tui::{
-    Theme, prompt_prefix, review_pane_body_height,
+    StatusFragment, Theme, prompt_prefix, review_pane_body_height,
     text::{clip_line, clip_ratatui_line},
     visible_line_width,
     widgets::PromptFrameWidget,
@@ -228,6 +228,7 @@ fn manual_sections() -> Vec<ManualSection> {
 pub struct ManualChrome<'a> {
     pub current_model: &'a str,
     pub prompt_branch: Option<&'a str>,
+    pub pending_count: usize,
 }
 
 /// Interactive state for the manual viewer.
@@ -422,7 +423,6 @@ fn render_search_bar<'a>(
 }
 
 /// Rendering inputs for the manual screen.
-
 fn draw_manual_screen(
     frame: &mut ratatui::Frame,
     state: &ManualState,
@@ -437,7 +437,7 @@ fn draw_manual_screen(
     let pane_rows = height.saturating_sub(4).max(1);
 
     let right_width = manual_right_width(&state.sections, width as usize) as u16;
-    let left_width = width.saturating_sub(right_width + 1).max(1) as u16;
+    let left_width = width.saturating_sub(right_width + 1).max(1);
     let body_height = pane_rows.saturating_sub(1) as usize;
 
     let layout = Layout::default()
@@ -542,6 +542,10 @@ fn draw_manual_screen(
     frame.render_widget(Paragraph::new(right_lines), right_area);
 
     let current_model = orangu::tui::header::display_model_name(false, chrome.current_model);
+    let notice = state
+        .notice
+        .as_ref()
+        .map(|notice| StatusFragment::plain(notice.clone()));
     let prompt_widget = PromptFrameWidget {
         current_model,
         prompt_prefix: &prompt_prefix,
@@ -549,6 +553,9 @@ fn draw_manual_screen(
         cursor: 0,
         ghost: "",
         valid_command_len: 0,
+        left_status: notice.as_ref(),
+        pending_count: chrome.pending_count,
+        graph_status: None,
     };
     frame.render_widget(prompt_widget, prompt_area);
 }

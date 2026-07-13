@@ -61,6 +61,7 @@ pub struct ReviewCommentEditor<'a> {
 pub struct ReviewScreenArgs<'a> {
     pub files: &'a [ReviewEntry],
     pub selected: usize,
+    pub list_offset: usize,
     /// Highlighted line within the selected file's diff.
     pub line: usize,
     pub scroll: usize,
@@ -162,7 +163,7 @@ pub fn review_line_highlight(cell: &str) -> String {
 
 pub(crate) fn review_wrapped_lines(logical: &str, width: usize) -> Vec<String> {
     let mut lines = crate::tui::screen::wrapped_input_lines(logical, width, "");
-    if !logical.is_empty() && logical.chars().count() % width == 0 {
+    if !logical.is_empty() && logical.chars().count().is_multiple_of(width) {
         lines.push(String::new());
     }
     lines

@@ -13,13 +13,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::*;
+use crate::{input::handle_input_event_with_status, *};
 
 pub(crate) const WAIT_LOOP_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(50);
 pub(crate) const THINKING_FRAME_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(120);
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn wait_for_response(
     session: &mut ChatSession,
     user_input: &str,
@@ -297,7 +298,7 @@ async fn drive_handle(
                         continue;
                     }
                     escape_cancel_state.reset();
-                    let result = handle_input_event(
+                    let result = handle_input_event_with_status(
                         event,
                         input_state,
                         interrupt_state,
@@ -311,6 +312,7 @@ async fn drive_handle(
                             render,
                             skills,
                         },
+                        pending_commands.len(),
                     );
                     render.actual_width = viewport.actual_width;
                     render.actual_height = viewport.actual_height;
@@ -462,7 +464,7 @@ pub(crate) async fn wait_for_local_command<T: Send + 'static>(
                     frame = next_frame;
                 }
                 while event::poll(std::time::Duration::ZERO)? {
-                    let result = handle_input_event(
+                    let result = handle_input_event_with_status(
                         event::read()?,
                         input_state,
                         interrupt_state,
@@ -476,6 +478,7 @@ pub(crate) async fn wait_for_local_command<T: Send + 'static>(
                             render,
                             skills,
                         },
+                        pending_commands.len(),
                     );
                     if let Some(
                         outcome @ (InputResult::WorkspacePrevious
@@ -584,7 +587,7 @@ pub(crate) async fn wait_for_streaming_command(
                         continue;
                     }
                     escape_cancel_state.reset();
-                    let result = handle_input_event(
+                    let result = handle_input_event_with_status(
                         event,
                         input_state,
                         interrupt_state,
@@ -598,6 +601,7 @@ pub(crate) async fn wait_for_streaming_command(
                             render,
                             skills,
                         },
+                        pending_commands.len(),
                     );
                     if let Some(
                         outcome @ (InputResult::WorkspacePrevious

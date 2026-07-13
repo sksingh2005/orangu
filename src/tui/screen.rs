@@ -377,7 +377,8 @@ pub fn main_screen_layout(
 pub fn draw_screen(frame: &mut ratatui::Frame, args: ScreenRenderArgs<'_>) {
     let area = frame.area();
     frame.render_widget(
-        ratatui::widgets::Block::default().style(ratatui::style::Style::default()),
+        ratatui::widgets::Block::default()
+            .style(ratatui::style::Style::default().bg(ratatui::style::Color::Black)),
         area,
     );
     let actual_width = args.actual_width.max(1);
@@ -467,10 +468,24 @@ pub fn draw_screen(frame: &mut ratatui::Frame, args: ScreenRenderArgs<'_>) {
         }
     }
 
-    let max_scroll_offset = output_lines.len().saturating_sub(available_output_rows);
+    let has_status_line = args.left_status.is_some() || args.pending_count > 0;
+    let max_scroll_offset = if has_status_line {
+        output_lines
+            .len()
+            .saturating_sub(available_output_rows.saturating_sub(1))
+    } else {
+        output_lines.len().saturating_sub(available_output_rows)
+    };
     let scroll_offset = args.scroll_offset.min(max_scroll_offset);
+
+    let text_rows = if has_status_line && scroll_offset == 0 {
+        available_output_rows.saturating_sub(1)
+    } else {
+        available_output_rows
+    };
+
     let visible_end = output_lines.len().saturating_sub(scroll_offset);
-    let visible_start = visible_end.saturating_sub(available_output_rows);
+    let visible_start = visible_end.saturating_sub(text_rows);
     let mut visible_lines = output_lines[visible_start..visible_end].to_vec();
 
     if let Some(sticky_idx) = user_inputs
@@ -490,9 +505,7 @@ pub fn draw_screen(frame: &mut ratatui::Frame, args: ScreenRenderArgs<'_>) {
             .min(visible_lines.len());
 
         let lines_to_draw = &sticky_lines[sticky_lines.len() - draw_count..];
-        for i in 0..draw_count {
-            visible_lines[i] = lines_to_draw[i].clone();
-        }
+        visible_lines[..draw_count].clone_from_slice(&lines_to_draw[..draw_count]);
     }
 
     // Append status line directly at the end of the transcript view if we are scrolled to bottom
@@ -500,10 +513,10 @@ pub fn draw_screen(frame: &mut ratatui::Frame, args: ScreenRenderArgs<'_>) {
         let mut left_spans = Vec::new();
         let mut left_used = 0;
         if let Some(left) = &args.left_status {
-            if let Ok(mut text) = ansi_to_tui::IntoText::into_text(&left.rendered) {
-                if let Some(line) = text.lines.pop() {
-                    left_spans.extend(line.spans);
-                }
+            if let Ok(mut text) = ansi_to_tui::IntoText::into_text(&left.rendered)
+                && let Some(line) = text.lines.pop()
+            {
+                left_spans.extend(line.spans);
             }
             left_used += left.visible_width;
         } else if args.pending_count > 0 {
@@ -535,25 +548,28 @@ pub fn draw_screen(frame: &mut ratatui::Frame, args: ScreenRenderArgs<'_>) {
         cursor: args.cursor,
         ghost: args.ghost,
         valid_command_len: args.valid_command_len,
+        left_status: None,
+        pending_count: 0,
+        graph_status: None,
     };
     frame.render_widget(prompt_widget, layout.padded_prompt_area);
 
     // Render Dropdown natively so it floats correctly
-    if let Some(candidates) = args.dropdown_candidates {
-        if !candidates.is_empty() {
-            let pf_top_row = layout.padded_prompt_area.y;
-            let (dropdown_rect, dropdown_lines) = render_dropdown_popup(
-                candidates,
-                args.dropdown_selected,
-                pf_top_row as usize,
-                actual_width,
-            );
-            frame.render_widget(ratatui::widgets::Clear, dropdown_rect);
-            frame.render_widget(
-                ratatui::widgets::Paragraph::new(dropdown_lines),
-                dropdown_rect,
-            );
-        }
+    if let Some(candidates) = args.dropdown_candidates
+        && !candidates.is_empty()
+    {
+        let pf_top_row = layout.padded_prompt_area.y;
+        let (dropdown_rect, dropdown_lines) = render_dropdown_popup(
+            candidates,
+            args.dropdown_selected,
+            pf_top_row as usize,
+            actual_width,
+        );
+        frame.render_widget(ratatui::widgets::Clear, dropdown_rect);
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(dropdown_lines),
+            dropdown_rect,
+        );
     }
 
     // Set cursor position using Ratatui
@@ -919,7 +935,7 @@ pub fn render_transcript_line_multi(
     }
 }
 
-pub(crate) fn wrapped_input_lines(input: &str, width: usize, prompt_prefix: &str) -> Vec<String> {
+pub fn wrapped_input_lines(input: &str, width: usize, prompt_prefix: &str) -> Vec<String> {
     let input_width = width.saturating_sub(prompt_prefix.chars().count()).max(1);
     if input.is_empty() {
         return vec![String::new()];
@@ -955,9 +971,9 @@ pub(crate) fn cursor_position(
     (prefix_chars / input_width, prefix_chars % input_width)
 }
 
-/// The input-window prompt prefix: always `> ` (branch name is shown in top bar).
-pub fn prompt_prefix(_branch_name: Option<&str>) -> String {
-    "> ".to_string()
+/// The input-window prompt prefix: always `❯ ` (branch name is shown in top bar).
+pub fn prompt_prefix(_prompt_branch: Option<&str>) -> String {
+    "❯ ".to_string()
 }
 
 /// Center `text` (which may carry ANSI color codes — its width is measured
@@ -1235,8 +1251,8 @@ mod tests {
 
     #[test]
     fn prompt_prefix_omits_branch_name() {
-        assert_eq!(prompt_prefix(Some("main")), "> ");
-        assert_eq!(prompt_prefix(None), "> ");
+        assert_eq!(prompt_prefix(Some("main")), "❯ ");
+        assert_eq!(prompt_prefix(None), "❯ ");
     }
 
     #[test]

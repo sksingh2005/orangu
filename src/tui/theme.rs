@@ -28,8 +28,10 @@ pub struct Theme {
     pub deep: Style,
     /// Separator lines, dimmed text.
     pub muted: Style,
-    /// The background style for the cursor line in list/review views.
+    /// The background style for the diff/report cursor line.
     pub cursor_line_bg: Style,
+    /// The active file in review file lists.
+    pub selected_file: Style,
     /// The background style for the inline comment editor.
     pub comment_bg: Style,
     /// Highlights for matching text, command names, etc.
@@ -48,7 +50,12 @@ impl Default for Theme {
             ignore: Style::default().fg(Color::Rgb(100, 160, 230)),
             deep: Style::default().fg(Color::Rgb(170, 120, 220)),
             muted: Style::default().fg(Color::Rgb(88, 88, 88)),
-            cursor_line_bg: Style::default().bg(Color::Rgb(60, 60, 90)),
+            cursor_line_bg: Style::default()
+                .bg(Color::Rgb(145, 92, 38))
+                .fg(Color::Rgb(255, 245, 230)),
+            selected_file: Style::default()
+                .bg(Color::Rgb(210, 140, 70))
+                .fg(Color::Black),
             comment_bg: Style::default().bg(Color::Rgb(38, 48, 38)),
             highlight: Style::default().fg(Color::Cyan),
             warning: Style::default().fg(Color::Rgb(230, 200, 120)),

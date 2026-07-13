@@ -40,6 +40,12 @@ pub fn draw_auto_review_screen(f: &mut Frame, args: AutoReviewScreenArgs<'_>) {
     let theme = Theme::default();
     let width = args.actual_width as u16;
     let height = args.actual_height as u16;
+    let area = f.area();
+    f.render_widget(
+        ratatui::widgets::Block::default()
+            .style(ratatui::style::Style::default().bg(ratatui::style::Color::Black)),
+        area,
+    );
 
     let prompt_prefix = crate::tui::prompt_prefix(args.prompt_branch);
     let input_lines = crate::tui::wrapped_input_lines(args.input, width as usize, &prompt_prefix);
@@ -70,6 +76,9 @@ pub fn draw_auto_review_screen(f: &mut Frame, args: AutoReviewScreenArgs<'_>) {
             cursor: args.cursor,
             ghost: args.ghost,
             valid_command_len: 0,
+            left_status: args.left_status.as_ref(),
+            pending_count: args.pending_count,
+            graph_status: args.graph_status,
         },
         chunks[1],
     );
@@ -82,79 +91,114 @@ fn draw_auto_review_panes(
     theme: &Theme,
 ) {
     let right_width = review_right_width(args.files, area.width as usize) as u16;
-    let left_width = area.width.saturating_sub(right_width + 1).max(1);
+    let left_width = area.width.saturating_sub(right_width).max(1);
+
+    let main_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(area);
+
+    let header_area = main_layout[0];
+    let panes_area = main_layout[1];
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(left_width),
-            Constraint::Length(1), // Separator
             Constraint::Length(right_width),
         ])
-        .split(area);
+        .split(panes_area);
 
     let left_area = chunks[0];
-    let separator_area = chunks[1];
-    let right_area = chunks[2];
+    let right_area = chunks[1];
+    let left_inner_area = left_area.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
 
-    let body_height = area.height.saturating_sub(1);
-    let anchor = args.selected.unwrap_or(0);
-    let list_start = if anchor >= body_height as usize {
-        anchor - body_height as usize + 1
-    } else {
-        0
-    };
+    let body_height = left_inner_area.height as usize;
+    let right_body_height = right_area.height.saturating_sub(1) as usize;
+    let list_start = args.list_offset;
 
-    let keys = if args.prestart {
-        "Alt+s Start  Alt+j/k Switch file  Alt+m Mode  Alt+e Diff  Esc Esc Cancel  Alt+x Exit"
+    let badges = if args.prestart {
+        vec![
+            ("Alt+s", "Start"),
+            ("Alt+j/k", "Switch file"),
+            ("Alt+m", "Mode"),
+            ("Alt+e", "Diff"),
+            ("Esc Esc", "Cancel"),
+            ("Alt+x", "Exit"),
+        ]
     } else if args.browsing {
-        "Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+e Open  ↑/↓ Item  Enter Diff  PgUp/PgDn Category  - Remove  Alt+x Exit"
+        vec![
+            ("Alt+j/k", "Switch file"),
+            ("Alt+a", "Approve"),
+            ("Alt+r", "Reject"),
+            ("Alt+e", "Open"),
+            ("↑/↓", "Item"),
+            ("Enter", "Diff"),
+            ("PgUp/PgDn", "Category"),
+            ("-", "Remove"),
+            ("Alt+x", "Exit"),
+        ]
     } else {
-        "Esc Esc Cancel  Alt+x Exit"
+        vec![("Esc Esc", "Cancel"), ("Alt+x", "Exit")]
     };
 
-    let title = format!(
-        "Auto review: {}  {keys}",
-        args.prompt_branch.unwrap_or("(detached HEAD)"),
+    let mut header_spans = vec![Span::raw(format!(
+        "Auto review: {}  ",
+        args.prompt_branch.unwrap_or("(detached HEAD)")
+    ))];
+    let badge_style = Style::default().bg(Color::DarkGray).fg(Color::White);
+    for (i, (key, desc)) in badges.iter().enumerate() {
+        header_spans.push(Span::styled(format!(" {key} "), badge_style));
+        header_spans.push(Span::raw(format!(" {desc}")));
+        if i < badges.len() - 1 {
+            header_spans.push(Span::raw("  "));
+        }
+    }
+
+    f.render_widget(
+        Paragraph::new(Line::from(header_spans))
+            .block(ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::BOTTOM)),
+        header_area,
     );
-    let mut left_lines = vec![Line::from(clip_plain(&title, left_area.width as usize))];
+
+    let mut left_lines = Vec::new();
 
     // Status area
     if body_height > 0 {
-        left_lines.push(Line::from(Span::styled(
-            clip_plain(args.status, left_area.width as usize),
-            theme.cursor_line_bg,
-        )));
+        let status = first_ansi_line(&clip_plain(args.status, left_inner_area.width as usize))
+            .style(theme.cursor_line_bg);
+        left_lines.push(status);
     }
 
     // Report lines
     for row in 0..body_height.saturating_sub(1) {
-        let line_index = args.scroll + row as usize;
+        let line_index = args.scroll + row;
         match args.report_lines.get(line_index) {
             Some(line) => {
-                let cell = clip_line(line, args.x_offset, left_area.width as usize);
+                let cell = clip_line(line, args.x_offset, left_inner_area.width as usize);
                 // Highlight if selected
                 let is_selected = match args.selected_lines {
                     Some((start, end)) => line_index >= start && line_index < end,
                     _ => false,
                 };
+                let mut rendered = first_ansi_line(&cell);
                 if is_selected {
-                    left_lines.push(Line::from(Span::styled(cell, theme.cursor_line_bg)));
-                } else {
-                    left_lines.push(Line::from(cell));
+                    rendered = rendered.style(theme.cursor_line_bg);
                 }
+                left_lines.push(rendered);
             }
             None => left_lines.push(Line::from("")),
         }
     }
 
-    f.render_widget(Paragraph::new(left_lines), left_area);
-
-    let mut separator_lines = vec![];
-    for _ in 0..area.height {
-        separator_lines.push(Line::from(Span::styled("│", theme.muted)));
-    }
-    f.render_widget(Paragraph::new(separator_lines), separator_area);
+    f.render_widget(
+        Paragraph::new(left_lines)
+            .block(ratatui::widgets::Block::bordered().border_style(theme.muted)),
+        left_area,
+    );
 
     let right_header = format!("Files ({})", args.files.len());
     let mut right_lines = vec![Line::from(clip_plain(
@@ -162,8 +206,8 @@ fn draw_auto_review_panes(
         right_area.width as usize,
     ))];
 
-    for row in 0..body_height {
-        let file_index = list_start + row as usize;
+    for row in 0..right_body_height {
+        let file_index = list_start + row;
         match args.files.get(file_index) {
             Some(file) => {
                 let mode = args.modes.get(file_index).copied().unwrap_or_default();
@@ -190,7 +234,7 @@ fn draw_auto_review_panes(
                 let clipped = clip_ratatui_line(&line, 0, right_area.width as usize);
 
                 if args.selected == Some(file_index) {
-                    right_lines.push(clipped.style(theme.cursor_line_bg));
+                    right_lines.push(clipped.style(theme.selected_file));
                 } else {
                     right_lines.push(clipped);
                 }
@@ -198,7 +242,13 @@ fn draw_auto_review_panes(
             None => right_lines.push(Line::from("")),
         }
     }
-    f.render_widget(Paragraph::new(right_lines), right_area);
+
+    f.render_widget(
+        Paragraph::new(right_lines).block(
+            ratatui::widgets::Block::default().padding(ratatui::widgets::Padding::new(1, 1, 1, 0)),
+        ),
+        right_area,
+    );
 }
 
 fn push_reject_section_label(
@@ -318,14 +368,14 @@ fn draw_auto_review_diff_panel(
     f: &mut Frame,
     diff: &AutoReviewDiffView<'_>,
     area: Rect,
-    _theme: &Theme,
+    theme: &Theme,
 ) {
     f.render_widget(Clear, area);
     let mut lines = Vec::new();
     let header = format!("{}  (↑/↓ Scroll · Esc Close)", diff.title);
     lines.push(Line::from(Span::styled(
         clip_plain(&header, area.width as usize),
-        Style::default().bg(Color::Rgb(60, 60, 90)),
+        theme.cursor_line_bg,
     )));
 
     let body_height = area.height.saturating_sub(1) as usize;
