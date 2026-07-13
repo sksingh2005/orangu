@@ -110,30 +110,48 @@ pub struct PromptFrameArgs<'a> {
     pub valid_command_len: usize,
 }
 
-fn tab_dot(status: TabStatus) -> &'static str {
+fn tab_dot(status: TabStatus, theme: &crate::tui::Theme) -> ratatui::text::Span<'static> {
     match status {
-        TabStatus::Valid => "\x1b[38;2;80;200;120m●\x1b[0m",
-        TabStatus::BranchGone => "\x1b[38;2;220;80;80m●\x1b[0m",
-        TabStatus::Working => "\x1b[5;38;2;230;230;230m●\x1b[0m",
+        TabStatus::Valid => ratatui::text::Span::styled("●", theme.success),
+        TabStatus::BranchGone => ratatui::text::Span::styled("●", theme.error),
+        TabStatus::Working => ratatui::text::Span::styled(
+            "●",
+            ratatui::style::Style::default()
+                .fg(ratatui::style::Color::Rgb(230, 230, 230))
+                .add_modifier(ratatui::style::Modifier::SLOW_BLINK),
+        ),
     }
 }
 
 /// The horizontal workspace tab bar (`1 │ 2 │ 3`, active tab bold) for top and
 /// bottom placement, clipped to `width`. When `statuses` is non-empty a
 /// colored dot precedes each tab number.
-fn horizontal_tab_bar(view: WorkspaceTabsView, width: usize, statuses: &[TabStatus]) -> String {
-    let cells: Vec<String> = (0..view.count)
-        .map(|index| {
-            let number = index + 1;
-            let dot = statuses.get(index).copied().map(tab_dot).unwrap_or("");
-            if index == view.active {
-                format!("{dot}\x1b[1m{number}\x1b[0m")
-            } else {
-                format!("{dot}{GHOST_TEXT}{number}{ANSI_RESET}")
-            }
-        })
-        .collect();
-    clip_line(&cells.join(" │ "), 0, width)
+fn horizontal_tab_bar<'a>(
+    view: WorkspaceTabsView,
+    width: usize,
+    statuses: &[TabStatus],
+    theme: &'a crate::tui::Theme,
+) -> ratatui::text::Line<'a> {
+    let mut spans = Vec::new();
+    for index in 0..view.count {
+        if index > 0 {
+            spans.push(ratatui::text::Span::styled(" │ ", theme.muted));
+        }
+        if let Some(&status) = statuses.get(index) {
+            spans.push(tab_dot(status, theme));
+        }
+        let number = (index + 1).to_string();
+        if index == view.active {
+            spans.push(ratatui::text::Span::styled(
+                number,
+                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+            ));
+        } else {
+            spans.push(ratatui::text::Span::styled(number, theme.muted));
+        }
+    }
+    let line = ratatui::text::Line::from(spans);
+    crate::tui::text::clip_ratatui_line(&line, 0, width)
 }
 
 /// Width of the vertical tab gutter: the widest tab number plus ` │ `, and one
@@ -146,35 +164,67 @@ fn tab_gutter_width(view: WorkspaceTabsView, has_dots: bool) -> usize {
 /// (bold when active) on the first `count` rows, blank after, always carrying
 /// the separator bar — `N │ ` on the left, ` │ N` on the right. When
 /// `statuses` is non-empty, a colored dot precedes each tab number.
-fn tab_gutter_cell(
+fn tab_gutter_cell<'a>(
     view: WorkspaceTabsView,
     row: usize,
     left: bool,
     statuses: &[TabStatus],
-) -> String {
+    theme: &'a crate::tui::Theme,
+) -> ratatui::text::Line<'a> {
     let digits = view.count.to_string().len();
-    let dot = if statuses.is_empty() {
-        String::new()
-    } else if let Some(&status) = statuses.get(row) {
-        tab_dot(status).to_string()
-    } else {
-        " ".to_string()
-    };
-    let label = if row < view.count {
-        let number = row + 1;
-        if row == view.active {
-            format!("\x1b[1m{number:>digits$}\x1b[0m")
-        } else {
-            format!("{GHOST_TEXT}{number:>digits$}{ANSI_RESET}")
-        }
-    } else {
-        " ".repeat(digits)
-    };
+    let mut spans = Vec::new();
+
     if left {
-        format!("{dot}{label} │ ")
+        if !statuses.is_empty() {
+            if let Some(&status) = statuses.get(row) {
+                spans.push(tab_dot(status, theme));
+            } else {
+                spans.push(ratatui::text::Span::raw(" "));
+            }
+        }
+
+        if row < view.count {
+            let number = format!("{:>digits$}", row + 1);
+            if row == view.active {
+                spans.push(ratatui::text::Span::styled(
+                    number,
+                    ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+                ));
+            } else {
+                spans.push(ratatui::text::Span::styled(number, theme.muted));
+            }
+        } else {
+            spans.push(ratatui::text::Span::raw(" ".repeat(digits)));
+        }
+
+        spans.push(ratatui::text::Span::styled(" │ ", theme.muted));
     } else {
-        format!(" │ {dot}{label}")
+        spans.push(ratatui::text::Span::styled(" │ ", theme.muted));
+
+        if !statuses.is_empty() {
+            if let Some(&status) = statuses.get(row) {
+                spans.push(tab_dot(status, theme));
+            } else {
+                spans.push(ratatui::text::Span::raw(" "));
+            }
+        }
+
+        if row < view.count {
+            let number = format!("{:>digits$}", row + 1);
+            if row == view.active {
+                spans.push(ratatui::text::Span::styled(
+                    number,
+                    ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+                ));
+            } else {
+                spans.push(ratatui::text::Span::styled(number, theme.muted));
+            }
+        } else {
+            spans.push(ratatui::text::Span::raw(" ".repeat(digits)));
+        }
     }
+
+    ratatui::text::Line::from(spans)
 }
 
 pub fn main_screen_layout(
@@ -350,13 +400,13 @@ pub fn draw_screen(frame: &mut ratatui::Frame, args: ScreenRenderArgs<'_>) {
     };
     frame.render_widget(top_bar, layout.top_bar_area);
 
+    let theme = crate::tui::Theme::default();
+
     // Render Horizontal Tab Bar
     if let Some(tab_area) = layout.horizontal_tab_area {
         let view = args.tab_bar.unwrap();
-        let bar = horizontal_tab_bar(view, actual_width, args.tab_statuses);
-        if let Ok(text) = ansi_to_tui::IntoText::into_text(&bar) {
-            frame.render_widget(ratatui::widgets::Paragraph::new(text), tab_area);
-        }
+        let bar = horizontal_tab_bar(view, actual_width, args.tab_statuses, &theme);
+        frame.render_widget(ratatui::widgets::Paragraph::new(bar), tab_area);
     }
 
     // Render Vertical Tab Bar
@@ -365,13 +415,10 @@ pub fn draw_screen(frame: &mut ratatui::Frame, args: ScreenRenderArgs<'_>) {
         let left = placement == Some(WorkspacePlacement::Left);
         let mut gutter_lines = Vec::new();
         for row in 0..layout.above_prompt_content_area.height as usize {
-            let cell = tab_gutter_cell(view, row, left, args.tab_statuses);
+            let cell = tab_gutter_cell(view, row, left, args.tab_statuses, &theme);
             gutter_lines.push(cell);
         }
-        let gutter_str = gutter_lines.join("\r\n");
-        if let Ok(text) = ansi_to_tui::IntoText::into_text(&gutter_str) {
-            frame.render_widget(ratatui::widgets::Paragraph::new(text), tab_area);
-        }
+        frame.render_widget(ratatui::widgets::Paragraph::new(gutter_lines), tab_area);
     }
 
     if layout.header_area.height > 0 {

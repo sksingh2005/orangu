@@ -2074,8 +2074,8 @@ async fn run() -> Result<()> {
                     manual::ManualChrome {
                         current_model: &active_model_id,
                         prompt_branch: prompt_branch.as_deref(),
-                        pending_count: pending_commands.len(),
                     },
+                    &mut _terminal_ui_guard,
                 )?;
                 // The modal view overwrote the screen; the next loop iteration
                 // redraws the normal interface from the top.

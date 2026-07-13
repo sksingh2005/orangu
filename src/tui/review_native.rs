@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -10,6 +10,7 @@ use crate::tui::screen::{cursor_position, prompt_prefix, wrapped_input_lines};
 use crate::tui::text::clip_line;
 
 pub fn draw_review_screen(frame: &mut ratatui::Frame, args: ReviewScreenArgs<'_>) {
+    let theme = Theme::default();
     let area = frame.area();
     let width = area.width.max(1);
     let height = area.height.max(1);
@@ -31,9 +32,9 @@ pub fn draw_review_screen(frame: &mut ratatui::Frame, args: ReviewScreenArgs<'_>
     let prompt_area = layout[1];
 
     if let Some(feedback) = &args.feedback {
-        draw_review_feedback_panel(frame, panes_area, feedback, width as usize);
+        draw_review_feedback_panel(frame, panes_area, feedback, width as usize, &theme);
     } else {
-        draw_review_panes(frame, panes_area, &args, width as usize);
+        draw_review_panes(frame, panes_area, &args, width as usize, &theme);
     }
 
     let current_model = crate::tui::header::display_model_name(false, args.current_model); // Assuming false for is_coordinator in review mode
@@ -53,6 +54,7 @@ fn draw_review_feedback_panel(
     area: Rect,
     feedback: &ReviewFeedbackView<'_>,
     width: usize,
+    theme: &Theme,
 ) {
     let header_text = format!("{} (x to close · ↑/↓ scroll)", feedback.title);
     let mut lines = Vec::new();
@@ -65,7 +67,7 @@ fn draw_review_feedback_panel(
     if let Some(question) = feedback.question {
         lines.push(Line::from(Span::styled(
             clip_line(&format!("> {question}"), 0, width),
-            Style::default().fg(Color::Cyan),
+            theme.highlight,
         )));
     }
 
@@ -95,6 +97,7 @@ fn draw_review_panes(
     area: Rect,
     args: &ReviewScreenArgs<'_>,
     width: usize,
+    theme: &Theme,
 ) {
     let right_width = crate::tui::review::review_right_width(args.files, width) as u16;
     let left_width = width.saturating_sub(right_width as usize + 1).max(1) as u16;
@@ -126,10 +129,7 @@ fn draw_review_panes(
 
     // Separator Title
     let mut sep_lines = Vec::new();
-    sep_lines.push(Line::from(Span::styled(
-        "│",
-        Style::default().fg(Color::Rgb(88, 88, 88)),
-    )));
+    sep_lines.push(Line::from(Span::styled("│", theme.muted)));
 
     // Right Pane Title
     let mut right_lines = Vec::new();
@@ -180,10 +180,7 @@ fn draw_review_panes(
             right_lines.push(Line::raw(""));
         }
 
-        sep_lines.push(Line::from(Span::styled(
-            "│",
-            Style::default().fg(Color::Rgb(88, 88, 88)),
-        )));
+        sep_lines.push(Line::from(Span::styled("│", theme.muted)));
 
         // Left side
         if let Some(editor) = &args.comment_editor {
@@ -196,35 +193,25 @@ fn draw_review_panes(
                 let chosen = if editor.selector_focused {
                     Span::styled(
                         format!(" {} ", editor.category),
-                        Style::default().add_modifier(Modifier::REVERSED),
+                        theme.comment_bg.add_modifier(Modifier::REVERSED),
                     )
                 } else {
-                    Span::raw(format!("[{}]", editor.category))
+                    Span::styled(format!("[{}]", editor.category), theme.comment_bg)
                 };
 
                 let mut spans1 = vec![
-                    Span::styled(
-                        "▕ ",
-                        Style::default()
-                            .fg(Color::Rgb(120, 160, 120))
-                            .bg(Color::Rgb(38, 48, 38)),
-                    ),
-                    Span::styled("Category: ", Style::default().bg(Color::Rgb(38, 48, 38))),
-                    chosen.bg(Color::Rgb(38, 48, 38)),
-                    Span::styled("  ", Style::default().bg(Color::Rgb(38, 48, 38))),
+                    Span::styled("▕ ", theme.comment_bg.fg(Color::Rgb(120, 160, 120))),
+                    Span::styled("Category: ", theme.comment_bg),
+                    chosen,
+                    Span::styled("  ", theme.comment_bg),
                     Span::styled(
                         "↑/↓ Category · Tab Switch focus",
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .bg(Color::Rgb(38, 48, 38)),
+                        theme.comment_bg.fg(Color::DarkGray),
                     ),
                 ];
                 let w1 = spans1.iter().map(|s| s.width()).sum::<usize>();
                 let pad1 = " ".repeat(inner_width.saturating_sub(w1.saturating_sub(2))); // subtract 2 for ▕ 
-                spans1.push(Span::styled(
-                    pad1,
-                    Style::default().bg(Color::Rgb(38, 48, 38)),
-                ));
+                spans1.push(Span::styled(pad1, theme.comment_bg));
                 left_lines.push(Line::from(spans1));
                 lines_pushed += 1;
 
@@ -242,9 +229,7 @@ fn draw_review_panes(
                     let content = wrapped.get(idx).cloned().unwrap_or_default();
                     let mut spans = vec![Span::styled(
                         "▕ ",
-                        Style::default()
-                            .fg(Color::Rgb(120, 160, 120))
-                            .bg(Color::Rgb(38, 48, 38)),
+                        theme.comment_bg.fg(Color::Rgb(120, 160, 120)),
                     )];
 
                     if idx == cursor_row && !editor.selector_focused {
@@ -264,50 +249,28 @@ fn draw_review_panes(
                                     .map(|(i, _)| i)
                                     .unwrap_or(rest.len()),
                             );
-                            spans.push(Span::styled(
-                                before.to_string(),
-                                Style::default().bg(Color::Rgb(38, 48, 38)),
-                            ));
+                            spans.push(Span::styled(before.to_string(), theme.comment_bg));
                             spans.push(Span::styled(
                                 caret.to_string(),
-                                Style::default()
-                                    .bg(Color::Rgb(38, 48, 38))
-                                    .add_modifier(Modifier::REVERSED),
+                                theme.comment_bg.add_modifier(Modifier::REVERSED),
                             ));
-                            spans.push(Span::styled(
-                                after.to_string(),
-                                Style::default().bg(Color::Rgb(38, 48, 38)),
-                            ));
+                            spans.push(Span::styled(after.to_string(), theme.comment_bg));
                         } else if chars.len() < inner_width {
-                            spans.push(Span::styled(
-                                content.clone(),
-                                Style::default().bg(Color::Rgb(38, 48, 38)),
-                            ));
+                            spans.push(Span::styled(content.clone(), theme.comment_bg));
                             spans.push(Span::styled(
                                 " ",
-                                Style::default()
-                                    .bg(Color::Rgb(38, 48, 38))
-                                    .add_modifier(Modifier::REVERSED),
+                                theme.comment_bg.add_modifier(Modifier::REVERSED),
                             ));
                         } else {
-                            spans.push(Span::styled(
-                                content.clone(),
-                                Style::default().bg(Color::Rgb(38, 48, 38)),
-                            ));
+                            spans.push(Span::styled(content.clone(), theme.comment_bg));
                         }
                     } else {
-                        spans.push(Span::styled(
-                            content.clone(),
-                            Style::default().bg(Color::Rgb(38, 48, 38)),
-                        ));
+                        spans.push(Span::styled(content.clone(), theme.comment_bg));
                     }
 
                     let w = spans.iter().map(|s| s.width()).sum::<usize>();
                     let pad = " ".repeat(inner_width.saturating_sub(w.saturating_sub(2)));
-                    spans.push(Span::styled(
-                        pad,
-                        Style::default().bg(Color::Rgb(38, 48, 38)),
-                    ));
+                    spans.push(Span::styled(pad, theme.comment_bg));
 
                     left_lines.push(Line::from(spans));
                     lines_pushed += 1;
@@ -341,10 +304,7 @@ fn draw_review_panes(
                         );
                     spans.push(Span::raw(pad));
                     spans.push(Span::raw(" "));
-                    spans.push(Span::styled(
-                        "●",
-                        Style::default().fg(Color::Rgb(230, 200, 120)),
-                    ));
+                    spans.push(Span::styled("●", theme.warning));
                 } else {
                     let w = spans.iter().map(|s| s.width()).sum::<usize>();
                     let pad = " ".repeat(left_area.width.saturating_sub(w as u16) as usize);
@@ -353,7 +313,7 @@ fn draw_review_panes(
 
                 let mut line = Line::from(spans);
                 if is_cursor {
-                    line = line.style(Style::default().bg(Color::Rgb(60, 60, 90)));
+                    line = line.style(theme.cursor_line_bg);
                 }
                 left_lines.push(line);
             } else {

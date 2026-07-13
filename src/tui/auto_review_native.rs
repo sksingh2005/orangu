@@ -1,3 +1,4 @@
+use crate::tui::Theme;
 use crate::tui::{
     auto_review::{
         AutoReviewDiffView, AutoReviewFileMode, AutoReviewRejectView, AutoReviewScreenArgs,
@@ -27,15 +28,16 @@ fn first_ansi_line(line: &str) -> Line<'static> {
         .unwrap_or_else(|| Line::from(line.to_string()))
 }
 
-fn review_status_span(status: ReviewStatus) -> Span<'static> {
+fn review_status_span(status: ReviewStatus, theme: &Theme) -> Span<'static> {
     match status {
         ReviewStatus::Unreviewed => Span::raw(" "),
-        ReviewStatus::Approved => Span::styled("●", Style::default().fg(Color::Green)),
-        ReviewStatus::Rejected => Span::styled("●", Style::default().fg(Color::Red)),
+        ReviewStatus::Approved => Span::styled("●", theme.success),
+        ReviewStatus::Rejected => Span::styled("●", theme.error),
     }
 }
 
 pub fn draw_auto_review_screen(f: &mut Frame, args: AutoReviewScreenArgs<'_>) {
+    let theme = Theme::default();
     let width = args.actual_width as u16;
     let height = args.actual_height as u16;
 
@@ -53,11 +55,11 @@ pub fn draw_auto_review_screen(f: &mut Frame, args: AutoReviewScreenArgs<'_>) {
         .split(Rect::new(0, 0, width, height));
 
     if let Some(diff) = &args.diff {
-        draw_auto_review_diff_panel(f, diff, chunks[0]);
+        draw_auto_review_diff_panel(f, diff, chunks[0], &theme);
     } else if let Some(reject) = &args.reject {
-        draw_auto_review_reject_panel(f, reject, chunks[0]);
+        draw_auto_review_reject_panel(f, reject, chunks[0], &theme);
     } else {
-        draw_auto_review_panes(f, &args, chunks[0]);
+        draw_auto_review_panes(f, &args, chunks[0], &theme);
     }
 
     f.render_widget(
@@ -73,7 +75,12 @@ pub fn draw_auto_review_screen(f: &mut Frame, args: AutoReviewScreenArgs<'_>) {
     );
 }
 
-fn draw_auto_review_panes(f: &mut Frame, args: &AutoReviewScreenArgs<'_>, area: Rect) {
+fn draw_auto_review_panes(
+    f: &mut Frame,
+    args: &AutoReviewScreenArgs<'_>,
+    area: Rect,
+    theme: &Theme,
+) {
     let right_width = review_right_width(args.files, area.width as usize) as u16;
     let left_width = area.width.saturating_sub(right_width + 1).max(1);
 
@@ -116,7 +123,7 @@ fn draw_auto_review_panes(f: &mut Frame, args: &AutoReviewScreenArgs<'_>, area: 
     if body_height > 0 {
         left_lines.push(Line::from(Span::styled(
             clip_plain(args.status, left_area.width as usize),
-            Style::default().bg(Color::Rgb(60, 60, 90)),
+            theme.cursor_line_bg,
         )));
     }
 
@@ -132,10 +139,7 @@ fn draw_auto_review_panes(f: &mut Frame, args: &AutoReviewScreenArgs<'_>, area: 
                     _ => false,
                 };
                 if is_selected {
-                    left_lines.push(Line::from(Span::styled(
-                        cell,
-                        Style::default().bg(Color::Rgb(60, 60, 90)),
-                    )));
+                    left_lines.push(Line::from(Span::styled(cell, theme.cursor_line_bg)));
                 } else {
                     left_lines.push(Line::from(cell));
                 }
@@ -148,10 +152,7 @@ fn draw_auto_review_panes(f: &mut Frame, args: &AutoReviewScreenArgs<'_>, area: 
 
     let mut separator_lines = vec![];
     for _ in 0..area.height {
-        separator_lines.push(Line::from(Span::styled(
-            "│",
-            Style::default().fg(Color::Rgb(88, 88, 88)),
-        )));
+        separator_lines.push(Line::from(Span::styled("│", theme.muted)));
     }
     f.render_widget(Paragraph::new(separator_lines), separator_area);
 
@@ -167,15 +168,15 @@ fn draw_auto_review_panes(f: &mut Frame, args: &AutoReviewScreenArgs<'_>, area: 
             Some(file) => {
                 let mode = args.modes.get(file_index).copied().unwrap_or_default();
                 let status_dot = if args.prestart && mode == AutoReviewFileMode::Ignore {
-                    Span::styled("●", Style::default().fg(Color::Rgb(100, 150, 255))) // Blue
+                    Span::styled("●", theme.ignore)
                 } else if args.prestart && mode == AutoReviewFileMode::Deep {
-                    Span::styled("●", Style::default().fg(Color::Rgb(180, 100, 255))) // Purple
+                    Span::styled("●", theme.deep)
                 } else if (args.prestart && mode == AutoReviewFileMode::Normal)
                     || args.reviewing == Some(file_index)
                 {
                     Span::styled("●", Style::default().fg(Color::White))
                 } else {
-                    review_status_span(file.status)
+                    review_status_span(file.status, theme)
                 };
 
                 let spans = vec![
@@ -189,7 +190,7 @@ fn draw_auto_review_panes(f: &mut Frame, args: &AutoReviewScreenArgs<'_>, area: 
                 let clipped = clip_ratatui_line(&line, 0, right_area.width as usize);
 
                 if args.selected == Some(file_index) {
-                    right_lines.push(clipped.style(Style::default().bg(Color::Rgb(60, 60, 90))));
+                    right_lines.push(clipped.style(theme.cursor_line_bg));
                 } else {
                     right_lines.push(clipped);
                 }
@@ -200,22 +201,33 @@ fn draw_auto_review_panes(f: &mut Frame, args: &AutoReviewScreenArgs<'_>, area: 
     f.render_widget(Paragraph::new(right_lines), right_area);
 }
 
-fn push_reject_section_label(lines: &mut Vec<Line>, label: &str, focused: bool, _width: usize) {
+fn push_reject_section_label(
+    lines: &mut Vec<Line>,
+    label: &str,
+    focused: bool,
+    _width: usize,
+    theme: &Theme,
+) {
     if focused {
         lines.push(Line::from(Span::styled(
             label.to_string(),
-            Style::default().bg(Color::Rgb(60, 60, 90)),
+            theme.cursor_line_bg,
         )));
     } else {
         lines.push(Line::from(label.to_string()));
     }
     lines.push(Line::from(Span::styled(
         "─".repeat(label.chars().count()),
-        Style::default().fg(Color::Rgb(88, 88, 88)),
+        theme.muted,
     )));
 }
 
-fn draw_auto_review_reject_panel(f: &mut Frame, reject: &AutoReviewRejectView<'_>, area: Rect) {
+fn draw_auto_review_reject_panel(
+    f: &mut Frame,
+    reject: &AutoReviewRejectView<'_>,
+    area: Rect,
+    theme: &Theme,
+) {
     f.render_widget(Clear, area);
     let width = area.width as usize;
     let mut lines = Vec::new();
@@ -226,27 +238,36 @@ fn draw_auto_review_reject_panel(f: &mut Frame, reject: &AutoReviewRejectView<'_
     );
     lines.push(Line::from(Span::styled(
         clip_plain(&header, width),
-        Style::default().bg(Color::Rgb(60, 60, 90)),
+        theme.cursor_line_bg,
     )));
     lines.push(Line::from(""));
 
-    push_reject_section_label(&mut lines, "Category:", reject.selector_focused, width);
+    push_reject_section_label(
+        &mut lines,
+        "Category:",
+        reject.selector_focused,
+        width,
+        theme,
+    );
     for (index, name) in reject.categories.iter().enumerate() {
         let chosen = index == reject.category;
         let marker = if chosen { "[●]" } else { "[ ]" };
         let text = format!("{marker} {name}");
         if chosen && reject.selector_focused {
-            lines.push(Line::from(Span::styled(
-                text,
-                Style::default().bg(Color::Rgb(60, 60, 90)),
-            )));
+            lines.push(Line::from(Span::styled(text, theme.cursor_line_bg)));
         } else {
             lines.push(Line::from(text));
         }
     }
 
     lines.push(Line::from(""));
-    push_reject_section_label(&mut lines, "Comment:", !reject.selector_focused, width);
+    push_reject_section_label(
+        &mut lines,
+        "Comment:",
+        !reject.selector_focused,
+        width,
+        theme,
+    );
 
     let editor_rows = (area.height as usize).saturating_sub(lines.len()).max(1);
     let wrapped = crate::tui::review::wrapped_multiline_lines(reject.text, width);
@@ -293,7 +314,12 @@ fn draw_auto_review_reject_panel(f: &mut Frame, reject: &AutoReviewRejectView<'_
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_auto_review_diff_panel(f: &mut Frame, diff: &AutoReviewDiffView<'_>, area: Rect) {
+fn draw_auto_review_diff_panel(
+    f: &mut Frame,
+    diff: &AutoReviewDiffView<'_>,
+    area: Rect,
+    _theme: &Theme,
+) {
     f.render_widget(Clear, area);
     let mut lines = Vec::new();
     let header = format!("{}  (↑/↓ Scroll · Esc Close)", diff.title);
