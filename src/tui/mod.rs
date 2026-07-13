@@ -14,11 +14,13 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 mod auto_review;
+pub mod auto_review_native;
 mod header;
 mod helper;
 pub mod renderer;
-mod review;
-mod screen;
+pub mod review;
+pub mod review_native;
+pub mod screen;
 mod text;
 pub mod widgets;
 
@@ -40,6 +42,10 @@ pub enum TranscriptLine {
         content: String,
         expanded: bool,
     },
+    ToolCall {
+        name: String,
+        arguments: String,
+    },
 }
 
 impl TranscriptLine {
@@ -47,6 +53,7 @@ impl TranscriptLine {
         match self {
             TranscriptLine::Plain(s) | TranscriptLine::UserInput(s) | TranscriptLine::Wide(s) => s,
             TranscriptLine::Collapsible { content, .. } => content,
+            TranscriptLine::ToolCall { name, .. } => name,
         }
     }
 }
@@ -144,3 +151,6 @@ pub(crate) mod test_fixtures {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

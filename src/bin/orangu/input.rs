@@ -188,6 +188,7 @@ pub struct StreamRenderState {
     pub output: String,
     pub metrics: StreamMetrics,
     pub tool_running_since: Option<std::time::Instant>,
+    pub native_tool_calls: Vec<orangu::llm::ToolCall>,
 }
 
 #[derive(Debug, Default)]

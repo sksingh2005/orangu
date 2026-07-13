@@ -76,6 +76,7 @@ impl Drop for TerminalUiGuard {
     fn drop(&mut self) {
         let _ = execute!(
             std::io::stdout(),
+            crossterm::event::DisableMouseCapture,
             PopKeyboardEnhancementFlags,
             LeaveAlternateScreen
         );
@@ -163,10 +164,10 @@ impl TerminalUiGuard {
             valid_command_len,
         };
 
-        self.terminal
-            .draw(|f| {
-                orangu::tui::renderer::render(f, &args);
-            })
-            .unwrap();
+        if let Err(err) = self.terminal.draw(|f| {
+            orangu::tui::renderer::render(f, &args);
+        }) {
+            eprintln!("failed to draw terminal screen: {err}");
+        }
     }
 }

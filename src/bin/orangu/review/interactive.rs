@@ -829,7 +829,8 @@ pub(crate) async fn run_review_request(
     print_screen_fn: &mut impl FnMut(ReviewScreenArgs<'_>),
 ) -> Result<ReviewRequestOutcome> {
     let checkpoint = session.checkpoint();
-    let mut future = Box::pin(session.prompt(prompt, profile, tools, |_| {}, |_| {}, |_| {}));
+    let mut future =
+        Box::pin(session.prompt(prompt, profile, tools, |_| {}, |_| {}, |_| {}, |_| {}));
     let mut interval = tokio::time::interval(WAIT_LOOP_POLL_INTERVAL);
     let started = std::time::Instant::now();
     let mut escape_cancel = EscapeCancelState::default();
@@ -1059,9 +1060,8 @@ mod tests {
     #[test]
     fn alt_c_on_commented_line_opens_editor_prefilled_in_the_box() {
         use crate::review::ReviewState;
-        use orangu::tui::{
-            ReviewCommentEditor, ReviewEntry, ReviewScreenArgs, ReviewStatus, render_review_screen,
-        };
+        use orangu::tui::{ReviewCommentEditor, ReviewEntry, ReviewScreenArgs, ReviewStatus};
+        use ratatui::{Terminal, backend::TestBackend};
 
         let mut state = ReviewState {
             files: vec![ReviewEntry {
@@ -1088,11 +1088,12 @@ mod tests {
         state.commit_comment();
         state.open_comment_editor(12);
 
-        // The editor holds the existing comment, and it renders inside the box.
+        // The editor holds the existing comment.
         assert_eq!(
             state.comment_editor.as_ref().unwrap().input.as_str(),
             "needs a guard"
         );
+
         let editor = state
             .comment_editor
             .as_ref()
@@ -1103,28 +1104,45 @@ mod tests {
                 cursor: editor.input.cursor(),
             });
         let commented = state.commented_lines();
-        let rendered = render_review_screen(ReviewScreenArgs {
-            files: &state.files,
-            selected: state.selected,
-            line: state.line,
-            scroll: state.scroll,
-            x_offset: state.x_offset,
-            feedback: None,
-            comment_editor: editor,
-            commented_lines: &commented,
-            current_model: "model",
-            prompt_branch: Some("main"),
-            input: "",
-            cursor: 0,
-            ghost: "",
-            left_status: None,
-            pending_count: 0,
-            actual_width: 60,
-            actual_height: 16,
-        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                orangu::tui::review_native::draw_review_screen(
+                    frame,
+                    ReviewScreenArgs {
+                        files: &state.files,
+                        selected: state.selected,
+                        line: state.line,
+                        scroll: state.scroll,
+                        x_offset: state.x_offset,
+                        feedback: None,
+                        comment_editor: editor,
+                        commented_lines: &commented,
+                        current_model: "model",
+                        prompt_branch: Some("main"),
+                        input: "",
+                        cursor: 0,
+                        ghost: "",
+                        left_status: None,
+                        pending_count: 0,
+                        actual_width: 80,
+                        actual_height: 20,
+                    },
+                );
+            })
+            .unwrap();
+
+        let mut rendered = String::new();
+        for y in 0..20 {
+            for x in 0..80 {
+                rendered.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
+            }
+            rendered.push('\n');
+        }
+
         assert!(
             rendered.contains("needs a guard"),
-            "existing comment not loaded into the box"
+            "existing comment not rendered in native review screen"
         );
     }
 

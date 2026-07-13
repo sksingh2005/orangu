@@ -1,0 +1,370 @@
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style, Stylize},
+    text::{Line, Span},
+    widgets::Paragraph,
+};
+
+use super::*;
+use crate::tui::screen::{cursor_position, prompt_prefix, wrapped_input_lines};
+use crate::tui::text::clip_line;
+
+pub fn draw_review_screen(frame: &mut ratatui::Frame, args: ReviewScreenArgs<'_>) {
+    let area = frame.area();
+    let width = area.width.max(1);
+    let height = area.height.max(1);
+
+    let prefix = prompt_prefix(args.prompt_branch);
+    let input_lines_count = wrapped_input_lines(args.input, width as usize, &prefix).len();
+    let prompt_frame_height = (input_lines_count + 3) as u16;
+    let pane_rows = height.saturating_sub(prompt_frame_height).max(1);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(pane_rows),
+            Constraint::Length(prompt_frame_height),
+        ])
+        .split(area);
+
+    let panes_area = layout[0];
+    let prompt_area = layout[1];
+
+    if let Some(feedback) = &args.feedback {
+        draw_review_feedback_panel(frame, panes_area, feedback, width as usize);
+    } else {
+        draw_review_panes(frame, panes_area, &args, width as usize);
+    }
+
+    let current_model = crate::tui::header::display_model_name(false, args.current_model); // Assuming false for is_coordinator in review mode
+    let prompt_widget = crate::tui::widgets::PromptFrameWidget {
+        current_model,
+        prompt_prefix: &prefix,
+        input: args.input,
+        cursor: args.cursor,
+        ghost: args.ghost,
+        valid_command_len: 0,
+    };
+    frame.render_widget(prompt_widget, prompt_area);
+}
+
+fn draw_review_feedback_panel(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    feedback: &ReviewFeedbackView<'_>,
+    width: usize,
+) {
+    let header_text = format!("{} (x to close · ↑/↓ scroll)", feedback.title);
+    let mut lines = Vec::new();
+
+    lines.push(Line::from(Span::styled(
+        clip_line(&header_text, 0, width),
+        Style::default().add_modifier(Modifier::REVERSED),
+    )));
+
+    if let Some(question) = feedback.question {
+        lines.push(Line::from(Span::styled(
+            clip_line(&format!("> {question}"), 0, width),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+
+    let header_rows = lines.len();
+    let body_height = area.height.saturating_sub(header_rows as u16) as usize;
+
+    for row in 0..body_height {
+        let content = if let Some(line) = feedback.lines.get(feedback.scroll + row) {
+            clip_line(line, feedback.x_offset, width)
+        } else {
+            String::new()
+        };
+        if let Ok(text) = ansi_to_tui::IntoText::into_text(&content) {
+            if let Some(line) = text.lines.into_iter().next() {
+                lines.push(line);
+                continue;
+            }
+        }
+        lines.push(Line::from(content));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_review_panes(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    args: &ReviewScreenArgs<'_>,
+    width: usize,
+) {
+    let right_width = crate::tui::review::review_right_width(args.files, width) as u16;
+    let left_width = width.saturating_sub(right_width as usize + 1).max(1) as u16;
+    let body_height = area.height.saturating_sub(1) as usize;
+
+    let layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(left_width),
+            Constraint::Length(1),
+            Constraint::Length(right_width),
+        ])
+        .split(area);
+
+    let left_area = layout[0];
+    let sep_area = layout[1];
+    let right_area = layout[2];
+
+    // Left Pane Title
+    let mut left_lines = Vec::new();
+    let title = format!(
+        "Review: {}  Alt+j/k Switch file  Alt+a Approve  Alt+r Reject  Alt+o Review  Alt+c Comment  Alt+e Open  Alt+x Exit",
+        args.prompt_branch.unwrap_or("(detached HEAD)"),
+    );
+    left_lines.push(Line::from(Span::styled(
+        clip_line(&title, 0, left_area.width as usize),
+        Style::default(),
+    )));
+
+    // Separator Title
+    let mut sep_lines = Vec::new();
+    sep_lines.push(Line::from(Span::styled(
+        "│",
+        Style::default().fg(Color::Rgb(88, 88, 88)),
+    )));
+
+    // Right Pane Title
+    let mut right_lines = Vec::new();
+    let right_header = format!("Files ({})", args.files.len());
+    right_lines.push(Line::from(Span::styled(
+        clip_line(&right_header, 0, right_area.width as usize),
+        Style::default(),
+    )));
+
+    let list_start = if args.selected >= body_height {
+        args.selected - body_height + 1
+    } else {
+        0
+    };
+
+    let selected_lines: &[String] = args
+        .files
+        .get(args.selected)
+        .map(|file| file.diff_lines.as_slice())
+        .unwrap_or(&[]);
+
+    let has_comment = |index: usize| args.commented_lines.contains(&index);
+    let mut box_shown = false;
+    let mut diff_index = args.scroll;
+    let mut lines_pushed = 0;
+
+    for row_idx in 0..body_height {
+        // Right side
+        let file_index = list_start + row_idx;
+        if let Some(file) = args.files.get(file_index) {
+            let status_box = crate::tui::review::review_status_box(file.status);
+            let mut right_spans = Vec::new();
+            if let Ok(text) = ansi_to_tui::IntoText::into_text(&status_box) {
+                if let Some(line) = text.lines.into_iter().next() {
+                    right_spans.extend(line.spans);
+                }
+            } else {
+                right_spans.push(Span::raw("[ ]"));
+            }
+            right_spans.push(Span::raw(format!(" {}", file.path)));
+
+            let mut line = Line::from(right_spans);
+            if file_index == args.selected {
+                line = line.style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+            right_lines.push(line);
+        } else {
+            right_lines.push(Line::raw(""));
+        }
+
+        sep_lines.push(Line::from(Span::styled(
+            "│",
+            Style::default().fg(Color::Rgb(88, 88, 88)),
+        )));
+
+        // Left side
+        if let Some(editor) = &args.comment_editor {
+            if diff_index == args.line + 1 && !box_shown && lines_pushed < body_height {
+                box_shown = true;
+
+                // Add editor rows here directly to left_lines
+                let inner_width = left_area.width.saturating_sub(2).max(1) as usize;
+
+                let chosen = if editor.selector_focused {
+                    Span::styled(
+                        format!(" {} ", editor.category),
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    )
+                } else {
+                    Span::raw(format!("[{}]", editor.category))
+                };
+
+                let mut spans1 = vec![
+                    Span::styled(
+                        "▕ ",
+                        Style::default()
+                            .fg(Color::Rgb(120, 160, 120))
+                            .bg(Color::Rgb(38, 48, 38)),
+                    ),
+                    Span::styled("Category: ", Style::default().bg(Color::Rgb(38, 48, 38))),
+                    chosen.bg(Color::Rgb(38, 48, 38)),
+                    Span::styled("  ", Style::default().bg(Color::Rgb(38, 48, 38))),
+                    Span::styled(
+                        "↑/↓ Category · Tab Switch focus",
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .bg(Color::Rgb(38, 48, 38)),
+                    ),
+                ];
+                let w1 = spans1.iter().map(|s| s.width()).sum::<usize>();
+                let pad1 = " ".repeat(inner_width.saturating_sub(w1.saturating_sub(2))); // subtract 2 for ▕ 
+                spans1.push(Span::styled(
+                    pad1,
+                    Style::default().bg(Color::Rgb(38, 48, 38)),
+                ));
+                left_lines.push(Line::from(spans1));
+                lines_pushed += 1;
+
+                let wrapped = wrapped_input_lines(editor.text, inner_width, "");
+                let (cursor_row, cursor_col) =
+                    cursor_position(editor.text, editor.cursor, inner_width, "");
+                let start =
+                    cursor_row.saturating_sub(crate::tui::review::REVIEW_COMMENT_BOX_HEIGHT - 1);
+
+                for r in 0..crate::tui::review::REVIEW_COMMENT_BOX_HEIGHT {
+                    if lines_pushed >= body_height {
+                        break;
+                    }
+                    let idx = start + r;
+                    let content = wrapped.get(idx).cloned().unwrap_or_default();
+                    let mut spans = vec![Span::styled(
+                        "▕ ",
+                        Style::default()
+                            .fg(Color::Rgb(120, 160, 120))
+                            .bg(Color::Rgb(38, 48, 38)),
+                    )];
+
+                    if idx == cursor_row && !editor.selector_focused {
+                        // caret
+                        let chars: Vec<char> = content.chars().collect();
+                        if cursor_col < chars.len() {
+                            let (before, rest) = content.split_at(
+                                content
+                                    .char_indices()
+                                    .nth(cursor_col)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(0),
+                            );
+                            let (caret, after) = rest.split_at(
+                                rest.char_indices()
+                                    .nth(1)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(rest.len()),
+                            );
+                            spans.push(Span::styled(
+                                before.to_string(),
+                                Style::default().bg(Color::Rgb(38, 48, 38)),
+                            ));
+                            spans.push(Span::styled(
+                                caret.to_string(),
+                                Style::default()
+                                    .bg(Color::Rgb(38, 48, 38))
+                                    .add_modifier(Modifier::REVERSED),
+                            ));
+                            spans.push(Span::styled(
+                                after.to_string(),
+                                Style::default().bg(Color::Rgb(38, 48, 38)),
+                            ));
+                        } else if chars.len() < inner_width {
+                            spans.push(Span::styled(
+                                content.clone(),
+                                Style::default().bg(Color::Rgb(38, 48, 38)),
+                            ));
+                            spans.push(Span::styled(
+                                " ",
+                                Style::default()
+                                    .bg(Color::Rgb(38, 48, 38))
+                                    .add_modifier(Modifier::REVERSED),
+                            ));
+                        } else {
+                            spans.push(Span::styled(
+                                content.clone(),
+                                Style::default().bg(Color::Rgb(38, 48, 38)),
+                            ));
+                        }
+                    } else {
+                        spans.push(Span::styled(
+                            content.clone(),
+                            Style::default().bg(Color::Rgb(38, 48, 38)),
+                        ));
+                    }
+
+                    let w = spans.iter().map(|s| s.width()).sum::<usize>();
+                    let pad = " ".repeat(inner_width.saturating_sub(w.saturating_sub(2)));
+                    spans.push(Span::styled(
+                        pad,
+                        Style::default().bg(Color::Rgb(38, 48, 38)),
+                    ));
+
+                    left_lines.push(Line::from(spans));
+                    lines_pushed += 1;
+                }
+            }
+        }
+
+        if lines_pushed < body_height {
+            if let Some(diff_line) = selected_lines.get(diff_index) {
+                let mut spans = Vec::new();
+                let is_cursor = diff_index == args.line;
+                let clipped = clip_line(
+                    diff_line,
+                    args.x_offset,
+                    left_area.width.saturating_sub(2) as usize,
+                );
+
+                if let Ok(text) = ansi_to_tui::IntoText::into_text(&clipped) {
+                    if let Some(parsed_line) = text.lines.into_iter().next() {
+                        spans.extend(parsed_line.spans);
+                    }
+                } else {
+                    spans.push(Span::raw(clipped));
+                }
+
+                if has_comment(diff_index) {
+                    let w = spans.iter().map(|s| s.width()).sum::<usize>();
+                    let pad =
+                        " ".repeat(
+                            left_area.width.saturating_sub(2).saturating_sub(w as u16) as usize
+                        );
+                    spans.push(Span::raw(pad));
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        "●",
+                        Style::default().fg(Color::Rgb(230, 200, 120)),
+                    ));
+                } else {
+                    let w = spans.iter().map(|s| s.width()).sum::<usize>();
+                    let pad = " ".repeat(left_area.width.saturating_sub(w as u16) as usize);
+                    spans.push(Span::raw(pad));
+                }
+
+                let mut line = Line::from(spans);
+                if is_cursor {
+                    line = line.style(Style::default().bg(Color::Rgb(60, 60, 90)));
+                }
+                left_lines.push(line);
+            } else {
+                left_lines.push(Line::raw(""));
+            }
+            diff_index += 1;
+            lines_pushed += 1;
+        }
+    }
+
+    frame.render_widget(Paragraph::new(left_lines), left_area);
+    frame.render_widget(Paragraph::new(sep_lines), sep_area);
+    frame.render_widget(Paragraph::new(right_lines), right_area);
+}

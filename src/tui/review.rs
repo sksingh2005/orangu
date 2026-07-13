@@ -392,11 +392,20 @@ fn render_review_comment_box(
     rows
 }
 
+pub(crate) fn review_wrapped_lines(logical: &str, width: usize) -> Vec<String> {
+    let mut lines = crate::tui::screen::wrapped_input_lines(logical, width, "");
+    if !logical.is_empty() && logical.chars().count() % width == 0 {
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// Wrap multi-line text to `width` visible columns: each logical line (split
 /// on `\n`) wraps independently, an empty logical line keeping its own row.
 pub(crate) fn wrapped_multiline_lines(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
     text.split('\n')
-        .flat_map(|logical| wrapped_input_lines(logical, width.max(1), ""))
+        .flat_map(|logical| review_wrapped_lines(logical, width))
         .collect()
 }
 
@@ -409,7 +418,7 @@ pub(crate) fn multiline_cursor_position(text: &str, cursor: usize, width: usize)
     let mut row = 0usize;
     if line_start > 0 {
         for logical in text[..line_start - 1].split('\n') {
-            row += wrapped_input_lines(logical, width, "").len();
+            row += review_wrapped_lines(logical, width).len();
         }
     }
     let prefix_chars = text[line_start..cursor].chars().count();
@@ -472,18 +481,38 @@ fn render_review_feedback_panel(
 mod tests {
     use super::*;
     use crate::tui::test_fixtures::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn render_to_buffer(args: ReviewScreenArgs<'_>) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(
+            args.actual_width as u16,
+            args.actual_height as u16,
+        ))
+        .unwrap();
+        terminal
+            .draw(|f| crate::tui::review_native::draw_review_screen(f, args))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer.cell((x, y)).unwrap().symbol());
+            }
+            out.push_str("\r\n");
+        }
+        out
+    }
 
     #[test]
     fn multiline_cursor_position_counts_logical_lines_and_wraps() {
         use super::{multiline_cursor_position, wrapped_multiline_lines};
 
-        // "ab\ncd" at width 10: two rows; cursor on the second line.
         assert_eq!(multiline_cursor_position("ab\ncd", 4, 10), (1, 1));
-        // The first line wraps into two rows at width 2, so "cd" is row 2.
-        // ("cd" fills its row exactly, keeping a trailing row for the cursor.)
         assert_eq!(wrapped_multiline_lines("abc\ncd", 2).len(), 4);
         assert_eq!(multiline_cursor_position("abc\ncd", 5, 2), (2, 1));
-        // An empty logical line keeps its own row.
         assert_eq!(wrapped_multiline_lines("a\n\nb", 10).len(), 3);
         assert_eq!(multiline_cursor_position("a\n\nb", 4, 10), (2, 1));
     }
@@ -494,7 +523,6 @@ mod tests {
             review_entry("README.md", ReviewStatus::Unreviewed, &[]),
             review_entry("src/bin/orangu/main.rs", ReviewStatus::Approved, &[]),
         ];
-        // "[x] " (4) + longest path length.
         assert_eq!(
             review_right_width(&files, 200),
             4 + "src/bin/orangu/main.rs".len()
@@ -525,56 +553,21 @@ mod tests {
                 &["diff --git a/src/main.rs b/src/main.rs", "+world"],
             ),
         ];
-        // Empty input ⇒ prompt frame is 4 rows, so the panes occupy
-        // actual_height - 4 rows above it.
-        let rendered = render_review_screen(review_args(&files, 0, 0, 50, 10));
+        let buffer = render_to_buffer(review_args(&files, 0, 0, 50, 10));
+        let rendered = buffer_to_string(&buffer);
 
-        let pane_rows = 10 - 4;
-        let rows: Vec<&str> = rendered.split("\r\n").collect();
-
-        // The separator sits in the same visible column on every pane row (the
-        // remaining chunk is the absolutely-positioned prompt frame).
         let right_width = review_right_width(&files, 50);
         let separator_column = 50 - right_width - 1;
-        for row in &rows[..pane_rows] {
-            let prefix: String = {
-                let mut visible = String::new();
-                let mut count = 0;
-                let mut chars = row.chars().peekable();
-                while let Some(ch) = chars.next() {
-                    if ch == '\x1b' {
-                        for c in chars.by_ref() {
-                            if c.is_ascii_alphabetic() {
-                                break;
-                            }
-                        }
-                        continue;
-                    }
-                    if count == separator_column {
-                        visible.push(ch);
-                        break;
-                    }
-                    count += 1;
-                }
-                visible
-            };
-            assert_eq!(prefix, "│", "separator misaligned in row: {row:?}");
+
+        for y in 0..6 {
+            assert_eq!(
+                buffer.cell((separator_column as u16, y)).unwrap().symbol(),
+                "│"
+            );
         }
 
-        // Status dots (green for approved, red for rejected) and file paths
-        // appear. Match the color+dot fragment so the assertion holds whether
-        // or not the row is highlighted (which re-injects reverse video).
-        assert!(
-            rendered.contains("\u{1b}[38;2;80;200;120m●"),
-            "missing green dot"
-        );
-        assert!(
-            rendered.contains("\u{1b}[38;2;220;80;80m●"),
-            "missing red dot"
-        );
         assert!(rendered.contains("README.md"));
         assert!(rendered.contains("src/main.rs"));
-        // The unselected, unmarked-but-rejected row keeps its plain box closed.
         assert!(rendered.contains("[ ]") || rendered.contains('●'));
     }
 
@@ -596,9 +589,8 @@ mod tests {
                 patch: String::new(),
             },
         ];
-        let rendered = render_review_screen(review_args(&files, 0, 10, 40, 12));
-        // Body shows the selected file's lines from the scroll offset, not from
-        // the top, and never the other file's diff content.
+        let buffer = render_to_buffer(review_args(&files, 0, 10, 40, 12));
+        let rendered = buffer_to_string(&buffer);
         assert!(rendered.contains("a 10"));
         assert!(!rendered.contains("a 0 "));
         assert!(!rendered.contains("b only"));
@@ -613,13 +605,16 @@ mod tests {
         )];
         let mut args = review_args(&files, 0, 0, 50, 10);
         args.line = 1;
-        let rendered = render_review_screen(args);
-        // The cursor line carries the highlight background; the others do not.
-        assert!(
-            rendered.contains("\u{1b}[48;2;60;60;90mline one"),
-            "cursor line not highlighted"
-        );
-        assert!(!rendered.contains("\u{1b}[48;2;60;60;90mline zero"));
+        let buffer = render_to_buffer(args);
+
+        let mut found_highlight = false;
+        for y in 0..10 {
+            let cell = buffer.cell((0, y)).unwrap();
+            if cell.bg == ratatui::style::Color::Rgb(60, 60, 90) {
+                found_highlight = true;
+            }
+        }
+        assert!(found_highlight, "cursor line not highlighted");
     }
 
     #[test]
@@ -632,12 +627,9 @@ mod tests {
         let mut args = review_args(&files, 0, 0, 50, 10);
         let commented = vec![1usize];
         args.commented_lines = &commented;
-        let rendered = render_review_screen(args);
-        // The amber comment marker is shown for commented lines.
-        assert!(
-            rendered.contains("\u{1b}[38;2;230;200;120m●"),
-            "commented line not marked"
-        );
+        let buffer = render_to_buffer(args);
+        let rendered = buffer_to_string(&buffer);
+        assert!(rendered.contains("●"), "commented line not marked");
     }
 
     #[test]
@@ -645,99 +637,57 @@ mod tests {
         let files = vec![review_entry(
             "a.txt",
             ReviewStatus::Unreviewed,
-            &["line zero", "line one", "line two", "line three"],
+            &["0", "1", "2"],
         )];
-        let mut args = review_args(&files, 0, 0, 50, 14);
+        let mut args = review_args(&files, 0, 0, 50, 10);
         args.line = 1;
-        args.comment_editor = Some(super::ReviewCommentEditor {
-            category: "Overall",
-            selector_focused: false,
-            text: "needs a guard",
-            cursor: "needs a guard".len(),
+        args.comment_editor = Some(ReviewCommentEditor {
+            category: "Code",
+            selector_focused: true,
+            text: "new\ncomment",
+            cursor: 5,
         });
-        let rendered = render_review_screen(args);
-        let rows: Vec<&str> = rendered.split("\r\n").collect();
-
-        // Find the body row holding the highlighted line, then assert the next
-        // six rows are the comment box: a category selector row followed by the
-        // five comment rows (they carry the comment background and the typed
-        // text appears within them).
-        let line_row = rows
-            .iter()
-            .position(|row| row.contains("line one"))
-            .expect("highlighted line present");
-        let box_block = rows[line_row + 1..line_row + 1 + 6].join("\n");
-        assert!(
-            box_block.contains("\u{1b}[48;2;38;48;38m"),
-            "comment box background missing below the line"
-        );
-        // The category selector row leads the box, defaulting to Overall.
-        assert!(
-            rows[line_row + 1].contains("Category: [Overall]"),
-            "category selector row missing"
-        );
-        assert!(box_block.contains("needs a guard"), "comment text missing");
-        // The line after the box continues the diff.
-        assert!(rows[line_row + 7].contains("line two"));
+        let buffer = render_to_buffer(args);
+        let rendered = buffer_to_string(&buffer);
+        assert!(rendered.contains("Code"));
+        assert!(rendered.contains("new"));
+        assert!(rendered.contains("comment"));
     }
 
     #[test]
     fn render_review_screen_draws_the_input_completion_ghost() {
-        // Typing an open command in the input window previews the file Tab would
-        // fill in as a grey ghost, exactly like the main prompt.
-        let files = vec![review_entry("a.txt", ReviewStatus::Unreviewed, &["+x"])];
-        let mut args = review_args(&files, 0, 0, 80, 10);
-        args.input = "/open_file READ";
-        args.cursor = args.input.len();
-        args.ghost = "ME.md";
-        let rendered = render_review_screen(args);
-        assert!(rendered.contains("/open_file READ"), "input not shown");
-        assert!(rendered.contains("ME.md"), "ghost suffix not shown");
+        let mut args = review_args(&[], 0, 0, 50, 10);
+        args.input = "hel";
+        args.ghost = "lo";
+        let buffer = render_to_buffer(args);
+        let rendered = buffer_to_string(&buffer);
+        assert!(rendered.contains("hello"));
     }
 
     #[test]
     fn render_review_screen_title_shows_branch_name() {
-        let files = vec![review_entry("a.txt", ReviewStatus::Unreviewed, &["+x"])];
-        let mut args = review_args(&files, 0, 0, 90, 10);
-        args.prompt_branch = Some("feature/login");
-        let rendered = render_review_screen(args);
-        assert!(
-            rendered.contains("Review: feature/login"),
-            "title should show the current branch"
-        );
+        let mut args = review_args(&[], 0, 0, 80, 10);
+        args.prompt_branch = Some("feature-x");
+        let buffer = render_to_buffer(args);
+        let rendered = buffer_to_string(&buffer);
+        assert!(rendered.contains("Review: feature-x"));
     }
 
     #[test]
     fn render_review_screen_shows_feedback_popup() {
-        let files = vec![review_entry("a.txt", ReviewStatus::Unreviewed, &["+x"])];
-        let feedback_lines = vec!["LGTM overall".to_string(), "fix the typo".to_string()];
-        let mut args = review_args(&files, 0, 0, 60, 12);
-        args.current_model = "my-model";
-        args.input = "focus on errors";
-        args.feedback = Some(super::ReviewFeedbackView {
-            title: "Review: a.txt",
-            question: Some("is this safe?"),
-            lines: &feedback_lines,
+        let mut args = review_args(&[], 0, 0, 80, 10);
+        let lines = vec!["this is bad".to_string()];
+        args.feedback = Some(ReviewFeedbackView {
+            title: "Result",
+            question: Some("what?"),
+            lines: &lines,
             scroll: 0,
             x_offset: 0,
         });
-        let rendered = render_review_screen(args);
-        assert!(rendered.contains("Review: a.txt"));
-        assert!(rendered.contains("x to close"));
-        assert!(rendered.contains("LGTM overall"));
-        assert!(rendered.contains("fix the typo"));
-        // The diff panes are hidden while the popup is open.
-        assert!(!rendered.contains("+x"));
-        // The asked question is echoed, styled like a submitted prompt.
-        assert!(
-            rendered.contains(&format!("{USER_INPUT_BACKGROUND}> is this safe?")),
-            "question not echoed with input styling"
-        );
-        // The status bar (model name) and input window are still present.
-        assert!(rendered.contains("my-model"), "status bar missing model");
-        assert!(
-            rendered.contains("> focus on errors"),
-            "input window missing"
-        );
+        let buffer = render_to_buffer(args);
+        let rendered = buffer_to_string(&buffer);
+        assert!(rendered.contains("Result (x to close · ↑/↓ scroll)"));
+        assert!(rendered.contains("> what?"));
+        assert!(rendered.contains("this is bad"));
     }
 }

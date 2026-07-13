@@ -1728,18 +1728,11 @@ async fn run() -> Result<()> {
                         &server_names,
                         &available_models,
                         &mut |args: orangu::tui::ReviewScreenArgs<'_>| {
-                            _terminal_ui_guard
-                                .terminal
-                                .draw(|f| {
-                                    let old = orangu::tui::render_review_screen(args);
-                                    if let Ok(text) = ansi_to_tui::IntoText::into_text(&old) {
-                                        f.render_widget(
-                                            ratatui::widgets::Paragraph::new(text),
-                                            f.area(),
-                                        );
-                                    }
-                                })
-                                .unwrap();
+                            if let Err(err) = _terminal_ui_guard.terminal.draw(|f| {
+                                orangu::tui::review_native::draw_review_screen(f, args);
+                            }) {
+                                eprintln!("failed to draw review screen: {err}");
+                            }
                         },
                     )? {
                         ReviewSignal::Exit => break,
@@ -1816,19 +1809,11 @@ async fn run() -> Result<()> {
                                 &mut viewport,
                                 chrome,
                                 &mut |args: orangu::tui::ReviewScreenArgs<'_>| {
-                                    _terminal_ui_guard
-                                        .terminal
-                                        .draw(|f| {
-                                            let old = orangu::tui::render_review_screen(args);
-                                            if let Ok(text) = ansi_to_tui::IntoText::into_text(&old)
-                                            {
-                                                f.render_widget(
-                                                    ratatui::widgets::Paragraph::new(text),
-                                                    f.area(),
-                                                );
-                                            }
-                                        })
-                                        .unwrap();
+                                    if let Err(err) = _terminal_ui_guard.terminal.draw(|f| {
+                                        orangu::tui::review_native::draw_review_screen(f, args);
+                                    }) {
+                                        eprintln!("failed to draw review screen: {err}");
+                                    }
                                 },
                             )
                             .await?;
@@ -1959,18 +1944,11 @@ async fn run() -> Result<()> {
                     // chained `export auto review` can pick up the report.
                     current_chain.is_some(),
                     &mut |args: orangu::tui::AutoReviewScreenArgs<'_>| {
-                        _terminal_ui_guard
-                            .terminal
-                            .draw(|f| {
-                                let old = orangu::tui::render_auto_review_screen(args);
-                                if let Ok(text) = ansi_to_tui::IntoText::into_text(&old) {
-                                    f.render_widget(
-                                        ratatui::widgets::Paragraph::new(text),
-                                        f.area(),
-                                    );
-                                }
-                            })
-                            .unwrap();
+                        if let Err(err) = _terminal_ui_guard.terminal.draw(|f| {
+                            orangu::tui::auto_review_native::draw_auto_review_screen(f, args);
+                        }) {
+                            eprintln!("failed to draw auto-review screen: {err}");
+                        }
                     },
                 )
                 .await?;

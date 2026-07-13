@@ -229,7 +229,7 @@ impl ChatSession {
         }
     }
 
-    pub async fn prompt<F, G, H>(
+    pub async fn prompt<F, G, H, I>(
         &mut self,
         user_input: &str,
         profile: &LlmConfiguration,
@@ -237,11 +237,13 @@ impl ChatSession {
         mut on_text_delta: F,
         mut on_stream_metrics: G,
         mut on_tool_running: H,
+        mut on_tool_call: I,
     ) -> Result<String>
     where
         F: FnMut(&str),
         G: FnMut(StreamMetrics),
         H: FnMut(bool),
+        I: FnMut(&crate::llm::ToolCall),
     {
         self.compact_transcript();
 
@@ -291,6 +293,7 @@ impl ChatSession {
 
                         on_tool_running(true);
                         for tool_call in tool_calls {
+                            on_tool_call(&tool_call);
                             let rendered = match tools
                                 .execute(
                                     &tool_call.function.name,

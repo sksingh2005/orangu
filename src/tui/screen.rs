@@ -400,7 +400,7 @@ pub fn draw_screen(frame: &mut ratatui::Frame, args: ScreenRenderArgs<'_>) {
 
         for r in rendered {
             let offset = if is_user_input { 0 } else { args.x_offset };
-            output_lines.push(clip_line(&r, offset, inner_width));
+            output_lines.push(crate::tui::text::clip_ratatui_line(&r, offset, inner_width));
         }
 
         if is_user_input {
@@ -412,7 +412,11 @@ pub fn draw_screen(frame: &mut ratatui::Frame, args: ScreenRenderArgs<'_>) {
     for line in args.pending_lines.iter() {
         let rendered = render_transcript_line_multi(line, inner_width);
         for r in rendered {
-            output_lines.push(clip_line(&r, args.x_offset, inner_width));
+            output_lines.push(crate::tui::text::clip_ratatui_line(
+                &r,
+                args.x_offset,
+                inner_width,
+            ));
         }
     }
 
@@ -446,26 +450,33 @@ pub fn draw_screen(frame: &mut ratatui::Frame, args: ScreenRenderArgs<'_>) {
 
     // Append status line directly at the end of the transcript view if we are scrolled to bottom
     if scroll_offset == 0 {
-        let mut left_str = String::new();
+        let mut left_spans = Vec::new();
         let mut left_used = 0;
         if let Some(left) = &args.left_status {
-            left_str.push_str(&left.rendered);
+            if let Ok(mut text) = ansi_to_tui::IntoText::into_text(&left.rendered) {
+                if let Some(line) = text.lines.pop() {
+                    left_spans.extend(line.spans);
+                }
+            }
             left_used += left.visible_width;
         } else if args.pending_count > 0 {
             let pending = format!("Pending: {}", args.pending_count);
-            left_str.push_str(&format!("\x1b[38;2;220;220;100m{}\x1b[0m", pending));
-            left_used += pending.chars().count();
+            left_spans.push(ratatui::text::Span::styled(
+                pending,
+                ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(220, 220, 100)),
+            ));
+            left_used += format!("Pending: {}", args.pending_count).chars().count();
         }
 
         if left_used > 0 {
-            visible_lines.push(left_str);
+            visible_lines.push(ratatui::text::Line::from(left_spans));
         }
     }
 
-    let output_str = visible_lines.join("\r\n");
-    if let Ok(text) = ansi_to_tui::IntoText::into_text(&output_str) {
-        frame.render_widget(ratatui::widgets::Paragraph::new(text), layout.output_area);
-    }
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(visible_lines),
+        layout.output_area,
+    );
 
     // Render Prompt Frame
     let current_model =
@@ -764,9 +775,22 @@ pub fn render_prompt_frame(args: PromptFrameArgs<'_>) -> String {
     frame
 }
 
-pub fn render_transcript_line_multi(line: &TranscriptLine, width: usize) -> Vec<String> {
+pub fn render_transcript_line_multi(
+    line: &TranscriptLine,
+    width: usize,
+) -> Vec<ratatui::text::Line<'static>> {
+    use ansi_to_tui::IntoText;
+    use ratatui::style::{Color, Style};
+    use ratatui::text::{Line, Span};
+
     match line {
-        TranscriptLine::Plain(content) | TranscriptLine::Wide(content) => vec![content.clone()],
+        TranscriptLine::Plain(content) | TranscriptLine::Wide(content) => {
+            if let Ok(text) = content.into_text() {
+                text.lines
+            } else {
+                vec![Line::from(content.clone())]
+            }
+        }
         TranscriptLine::Collapsible {
             title,
             content,
@@ -775,15 +799,39 @@ pub fn render_transcript_line_multi(line: &TranscriptLine, width: usize) -> Vec<
         } => {
             let mut lines = Vec::new();
             let marker = if *expanded { "▼" } else { "◈" };
-            lines.push(format!("  \x1b[38;5;244m{} {}\x1b[0m", marker, title));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(marker.to_string(), Style::default().fg(Color::Indexed(244))),
+                Span::styled(
+                    format!(" {}", title),
+                    Style::default().fg(Color::Indexed(244)),
+                ),
+            ]));
             if *expanded {
                 for line in content.lines() {
-                    lines.push(format!(
-                        "    \x1b[38;5;240m│\x1b[0m \x1b[38;5;244m{}\x1b[0m",
-                        line
-                    ));
+                    lines.push(Line::from(vec![
+                        Span::raw("    "),
+                        Span::styled("│", Style::default().fg(Color::Indexed(240))),
+                        Span::raw(" "),
+                        Span::styled(line.to_string(), Style::default().fg(Color::Indexed(244))),
+                    ]));
                 }
             }
+            lines
+        }
+        TranscriptLine::ToolCall { name, arguments } => {
+            let mut lines = Vec::new();
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("🛠️  ", Style::default()),
+                Span::styled(
+                    format!("Tool: {} ", name),
+                    Style::default()
+                        .fg(Color::Indexed(214))
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+                Span::styled(arguments.clone(), Style::default().fg(Color::Indexed(244))),
+            ]));
             lines
         }
         TranscriptLine::UserInput(content) => {
@@ -791,33 +839,33 @@ pub fn render_transcript_line_multi(line: &TranscriptLine, width: usize) -> Vec<
             let content = content.trim_start_matches("> ");
 
             let wrapped = wrapped_input_lines(&format!("  ❯ {}", content), width, "    ");
+            let bg = Style::default().bg(ratatui::style::Color::Rgb(45, 35, 20));
 
             // Gap above
-            lines.push(String::new());
+            lines.push(Line::default());
 
             // Inside top padding
-            lines.push(format!(
-                "\x1b[48;2;45;35;20m{}\x1b[0m ",
-                " ".repeat(width.saturating_sub(1))
-            ));
+            lines.push(Line::from(Span::styled(
+                " ".repeat(width.saturating_sub(1)),
+                bg,
+            )));
 
             for l in wrapped {
                 let padding = width.saturating_sub(1).saturating_sub(l.chars().count());
-                lines.push(format!(
-                    "\x1b[48;2;45;35;20m{}{}\x1b[0m ",
-                    l,
-                    " ".repeat(padding)
-                ));
+                lines.push(Line::from(vec![
+                    Span::styled(l, bg),
+                    Span::styled(" ".repeat(padding), bg),
+                ]));
             }
 
             // Inside bottom padding
-            lines.push(format!(
-                "\x1b[48;2;45;35;20m{}\x1b[0m ",
-                " ".repeat(width.saturating_sub(1))
-            ));
+            lines.push(Line::from(Span::styled(
+                " ".repeat(width.saturating_sub(1)),
+                bg,
+            )));
 
             // Gap below
-            lines.push(String::new());
+            lines.push(Line::default());
 
             lines
         }

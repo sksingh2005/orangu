@@ -43,6 +43,7 @@ pub(crate) async fn wait_for_response(
     let so = Arc::clone(&streamed_state);
     let sm = Arc::clone(&streamed_state);
     let st = Arc::clone(&streamed_state);
+    let stc = Arc::clone(&streamed_state);
 
     let handle = tokio::spawn(async move {
         let mut s = real_session;
@@ -68,6 +69,11 @@ pub(crate) async fn wait_for_response(
                         } else {
                             None
                         };
+                    }
+                },
+                move |tool_call| {
+                    if let Ok(mut state) = stc.lock() {
+                        state.native_tool_calls.push(tool_call.clone());
                     }
                 },
             )
@@ -147,6 +153,7 @@ async fn drive_handle(
     let mut last_rendered_output = String::new();
     let mut last_rendered_metrics = StreamMetrics::default();
     let mut last_tool_was_running = false;
+    let mut rendered_native_tool_calls = 0usize;
     let mut escape_cancel_state = EscapeCancelState::default();
     let initial_status = Some(render_thinking_status(
         thinking_frame,
@@ -200,6 +207,16 @@ async fn drive_handle(
                             .lock()
                             .map(|state| state.clone())
                             .unwrap_or_default();
+
+                        if final_state.native_tool_calls.len() > rendered_native_tool_calls {
+                            for tc in &final_state.native_tool_calls[rendered_native_tool_calls..] {
+                                output_state.push_lines(std::iter::once(orangu::tui::TranscriptLine::ToolCall {
+                                    name: tc.function.name.clone(),
+                                    arguments: serde_json::to_string(&tc.function.arguments).unwrap_or_default(),
+                                }));
+                            }
+                        }
+
                         if let Some(pending_line) =
                             final_pending_line(&final_state.output, &response)
                         {
@@ -240,6 +257,19 @@ async fn drive_handle(
                 let current_streamed_output = current_state.output;
                 let current_stream_metrics = current_state.metrics;
                 let current_tool_running_since = current_state.tool_running_since;
+                let current_native_tool_calls = current_state.native_tool_calls;
+
+                if current_native_tool_calls.len() > rendered_native_tool_calls {
+                    for tc in &current_native_tool_calls[rendered_native_tool_calls..] {
+                        output_state.push_lines(std::iter::once(orangu::tui::TranscriptLine::ToolCall {
+                            name: tc.function.name.clone(),
+                            arguments: serde_json::to_string(&tc.function.arguments).unwrap_or_default(),
+                        }));
+                        redraw = true;
+                    }
+                    rendered_native_tool_calls = current_native_tool_calls.len();
+                }
+
                 redraw |= current_streamed_output != last_rendered_output;
                 redraw |= current_stream_metrics != last_rendered_metrics;
                 redraw |= current_tool_running_since.is_some() != last_tool_was_running;
