@@ -1137,6 +1137,26 @@ pub fn handle_input_event(
                 }
             }
         }
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            ..
+        }) => {
+            // Scroll the transcript up (towards older messages).
+            for _ in 0..3 {
+                output_state.line_up();
+            }
+            redraw = true;
+        }
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            ..
+        }) => {
+            // Scroll the transcript down (towards newer messages).
+            for _ in 0..3 {
+                output_state.line_down();
+            }
+            redraw = true;
+        }
         _ => {}
     }
 

@@ -359,7 +359,7 @@ async fn run() -> Result<()> {
         }
     }
 
-    let mut _terminal_ui_guard = TerminalUiGuard::new()?;
+    let mut _terminal_ui_guard = TerminalUiGuard::new(config.mouse)?;
 
     let vw = terminal_width();
     let vh = terminal_height();

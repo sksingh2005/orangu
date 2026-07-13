@@ -44,6 +44,11 @@ pub struct ClientAppConfiguration {
     pub platform: String,
     pub workspaces: WorkspacePlacement,
     pub drop_down: bool,
+    /// Enable mouse capture in the terminal. When `true` (default), the TUI
+    /// handles mouse scroll (for output scrolling) and double-click (to toggle
+    /// collapsibles). Hold **Shift** while clicking/dragging to do native text
+    /// selection and copy. Set to `false` to disable all mouse handling.
+    pub mouse: bool,
     pub semantic_budget_tokens: usize,
 }
 
@@ -203,6 +208,10 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
         .get("drop_down")
         .map(|value| parse_feedback_bool(value))
         .unwrap_or_else(default_drop_down);
+    let mouse = client
+        .get("mouse")
+        .map(|value| parse_feedback_bool(value))
+        .unwrap_or(true);
     let auto_downsample_lines = parse_client_field(
         &client,
         "auto_downsample_lines",
@@ -263,6 +272,7 @@ pub fn load_client_configuration(path: &Path) -> Result<ClientAppConfiguration> 
         platform: client.get("platform").cloned().unwrap_or_default(),
         workspaces,
         drop_down,
+        mouse,
     })
 }
 

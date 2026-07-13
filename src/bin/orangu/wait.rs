@@ -215,6 +215,12 @@ async fn drive_handle(
                                     arguments: serde_json::to_string(&tc.function.arguments).unwrap_or_default(),
                                 }));
                             }
+                            // Keep the counter accurate so the invariant
+                            // `rendered == pushed` holds even at the end.
+                            #[allow(unused_assignments)]
+                            {
+                                rendered_native_tool_calls = final_state.native_tool_calls.len();
+                            }
                         }
 
                         if let Some(pending_line) =

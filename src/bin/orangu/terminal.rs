@@ -52,34 +52,50 @@ use std::io::Stdout;
 
 pub(crate) struct TerminalUiGuard {
     pub terminal: Terminal<CrosstermBackend<Stdout>>,
+    mouse_capture: bool,
 }
 
 impl TerminalUiGuard {
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new(mouse_capture: bool) -> Result<Self> {
         enable_raw_mode()?;
-        execute!(
-            std::io::stdout(),
-            crossterm::event::EnableMouseCapture,
-            EnterAlternateScreen
-        )?;
+        if mouse_capture {
+            execute!(
+                std::io::stdout(),
+                crossterm::event::EnableMouseCapture,
+                EnterAlternateScreen
+            )?;
+        } else {
+            execute!(std::io::stdout(), EnterAlternateScreen)?;
+        }
         let _ = execute!(
             std::io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
         let backend = CrosstermBackend::new(std::io::stdout());
         let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            mouse_capture,
+        })
     }
 }
 
 impl Drop for TerminalUiGuard {
     fn drop(&mut self) {
-        let _ = execute!(
-            std::io::stdout(),
-            crossterm::event::DisableMouseCapture,
-            PopKeyboardEnhancementFlags,
-            LeaveAlternateScreen
-        );
+        if self.mouse_capture {
+            let _ = execute!(
+                std::io::stdout(),
+                crossterm::event::DisableMouseCapture,
+                PopKeyboardEnhancementFlags,
+                LeaveAlternateScreen
+            );
+        } else {
+            let _ = execute!(
+                std::io::stdout(),
+                PopKeyboardEnhancementFlags,
+                LeaveAlternateScreen
+            );
+        }
         let _ = disable_raw_mode();
     }
 }
