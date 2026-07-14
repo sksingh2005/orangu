@@ -29,9 +29,9 @@
 //! `VulkanBackend`'s much larger surface — GPU-resident attention, RoPE,
 //! per-head RMSNorm, fused whole-layer submissions, GPU-side argmax
 //! sampling, a disk pipeline cache — took real iteration against actual
-//! AMD hardware to get right (see `doc/SERVER_ROADMAP.md`'s "Long prompts
-//! can hang the GPU" entry for one example of a bug only real hardware
-//! testing surfaced); none of that exists here, and none of it can be
+//! AMD hardware to get right (long prompts, for example, were found to
+//! reliably hang the GPU driver on real hardware — a bug only real
+//! hardware testing surfaced); none of that exists here, and none of it can be
 //! verified on a machine with no NVIDIA GPU. `CudaBackend::as_vulkan`
 //! correctly returns `None` (the trait's default), so callers fall back to
 //! the ordinary step-by-step path exactly like `CpuBackend` already does.

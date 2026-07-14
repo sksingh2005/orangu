@@ -44,7 +44,7 @@
 //! **Not implemented**: MoE gemma4 layers (`ffn_gate_inp` present) — this
 //! module loads the always-present dense FFN branch only, and refuses to
 //! load a model whose layers also have MoE tensors, rather than silently
-//! ignoring the routed-expert path. See `doc/SERVER_ROADMAP.md`.
+//! ignoring the routed-expert path.
 
 use anyhow::{Context, Result, bail};
 use std::sync::Arc;
@@ -280,7 +280,7 @@ impl GemmaModel {
 
             if loaded.has_tensor(&format!("blk.{i}.ffn_gate_inp.weight")) {
                 bail!(
-                    "blk.{i} has MoE expert tensors (ffn_gate_inp) — MoE gemma layers are not yet supported by orangu-server; see doc/SERVER_ROADMAP.md"
+                    "blk.{i} has MoE expert tensors (ffn_gate_inp) — MoE gemma layers are not yet supported by orangu-server"
                 );
             }
 
@@ -410,9 +410,9 @@ impl GemmaModel {
     /// input projection (if this model has one), every layer, `output_norm`,
     /// `lm_head` — into one fresh command encoder, *not yet submitted*,
     /// returning the encoder plus the GPU-resident, not-yet-read-back
-    /// `[n_vocab]` logits buffer. `doc/SERVER_OPUS.md` Section 9's Steps 5
-    /// and 11: this is every layer's `record_fused_layer` plus `record_
-    /// output_norm`/`record_full_matmul` chained into one command encoder
+    /// `[n_vocab]` logits buffer. This is every layer's `record_fused_layer`
+    /// plus `record_output_norm`/`record_full_matmul` chained into one
+    /// command encoder
     /// with the residual stream threaded GPU-resident from one layer
     /// straight into the next, so nothing bounces back to the CPU between
     /// layers.
@@ -423,8 +423,7 @@ impl GemmaModel {
     /// forward_maybe_sampling`'s GPU-argmax fast path instead appends one
     /// more dispatch (`VulkanBackend::record_argmax_sample`) *before*
     /// submitting, and reads back a single token id instead of the whole
-    /// vector — `doc/SERVER_OPUS.md` Section 9's Step 11's GPU-sampling
-    /// follow-up.
+    /// vector.
     ///
     /// `x` is the caller's already-computed, already-`sqrt(n_embd)`-scaled
     /// embedding row for `token` (shared prep work `Self::forward` also
@@ -855,9 +854,9 @@ impl ModelForward for GemmaModel {
         let n_embd = self.config.n_embd;
         let eps = self.rms_eps();
 
-        // `doc/SERVER_OPUS.md` Section 9's Step 0: count GPU submissions
-        // per token rather than inferring round-trip count from tok/s —
-        // set `ORANGU_GPU_TRACE=1` to log it. Only reads an env var (via a
+        // Counts GPU submissions per token rather than inferring
+        // round-trip count from tok/s — set `ORANGU_GPU_TRACE=1` to log
+        // it. Only reads an env var (via a
         // cached `OnceLock`, not a fresh lookup every call) and an atomic
         // load/subtract when a Vulkan backend is in use; free otherwise.
         static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -885,18 +884,18 @@ impl ModelForward for GemmaModel {
         // Per-layer embeddings (PLE), if this model has them: the decode/
         // GPU-fused branch folds the whole projection into the same
         // encoder/submission as the rest of the forward pass
-        // (`VulkanBackend::record_ple_projection`, `doc/SERVER_OPUS.md`
-        // Section 9's Step 11) instead of calling `compute_per_layer_inputs`
+        // (`VulkanBackend::record_ple_projection`) instead of calling
+        // `compute_per_layer_inputs`
         // — a separate, CPU-orchestrated submit-and-wait — the way `Self::
         // run_layers_cpu` (used by the CPU-orchestrated `else` branch below,
         // and by `Self::forward_hidden_states`) still does internally.
         let mut logits = if n_tokens == 1
             && let Some(vulkan) = self.backend.as_vulkan()
         {
-            // `doc/SERVER_OPUS.md` Section 9's Steps 5 and 11 — see
-            // `Self::record_decode_forward`'s own doc comment for what's
-            // recorded; down from ~37 submissions/token (Step 4) to ~2
-            // (Step 5) to **1** (Step 11's PLE fusion). Prefill (`n_tokens
+            // See `Self::record_decode_forward`'s own doc comment for
+            // what's recorded; GPU submissions per decode token dropped
+            // from ~37 to ~2 with whole-layer fusion, then to **1** with
+            // PLE fusion folded into the same encoder. Prefill (`n_tokens
             // > 1`) and the CPU backend still take the fully-CPU-
             // orchestrated `else` branch below.
             let (encoder, logits_buf) =
@@ -924,12 +923,11 @@ impl ModelForward for GemmaModel {
         Ok(logits)
     }
 
-    /// `doc/SERVER_OPUS.md` Section 9's Step 11's GPU-sampling follow-up.
     /// Takes the GPU-argmax fast path only when every one of its
     /// preconditions holds: `tokens.len() == 1` (`Self::record_decode_
     /// forward` is decode-shaped only), a `Vulkan` backend is in use with
     /// `ORANGU_GPU_SAMPLE=1` set (`VulkanBackend::gpu_sample` — **off by
-    /// default**, unlike every other Step 9/11 GPU-fused change: this one
+    /// default**, unlike this backend's other GPU-fused changes: this one
     /// measured a real *regression*, not just an unproven win — see that
     /// method's own doc comment for the numbers and the likely cause), the
     /// caller actually wants greedy sampling (`greedy_sample.is_some()`),
@@ -993,9 +991,8 @@ impl ModelForward for GemmaModel {
             .map(ForwardOutcome::Logits)
     }
 
-    /// `doc/SERVER_OPUS.md` Section 9's Step 11's cross-sequence GEMM
-    /// batching item — see [`ModelForward::forward_batch_decode`]'s own
-    /// doc comment for the shape of what this does and why. Structurally
+    /// See [`ModelForward::forward_batch_decode`]'s own doc comment for
+    /// the shape of what this does and why. Structurally
     /// this mirrors `Self::forward`'s CPU-orchestrated `else` branch
     /// almost exactly — same per-layer sequence of matmul/norm/RoPE/
     /// attention/residual steps, same math — except every place that
@@ -1364,9 +1361,9 @@ impl GemmaModel {
     /// `[n_tokens, n_layer, per_layer]` row-major, same shape and content
     /// `compute_per_layer_inputs` itself would produce this piece of. Split
     /// out so the decode (`n_tokens == 1`) GPU-fused path
-    /// (`VulkanBackend::record_ple_projection`, `doc/SERVER_OPUS.md`
-    /// Section 9's Step 11) can reuse it too, without also running Steps 2
-    /// and 3 on the CPU (those move to the GPU there instead) — it's a
+    /// (`VulkanBackend::record_ple_projection`) can reuse it too, without
+    /// also running Steps 2 and 3 on the CPU (those move to the GPU there
+    /// instead) — it's a
     /// tiny embedding-table lookup, cheap enough to stay a plain CPU
     /// gather + upload rather than needing its own GPU kernel.
     fn gather_per_layer_tok_embd(&self, tokens: &[u32], n_tokens: usize) -> Vec<f32> {
@@ -1459,8 +1456,8 @@ mod real_model_tests {
     /// "The capital of France is" (BOS=2 prepended, matching real
     /// llama.cpp's `/tokenize?add_special=true` and `/completion` default —
     /// this test feeds token IDs directly, sidestepping the separate,
-    /// already-known SentencePiece tokenizer gap, see
-    /// `doc/SERVER_ROADMAP.md`), the model should predict " Paris" (token
+    /// already-known SentencePiece tokenizer gap), the model should
+    /// predict " Paris" (token
     /// 9079) as the single dominant next token, exactly as real llama.cpp's
     /// `/completion` (`n_probs`) does. This is what caught a real bug: the
     /// donor layer for Gemma4's shared-KV layers must be chosen per the
@@ -1580,8 +1577,7 @@ mod real_model_tests {
         );
     }
 
-    /// `doc/SERVER_OPUS.md` Section 9's Step 11's cross-sequence GEMM
-    /// batching item — cross-checks `ModelForward::forward_batch_decode`
+    /// Cross-checks `ModelForward::forward_batch_decode`
     /// (multiple independent sequences' decode steps fused into one call)
     /// against running `forward` independently for each sequence, on the
     /// real `E2B` model. Two separate, freshly prefilled sets of caches

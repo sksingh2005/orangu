@@ -119,8 +119,8 @@ fn get_scale_min_k4(base: u32, j: u32) -> vec2<u32> {
 /// all 64 threads divide up `in_dim` elements the same grid-stride way a
 /// single-row design would (`k = local, local + 64, local + 128, ...`), but
 /// at each `k` read `x[x_base + k]` *once* and reuse it across all
-/// `REDUCE_N_ROWS` rows' dot products — `doc/SERVER_OPUS.md` Section 9's
-/// Step 7's "multiple output rows per thread." A standard workgroup tree
+/// `REDUCE_N_ROWS` rows' dot products — "multiple output rows per thread."
+/// A standard workgroup tree
 /// reduction (`partial_sums`, now `REDUCE_N_ROWS` independent reductions
 /// packed into one flat array, `partial_sums[row * 64 + lane]`) combines
 /// each row's 64 partial sums into that row's final output, same as
@@ -258,8 +258,7 @@ fn main(
 /// This never reuses activations across output rows — every one of
 /// `out_dim` per-row workgroups independently re-reads the entire
 /// activation matrix from global memory — which is exactly what `Self::
-/// shader_source_coop_tiled` (`doc/SERVER_OPUS.md` Section 9's Step 10,
-/// `ORANGU_TILED_PREFILL=1`) fixes. That kernel is correctness-verified
+/// shader_source_coop_tiled` (`ORANGU_TILED_PREFILL=1`) fixes. That kernel is correctness-verified
 /// (`VulkanBackend`'s `matmul_matches_cpu_backend_cooperative_path_*`
 /// tests, run with the env var set) but its real end-to-end prefill
 /// throughput is **unmeasured** — this project's own non-negotiable
@@ -270,7 +269,7 @@ fn main(
 /// ring-timeout/GPU-reset events on this laptop's shared GPU (also used
 /// by the live desktop compositor) — a pre-existing hardware/driver
 /// limit, confirmed to affect this unchanged kernel too, not something
-/// Step 10 introduced, but one that made further large-prompt A/B
+/// this tiled kernel introduced, but one that made further large-prompt A/B
 /// testing unsafe to keep pursuing. This kernel stays the default;
 /// `shader_source_coop_tiled` ships opt-in, pending a real measurement
 /// once this can be tested without risking the live desktop session.
@@ -325,14 +324,14 @@ fn main(
 "#;
 
 /// Row-tile / token-tile output-tiling dimensions for `MAIN_COOP_TILED_
-/// SUFFIX`'s prefill GEMM (`doc/SERVER_OPUS.md` Section 9's Step 10,
-/// `ORANGU_TILED_PREFILL=1`) — templated into the WGSL text (`%TILE_ROWS%`/
+/// SUFFIX`'s prefill GEMM (`ORANGU_TILED_PREFILL=1`) — templated into the WGSL text (`%TILE_ROWS%`/
 /// `%TILE_TOKENS%`/`%CHUNK%`, `shader_source_coop_tiled`) rather than
 /// duplicated as separate literals in the shader and in `VulkanBackend::
-/// build_op_resources`'s dispatch-count math. `REDUCE_N_ROWS` (Step 7) *is*
+/// build_op_resources`'s dispatch-count math. `REDUCE_N_ROWS` (the
+/// multi-row-per-workgroup reduce kernel above) *is*
 /// duplicated that way — a hand-kept-in-sync literal in both places — and
-/// that exact drift is what caused Step 8's dispatch-count bug (`doc/
-/// SERVER_ROADMAP.md`'s Step 8 entry): one formula got updated for a new
+/// that exact drift is what caused a real dispatch-count bug found while
+/// adding the packed-dot kernel: one formula got updated for a new
 /// kernel, the other didn't. `VulkanBackend` imports these same three
 /// constants for its own dispatch math instead of re-declaring the numbers,
 /// closing off that failure mode structurally rather than just documenting
@@ -796,8 +795,8 @@ pub fn shader_source_reduce(ggml_type: u32) -> Option<String> {
     Some(format!("{PRELUDE}\n{middle}\n{MAIN_REDUCE_SUFFIX}"))
 }
 
-/// `doc/SERVER_OPUS.md` Section 9's Step 8, Variant A, `Q4_K` only (`E2B`'s
-/// default weight type — the doc's own "start with one type" guidance).
+/// `Q4_K` only (`E2B`'s
+/// default weight type — rolled out one type first, deliberately).
 /// Dequantizes weight elements *in pairs* (`dequant_pair_f16`, a `Q4_K`-
 /// specific restatement of `Q4_K_COOP_MIDDLE`'s `dequant_element` that
 /// also skips the redundant `get_scale_min_k4` lookup a pair's two
@@ -912,7 +911,7 @@ fn main(
     format!("enable f16;\n{PRELUDE}\n{MIDDLE}\n{SUFFIX}")
 }
 
-/// `doc/SERVER_OPUS.md`'s Step 12 (wide vectorized weight loads). Unlike
+/// Wide vectorized weight loads. Unlike
 /// every other kernel in this file, `weights` is bound as
 /// `array<vec4<u32>>` (16-byte elements) instead of `array<u32>`, so this
 /// needs its own prelude (`PRELUDE_VEC4` below) rather than reusing the
@@ -1150,8 +1149,8 @@ fn dequant_element(byte_offset: u32, k: u32) -> f32 {
 /// loads in **one** `vec4` read (`weights[vec4_base]`) instead of the
 /// byte-wise kernel's up to 9 separate `read_u8` calls (2 for `d`, 2 for
 /// `dmin`, up to 5 across both `get_scale_min_k4` calls one element
-/// needs) — this is where this type's real, measured ~17% win (see
-/// `doc/SERVER_OPUS.md`'s Step 12 entry) comes from. `qs` (the 128-byte
+/// needs) — this is where this type's real, measured ~11-13% throughput
+/// win comes from. `qs` (the 128-byte
 /// nibble region) stays one word-extraction per queried byte (`qs_byte`) —
 /// same granularity `read_u8` already had there, just `vec4`-typed.
 /// Otherwise mirrors `Q4_K_COOP_MIDDLE`'s index math line-for-line.
@@ -1307,7 +1306,7 @@ fn dequant_element(byte_offset: u32, k: u32) -> f32 {
 "#;
 
 /// The complete, compile-ready WGSL source for `ggml_type`'s wide-load
-/// reduce pipeline (`doc/SERVER_OPUS.md`'s Step 12), or `None` if this
+/// reduce pipeline, or `None` if this
 /// backend has no wide-load kernel for it — same type coverage as
 /// [`shader_source_reduce`]. Reuses `MAIN_REDUCE_SUFFIX` verbatim (see
 /// `PRELUDE_VEC4`'s own doc comment for why every `*_WIDE_MIDDLE`'s
@@ -1328,12 +1327,12 @@ pub fn shader_source_reduce_wide_load(ggml_type: u32) -> Option<String> {
     Some(format!("{PRELUDE_VEC4}\n{middle}\n{MAIN_REDUCE_SUFFIX}"))
 }
 
-/// `doc/SERVER_OPUS.md`'s Step 12, item 5: wide loads (this file's
-/// `PRELUDE_VEC4`/`Q4_K_WIDE_MIDDLE`) combined with Step 8's packed-`f16`
+/// Wide loads (this file's
+/// `PRELUDE_VEC4`/`Q4_K_WIDE_MIDDLE`) combined with the packed-`f16`
 /// pairwise dot (`shader_source_reduce_q4k_packed_f16`'s own `dequant_
-/// pair_f16`) — the two are complementary (one fixes memory bandwidth, one
-/// fixes ALU throughput), the pair the doc's original ~1.8–2.8× projection
-/// was actually about. `Q4_K`-only, like Step 8 itself (no other type has
+/// pair_f16`) — the two are complementary in principle (one fixes memory
+/// bandwidth, one fixes ALU throughput). `Q4_K`-only, like the packed-dot
+/// kernel itself (no other type has
 /// a packed-`f16` kernel to combine with). `dequant_pair_f16` below is a
 /// direct transcription of the byte-wise kernel's own — same "`k` must be
 /// even, `k`/`k+1` always share one nibble half" invariant, same math —
@@ -1345,8 +1344,8 @@ pub fn shader_source_reduce_wide_load(ggml_type: u32) -> Option<String> {
 /// `byte_offset` — deliberately *not* attempting `REDUCE_N_ROWS` batching
 /// on top of this (a 4-row-batched *and* pair-packed kernel is a much
 /// bigger, more error-prone rewrite for an increment not yet shown to be
-/// worth it — see `doc/SERVER_OPUS.md`'s Step 12 entry for why `REDUCE_
-/// N_ROWS` batching alone turned out close to a wash for wide loads, which
+/// worth it — `REDUCE_N_ROWS` batching alone turned out close to a wash
+/// for wide loads, which
 /// argues against assuming it would help here either without measuring).
 ///
 /// **Correctness-verified, but a real, measured regression relative to
@@ -1481,8 +1480,7 @@ pub fn shader_source_coop(ggml_type: u32) -> Option<String> {
 /// The opt-in (`ORANGU_TILED_PREFILL=1`) tiled-GEMM alternative to
 /// [`shader_source_coop`] — see `MAIN_COOP_TILED_SUFFIX`'s own doc comment
 /// for the design, and `MAIN_COOP_SUFFIX`'s for why this isn't the default
-/// yet despite being correctness-verified (`doc/SERVER_OPUS.md` Section 9's
-/// Step 10).
+/// yet despite being correctness-verified.
 pub fn shader_source_coop_tiled(ggml_type: u32) -> Option<String> {
     let middle = match ggml_type {
         t if t == GGML_TYPE_F32 => F32_COOP_MIDDLE,
@@ -1668,8 +1666,7 @@ pub fn shader_source_rmsnorm() -> String {
 
 /// GPU-resident causal attention for a *single* query token (decode,
 /// `n_tokens == 1`) against a GPU-resident KV cache — one workgroup per
-/// query head, 64 threads. `doc/SERVER_OPUS.md` Section 9's Step 9:
-/// online-softmax, **tiled** over the KV sequence in chunks of 64
+/// query head, 64 threads. Online-softmax, **tiled** over the KV sequence in chunks of 64
 /// positions (`TILE`, matching the workgroup width) rather than the old
 /// design's two full passes over every candidate position (a max pass,
 /// then a normalize-and-store pass, each independently recomputing every
@@ -1870,7 +1867,7 @@ fn main(
 
 /// `kv_f16` selects whether `k_cache`/`v_cache` are bound as `array<f16>`
 /// (the KV mirror's storage type when the adapter supports native WGSL
-/// `f16` — `doc/SERVER_OPUS.md` Section 9's Step 6) or `array<f32>` (the
+/// `f16`) or `array<f32>` (the
 /// original, always-available path). Every read of either array already
 /// goes through an `f32(...)` widening cast (a no-op when the array is
 /// already `f32`), so the score/softmax/weighted-sum math itself is
@@ -1884,7 +1881,7 @@ pub fn shader_source_attention(kv_f16: bool) -> String {
 
 /// Casts `cm.len` elements of a freshly RoPE'd/normed `f32` key or value
 /// row (`csrc`) into the `f16`-stored KV mirror (`cdst`) at element offset
-/// `cm.offset` — `doc/SERVER_OPUS.md` Section 9's Step 6, only ever built
+/// `cm.offset` — only ever built
 /// when the adapter supports native WGSL `f16` (`VulkanBackend::kv_f16`).
 /// Shares `elem3_bind_group_layout`'s three-binding shape (read-only
 /// source, read-write destination, uniform meta) with `rope_pipeline`/
@@ -2118,8 +2115,7 @@ pub fn shader_source_perhead_rmsnorm_weightless() -> String {
     PERHEAD_RMSNORM_WEIGHTLESS_SHADER.to_string()
 }
 
-/// `doc/SERVER_OPUS.md` Section 9's Step 11's GPU-sampling follow-up:
-/// greedy (argmax) decode with repeat penalty, entirely on-GPU, so a
+/// Greedy (argmax) decode with repeat penalty, entirely on-GPU, so a
 /// decode step that's going to sample greedily anyway never has to read
 /// back the full `[n_vocab]` logits vector — just the one winning token
 /// id (4 bytes instead of, for `E2B`'s 262144-entry vocabulary, ~1 MB).

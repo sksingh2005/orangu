@@ -53,7 +53,7 @@
 //! gpt2/gemma4 (`tokenizer.ggml.pre`, e.g. `"llama3"` vs `"deepseek-
 //! coder"` split text slightly differently around digits/whitespace). One
 //! reasonable default pre-tokenizer regex (close to GPT-2's own) is used
-//! for every `"gpt2"`-model vocab; see `doc/SERVER_ROADMAP.md`.
+//! for every `"gpt2"`-model vocab.
 
 use anyhow::{Context, Result, anyhow};
 use orangu::gguf::{GgufFile, GgufValue};

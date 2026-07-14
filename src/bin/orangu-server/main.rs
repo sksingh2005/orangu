@@ -14,7 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! `orangu-server <model>`: loads a GGUF model and serves a llama.cpp-
-//! compatible HTTP API. See `doc/SERVER.md`.
+//! compatible HTTP API.
 
 mod config;
 mod engine;
@@ -296,15 +296,13 @@ fn prepare(args: Args) -> Result<Prepared> {
     };
 
     let slots = SlotPool::new(conf.slots);
-    // `doc/SERVER_OPUS.md` Section 9's Step 11's cross-sequence GEMM
-    // batching item — **off by default**, unlike every other Step 9/11
-    // GPU-fused change: a real, reproducible concurrent-load measurement
-    // (`ORANGU_BATCH_DECODE=1` vs. without, same `slots` count, 4
-    // concurrent 100-token generations) showed it ~60% *slower*
-    // (74–78s vs. 48.4–48.5s wall time), not faster — see `engine::
-    // generate::Engine::batch_coordinator`'s own doc comment for the
-    // likely cause. Only built at all when `slots > 1` (nothing to batch
-    // across otherwise) *and* the env var is set.
+    // Cross-sequence GEMM batching, off by default: a real, reproducible
+    // concurrent-load measurement (`ORANGU_BATCH_DECODE=1` vs. without,
+    // same `slots` count, 4 concurrent 100-token generations) showed it
+    // ~60% *slower* (74–78s vs. 48.4–48.5s wall time), not faster — see
+    // `engine::generate::Engine::batch_coordinator`'s own doc comment for
+    // the likely cause. Only built at all when `slots > 1` (nothing to
+    // batch across otherwise) *and* the env var is set.
     let batch_coordinator = (conf.slots > 1 && std::env::var_os("ORANGU_BATCH_DECODE").is_some())
         .then(|| engine::batch::BatchCoordinator::new(slots.clone()));
 

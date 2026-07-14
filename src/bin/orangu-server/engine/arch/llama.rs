@@ -25,7 +25,7 @@
 //! memory close to the file's own size rather than the ~4x an eager,
 //! fully-dequantized-to-`f32` approach costs — the difference between a
 //! large (tens-of-billions-of-parameters) model fitting in RAM at all or
-//! not, see `doc/SERVER_ROADMAP.md`.
+//! not.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;

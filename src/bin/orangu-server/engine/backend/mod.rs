@@ -28,8 +28,7 @@
 //! library at *build* time, see that module's own doc comment for why).
 //! `CudaBackend`/`OpenClBackend`/`RocmBackend` are each a real but
 //! smaller-scoped `matmul`-only implementation — see their module docs for
-//! exactly what's ported and what isn't, and `doc/SERVER_ROADMAP.md` for
-//! the honest state of each.
+//! exactly what's ported and what isn't.
 //!
 //! Earlier revisions of this file claimed AMD GPUs are reached only through
 //! `VulkanBackend` (Mesa/RADV implements Vulkan on AMD hardware directly)

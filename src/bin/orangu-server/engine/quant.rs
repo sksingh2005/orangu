@@ -20,10 +20,10 @@
 //! reads.
 //!
 //! Only the types actually shipped by the overwhelming majority of GGUF
-//! releases in circulation are supported: `F32`, `F16`, `Q8_0`, `Q4_0`,
-//! `Q4_K`, `Q6_K`. Anything else fails with a clear "not yet supported"
-//! error naming the type, rather than silently misreading the bytes — see
-//! `doc/SERVER_ROADMAP.md` for what's missing.
+//! releases in circulation are supported: `F32`, `F16`, `BF16`, `Q4_0`,
+//! `Q5_0`, `Q8_0`, `Q4_K`, `Q5_K`, `Q6_K`. Anything else fails with a
+//! clear "not yet supported" error naming the type, rather than silently
+//! misreading the bytes.
 
 use anyhow::{Result, bail};
 use half::f16;
@@ -71,7 +71,7 @@ fn block_layout(ggml_type: u32) -> Option<(usize, usize)> {
 pub fn tensor_byte_size(ggml_type: u32, element_count: u64) -> Result<u64> {
     let Some((block_bytes, block_elems)) = block_layout(ggml_type) else {
         bail!(
-            "tensor type {} is not yet supported by orangu-server (see doc/SERVER_ROADMAP.md)",
+            "tensor type {} is not yet supported by orangu-server",
             ggml_type_name(ggml_type)
         );
     };
@@ -114,7 +114,7 @@ pub fn dequantize(ggml_type: u32, bytes: &[u8], element_count: usize) -> Result<
         GGML_TYPE_Q5_K => Ok(dequantize_q5_k(bytes, element_count)),
         GGML_TYPE_Q6_K => Ok(dequantize_q6_k(bytes, element_count)),
         _ => bail!(
-            "tensor type {} is not yet supported by orangu-server (see doc/SERVER_ROADMAP.md)",
+            "tensor type {} is not yet supported by orangu-server",
             ggml_type_name(ggml_type)
         ),
     }

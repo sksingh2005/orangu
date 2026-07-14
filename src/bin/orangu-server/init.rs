@@ -195,7 +195,7 @@ impl Validator for OptionCompleter {}
 impl Helper for OptionCompleter {}
 
 /// Prompts for the optional `model` key — only consulted in `--daemon`
-/// mode, see `doc/SERVER.md` — TAB-completing over the models already
+/// mode — TAB-completing over the models already
 /// installed under `models_dir`: every `NR` *and* every `MODEL` label,
 /// both in exactly the order `orangu-gguf list` prints them (both call the
 /// same `group_models`, which sorts by label — nothing here re-sorts), and
@@ -245,7 +245,7 @@ fn model_completion_options(groups: &[orangu::model_spec::ModelGroup]) -> Vec<St
 /// `rustyline`'s `CompletionType::List`) and defaulting to [`Role::All`] on
 /// an empty entry. `prompt` is the exact readline prompt text to show —
 /// callers word it for their own context: `run_init`'s wizard (`role`'s
-/// only consulted in `--daemon` mode, see `doc/SERVER.md`) versus
+/// only consulted in `--daemon` mode) versus
 /// `main.rs`'s plain interactive startup (`select_role_interactively`,
 /// where the chosen role takes effect immediately for this run). Unlike
 /// `model`'s free-form spec, `role` has a fixed, small set of valid

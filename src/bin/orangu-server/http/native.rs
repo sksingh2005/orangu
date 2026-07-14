@@ -17,7 +17,7 @@
 //! `/completion`, `/tokenize`, `/detokenize`, `/embedding`,
 //! `/apply-template`. Response shapes approximate llama.cpp's own —
 //! close enough for `orangu`'s `/information` probe and `curl` inspection,
-//! not a byte-for-byte schema match; see `doc/SERVER_ROADMAP.md`.
+//! not a byte-for-byte schema match.
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};

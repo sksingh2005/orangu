@@ -13,9 +13,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! One implementor per architecture family, so a second family (Gemma's
-//! soft-capping/sliding-window variant — see `doc/SERVER_ROADMAP.md`) is
-//! additive later rather than a rewrite of this one.
+//! One implementor per architecture family — `llama` (GQA/RoPE/RMSNorm/
+//! SwiGLU), `gemma` (soft-capping/sliding-window/GEGLU), and `qwen35moe`
+//! (mixture-of-experts) — so adding a family is additive rather than a
+//! rewrite of the others.
 
 pub mod gemma;
 pub mod llama;
@@ -26,8 +27,7 @@ use crate::engine::loader::ModelConfig;
 use anyhow::Result;
 
 /// Repeat-penalty state a caller passes to [`ModelForward::forward_maybe_
-/// sampling`] when it wants greedy sampling done for it — `doc/
-/// SERVER_OPUS.md` Section 9's Step 11's GPU-sampling follow-up.
+/// sampling`] when it wants greedy sampling done for it.
 /// `recent_tokens` must already be trimmed to the sampler's own
 /// `repeat_last_n` window (mirroring `engine::sampling`'s own
 /// `apply_repeat_penalty`, which does the same trim before applying the
@@ -50,9 +50,8 @@ pub enum ForwardOutcome {
 }
 
 /// One sequence's pending single-token decode step, as an element of a
-/// cross-sequence batch — `engine::batch::BatchCoordinator`, `doc/
-/// SERVER_OPUS.md` Section 9's Step 11's cross-sequence GEMM batching
-/// item. Each sequence keeps its own `cache`/`start_pos`/`greedy_sample`
+/// cross-sequence batch (see `engine::batch::BatchCoordinator`).
+/// Each sequence keeps its own `cache`/`start_pos`/`greedy_sample`
 /// (attention, RoPE, and the KV-cache write all stay per-sequence even
 /// when the *matmul* steps in between are fused across every item in the
 /// batch — see [`ModelForward::forward_batch_decode`]'s own doc comment).
@@ -78,13 +77,13 @@ pub trait ModelForward: Send + Sync {
     fn forward(&self, cache: &mut KvCache, tokens: &[u32], start_pos: usize) -> Result<Vec<f32>>;
 
     /// Like `forward`, but lets the implementor sample the next token
-    /// itself when `greedy_sample` is `Some` — skipping the full `[n_vocab]`
-    /// logits readback entirely when it can (`doc/SERVER_OPUS.md` Section
-    /// 9's Step 11). The default implementation always falls back to
-    /// `forward` plus `ForwardOutcome::Logits`, so every architecture and
-    /// backend combination keeps working correctly with no override
-    /// needed; only `GemmaModel`'s Vulkan decode path currently overrides
-    /// this to fuse the argmax into the same GPU submission.
+    /// itself when `greedy_sample` is `Some` — skipping the full
+    /// `[n_vocab]` logits readback entirely when it can. The default
+    /// implementation always falls back to `forward` plus
+    /// `ForwardOutcome::Logits`, so every architecture and backend
+    /// combination keeps working correctly with no override needed; only
+    /// `GemmaModel`'s Vulkan decode path currently overrides this to fuse
+    /// the argmax into the same GPU submission.
     fn forward_maybe_sampling(
         &self,
         cache: &mut KvCache,
@@ -116,8 +115,7 @@ pub trait ModelForward: Send + Sync {
     }
 
     /// Runs a *cross-sequence batch* of independent single-token decode
-    /// steps — `doc/SERVER_OPUS.md` Section 9's Step 11's cross-sequence
-    /// GEMM batching item, driven by `engine::batch::BatchCoordinator`.
+    /// steps, driven by `engine::batch::BatchCoordinator`.
     /// Each `items[i]` is one sequence's own pending decode step (its own
     /// KV cache, position, token); the *matmul* steps every layer needs
     /// (QKV, `wo`, FFN, PLE, `lm_head` — the weight-bandwidth-heavy ones,

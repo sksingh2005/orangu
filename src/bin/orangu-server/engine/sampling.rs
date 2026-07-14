@@ -83,8 +83,8 @@ impl Sampler {
 
     /// `true` iff `sample` would take its argmax fast path (`temperature
     /// <= 0.0`) — the only case `engine::arch::ModelForward::forward_
-    /// maybe_sampling`'s GPU fast path can replicate (`doc/SERVER_OPUS.md`
-    /// Section 9's Step 11); top-k/top-p/min-p stay CPU-only.
+    /// maybe_sampling`'s GPU fast path can replicate; top-k/top-p/min-p
+    /// stay CPU-only.
     pub fn is_greedy(&self) -> bool {
         self.params.temperature <= 0.0
     }

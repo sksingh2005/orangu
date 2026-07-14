@@ -13,8 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! Cross-sequence GEMM batching coordinator — `doc/SERVER_OPUS.md` Section
-//! 9's Step 11's cross-sequence GEMM batching item. `engine::generate::run`
+//! Cross-sequence GEMM batching coordinator. `engine::generate::run`
 //! (one blocking-pool thread per concurrently-generating request) submits
 //! each decode step here instead of calling `ModelForward::forward_maybe_
 //! sampling` directly; this collects together whichever requests submit

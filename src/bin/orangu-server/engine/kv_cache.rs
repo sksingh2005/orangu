@@ -17,13 +17,12 @@
 //! layer for keys and for values, appended to one token at a time as a
 //! sequence is prefilled/decoded. Each request/slot owns one `KvCache` —
 //! there is no cross-sequence sharing (no prompt-prefix reuse) in this
-//! build; see `doc/SERVER_ROADMAP.md`.
+//! build.
 
 /// Converts a slice of `f32` KV values into little-endian `f16` bytes, for
-/// `LayerCache::sync_gpu`'s `f16` KV-mirror upload path (`doc/SERVER_OPUS
-/// .md` Section 9's Step 6). A plain per-element loop, not
-/// `bytemuck::cast_slice` — unlike the `f32` path, this genuinely
-/// *converts* values, not just reinterprets bytes.
+/// `LayerCache::sync_gpu`'s `f16` KV-mirror upload path. A plain
+/// per-element loop, not `bytemuck::cast_slice` — unlike the `f32` path,
+/// this genuinely *converts* values, not just reinterprets bytes.
 fn f32_to_f16_bytes(data: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() * 2);
     for &v in data {
@@ -64,9 +63,9 @@ struct GpuLayerCache {
     synced_len: usize,
     /// Whether `k_buf`/`v_buf` above are `f16`-typed (half the bytes of
     /// `kv_dim` per position) rather than `f32` — fixed for this mirror's
-    /// whole lifetime once [`Self::new`] decides it (`doc/SERVER_OPUS.md`
-    /// Section 9's Step 6), so [`LayerCache::sync_gpu`]'s CPU→GPU upload
-    /// path can check it without needing its own copy of the flag.
+    /// whole lifetime once [`Self::new`] decides it, so
+    /// [`LayerCache::sync_gpu`]'s CPU→GPU upload path can check it without
+    /// needing its own copy of the flag.
     kv_f16: bool,
     /// Cached attention-dispatch resources, keyed by the *calling layer's*
     /// `wq` tensor identity (`QuantMatrix::cache_key()`) — see
@@ -305,10 +304,10 @@ impl LayerCache {
     /// `KvCache` per request and never reuses one across requests) — and
     /// `sync_gpu`'s `gpu.synced_len < self.len` check means it will never
     /// try to re-upload (and so never exposes the zeroed gap) once this
-    /// advances `synced_len` to match. **If prompt-prefix reuse (`doc/
-    /// SERVER_ROADMAP.md`'s "slot save/restore") is ever built, this
-    /// becomes unsafe** — a resumed cache could need this position's real
-    /// data for a later multi-token prefill's CPU attention path, which
+    /// advances `synced_len` to match. **If prompt-prefix reuse (slot
+    /// save/restore) is ever built, this becomes unsafe** — a resumed
+    /// cache could need this position's real data for a later multi-token
+    /// prefill's CPU attention path, which
     /// would silently read zeros instead. Whoever builds that should
     /// either make this always mirror to CPU too, or make prompt-prefix
     /// continuation itself GPU-resident.

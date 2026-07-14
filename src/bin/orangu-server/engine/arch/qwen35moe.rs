@@ -279,7 +279,7 @@ impl Qwen35MoeModel {
 
             if loaded.has_tensor(&format!("blk.{i}.nextn.eh_proj.weight")) {
                 bail!(
-                    "blk.{i} has NextN/MTP tensors — speculative-decoding blocks are not yet supported by orangu-server; see doc/SERVER_ROADMAP.md"
+                    "blk.{i} has NextN/MTP tensors — speculative-decoding blocks are not yet supported by orangu-server"
                 );
             }
         }
@@ -777,8 +777,7 @@ mod real_model_tests {
     /// Run with `ORANGU_TEST_MODEL=/path/to.gguf cargo test --release --bin
     /// orangu-server qwen35moe::real_model_tests -- --ignored` (a 35B-param
     /// model — expect several minutes: this engine's scalar per-row dequant
-    /// has no hand-tuned SIMD quantized-matmul kernel, see
-    /// `doc/SERVER_ROADMAP.md`).
+    /// has no hand-tuned SIMD quantized-matmul kernel).
     #[test]
     #[ignore]
     fn qwen35moe_predicts_paris_after_capital_of_france() {

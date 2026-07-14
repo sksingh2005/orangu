@@ -27,8 +27,9 @@ use super::quant;
 
 /// Hyperparameters for a Llama-style (GQA + RoPE + RMSNorm + SwiGLU)
 /// architecture — the family covering Llama/Llama3/Qwen2/Qwen3/Mistral-
-/// shaped GGUFs. Gemma's own soft-capping/sliding-window variant is a
-/// distinct, not-yet-implemented config; see `doc/SERVER_ROADMAP.md`.
+/// shaped GGUFs. Gemma's own soft-capping/sliding-window variant reuses
+/// this same struct and layers its further hyperparameters on top (see
+/// `engine::arch::gemma`).
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
     pub architecture: String,
@@ -54,7 +55,7 @@ pub struct ModelConfig {
 /// the key being absent) falls back to `Mean` — the same unconditional
 /// behavior this engine used before `<arch>.pooling_type` was read at all,
 /// so this is additive, not a behavior change for any model already in
-/// use. See `doc/SERVER_ROADMAP.md`.
+/// use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolingType {
     Mean,
@@ -101,7 +102,7 @@ pub enum ArchFamily {
 /// embedding) input up to the DeepStack-widened width, so the "inject
 /// this layer's DeepStack slice" add is adding zero. Multimodal (image/
 /// video) input itself is out of scope, per this project's existing
-/// deferred-multimodal decision — see `doc/SERVER_ROADMAP.md`.
+/// deferred-multimodal decision.
 const LLAMA_STYLE_ARCHITECTURES: &[&str] = &["llama", "qwen2", "qwen3", "mistral", "qwen3vl"];
 /// `gemma-embedding` (e.g. `ggml-org/embeddinggemma-300M-GGUF`) is the
 /// bidirectional-attention, embeddings-only sibling of the causal
@@ -127,7 +128,7 @@ pub fn resolve_arch_family(architecture: &str) -> Result<ArchFamily> {
     }
     bail!(
         "architecture '{architecture}' is not yet supported by orangu-server \
-         (supported: {}); see doc/SERVER_ROADMAP.md",
+         (supported: {})",
         LLAMA_STYLE_ARCHITECTURES
             .iter()
             .chain(GEMMA_ARCHITECTURES)

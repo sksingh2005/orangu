@@ -18,8 +18,8 @@
 //! generations runs its own prefill+decode loop against its own KV cache on
 //! its own blocking-pool thread (`engine::generate`) — real concurrency,
 //! bounded fairly by slot count, but not llama.cpp's fused single-GEMM
-//! cross-sequence batching (a distinct performance optimization; see
-//! `doc/SERVER_ROADMAP.md`).
+//! cross-sequence batching (a distinct performance optimization —
+//! see `engine::batch::BatchCoordinator`).
 
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
@@ -59,9 +59,8 @@ impl SlotPool {
 
     /// How many slots are currently busy (prefilling or decoding) —
     /// `engine::batch::BatchCoordinator`'s hint for how many concurrent
-    /// decode steps to expect in the *current* cross-sequence batch
-    /// (`doc/SERVER_OPUS.md` Section 9's Step 11's cross-sequence GEMM
-    /// batching item). A live count, not a request-time snapshot — it can
+    /// decode steps to expect in the *current* cross-sequence batch.
+    /// A live count, not a request-time snapshot — it can
     /// briefly overestimate during a mixed prefill/decode moment (a
     /// prefilling slot is "busy" but not yet submitting decode steps),
     /// which just means a batch waits out its own timeout instead of

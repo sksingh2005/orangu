@@ -91,8 +91,8 @@ pub struct Engine {
     pub tokenizer: Arc<Tokenizer>,
     pub chat_template_source: Option<String>,
     pub slots: Arc<SlotPool>,
-    /// `doc/SERVER_OPUS.md` Section 9's Step 11's cross-sequence GEMM
-    /// batching item — `Some` only when `slots.total() > 1` *and*
+    /// The cross-sequence GEMM batching coordinator — `Some` only when
+    /// `slots.total() > 1` *and*
     /// `ORANGU_BATCH_DECODE=1` is set (`main.rs`'s own comment has the
     /// numbers); a single-slot deployment, or `slots > 1` without the env
     /// var (the default), keeps calling `ModelForward::forward_maybe_
@@ -263,8 +263,7 @@ fn run(
             finish_reason = FinishReason::Length;
             break;
         }
-        // `doc/SERVER_OPUS.md` Section 9's Step 11's GPU-sampling
-        // follow-up: when the sampler is greedy, let the model pick the
+        // When the sampler is greedy, let the model pick the
         // next token itself (a GPU-fused argmax, for backends that have
         // one) instead of always reading back the full `[n_vocab]` logits
         // vector just to immediately re-derive the same argmax on the
@@ -276,11 +275,10 @@ fn run(
         let start_pos = history.len() - 1;
 
         next = if let Some(coordinator) = batch_coordinator {
-            // `doc/SERVER_OPUS.md` Section 9's Step 11's cross-sequence
-            // GEMM batching item: submit this decode step to the shared
-            // coordinator instead of calling `forward_maybe_sampling`
-            // directly, so it can be fused with whatever other sequences
-            // submit their own next step within the same short window.
+            // Submit this decode step to the shared coordinator instead of
+            // calling `forward_maybe_sampling` directly, so it can be fused
+            // with whatever other sequences submit their own next step
+            // within the same short window.
             let request = BatchDecodeRequest {
                 cache: cache
                     .take()

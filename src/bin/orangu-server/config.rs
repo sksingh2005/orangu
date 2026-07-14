@@ -48,8 +48,7 @@ pub fn default_web() -> u16 {
 /// engine that doesn't have `--fit`/`--tools`/`--webui-mcp-proxy`/`-sm`/
 /// `--cache-reuse`/`-ctk`/`-ctv` equivalents at all: the default slot
 /// count, default sampling parameters, whether the generation endpoints
-/// are even served, and (`Review` only) reasoning suppression. See
-/// `doc/SERVER.md`.
+/// are even served, and (`Review` only) reasoning suppression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Role {
     #[default]
