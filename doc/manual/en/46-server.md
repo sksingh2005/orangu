@@ -154,8 +154,9 @@ that's the real ceiling on how much it can actually draw on.
 **`suggest`** estimates a GGUF model *size* (parameter count, not a
 specific model yet) likely to run comfortably on this machine, printed as a
 table — one row per context length, one column per quantization — sized
-against two budgets (dedicated GPU VRAM alone, and every GPU's memory
-combined):
+against two budgets: dedicated GPU VRAM alone (its table is skipped
+entirely on a machine with no dedicated GPU at all, rather than printing a
+useless 0 B budget of nothing but `-`), and every GPU's memory combined:
 
 ```sh
 orangu-server suggest

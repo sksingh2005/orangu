@@ -538,27 +538,32 @@ returns the first whose `estimate_total_vram_bytes` result (at that cell's
 context length and bits-per-weight) fits within the budget, or `None` if
 even the smallest rung (1B) doesn't (rendered as `-`).
 
-**Two budgets, two tables.** `format_suggestion` computes two separate
-budgets and prints a labeled `push_suggestion_block` for each, `"Suggested
-model size (Dedicated)"` and `"Suggested model size (Combined)"`. Both sum each
-eligible GPU's own `vram_total_bytes` — deliberately *not* reduced by
-`vram_used_bytes`, since `suggest` estimates the hardware's own capability
-(this file's module doc — "likely to run comfortably on this machine",
-picked before any model is chosen), not how much happens to be free at the
-exact moment it runs; whatever else is transiently using VRAM (a compositor,
-a browser, an already-running `llama-server`) shouldn't shrink a
-hardware-based estimate:
+**Two budgets, (up to) two tables.** `format_suggestion` computes two
+separate budgets and prints a labeled `push_suggestion_block` for each,
+`"Suggested model size (Dedicated)"` and `"Suggested model size
+(Combined)"`. Both sum each eligible GPU's own `vram_total_bytes` —
+deliberately *not* reduced by `vram_used_bytes`, since `suggest` estimates
+the hardware's own capability (this file's module doc — "likely to run
+comfortably on this machine", picked before any model is chosen), not how
+much happens to be free at the exact moment it runs; whatever else is
+transiently using VRAM (a compositor, a browser, an already-running
+`llama-server`) shouldn't shrink a hardware-based estimate:
 
 - `dedicated_vram_budget_bytes` sums every GPU `is_dedicated_for_budget`
   accepts (multiple dedicated cards add up) — `0` when there's none at
-  all, which `suggest_param_count` then correctly reports as nothing on the
-  ladder fitting.
+  all. The `Dedicated` block itself is skipped in that case
+  (`gpus.iter().any(is_dedicated_for_budget)` gates the call to
+  `push_suggestion_block`), rather than printing a `0 B` budget and a
+  table where `suggest_param_count` correctly, but uselessly, reports
+  nothing on the ladder fitting for every single cell.
 - `combined_gpu_budget_bytes` sums every GPU `is_combined_budget_eligible`
   accepts (a `Shared` GPU's `vram_total_bytes` is already the system RAM
   total via `apply_shared_memory_total`, described above) — the more
   permissive figure, representing every device this server could spread
   layers across at once. Falls back to the CPU's own `total_memory_bytes`
-  when that sum is `0` (no GPU detected at all).
+  when that sum is `0` (no GPU detected at all). Always printed, even
+  when it just reduces to system RAM alone — unlike `Dedicated`, this
+  budget is never literally `0` on a real machine.
 
 **`Unknown`-kind GPUs: a Windows-specific path.** On Linux/macOS,
 `is_dedicated_for_budget`/`is_combined_budget_eligible` only ever see

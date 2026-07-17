@@ -266,6 +266,8 @@ Two such tables are printed, sized against two different budgets:
 
 - **Dedicated**: the sum of every **dedicated** GPU's VRAM alone (multiple
   dedicated cards add up) — everything fits in real VRAM, no spillover.
+  Skipped entirely when the machine has no dedicated GPU at all — a 0 B
+  budget would only print a useless table of `-` in every cell.
 - **Combined**: the sum of *every* GPU's own reported total, dedicated and
   shared alike (a shared/integrated GPU's is already the system's total RAM,
   per the note above) — the more permissive figure, representing every

@@ -282,11 +282,17 @@ fn push_suggestion_block(out: &mut String, label: &str, budget: u64) {
 pub fn format_suggestion(cpu: &CpuInfo, gpus: &[GpuInfo]) -> String {
     let mut out = system::format_report(cpu, gpus);
 
-    push_suggestion_block(
-        &mut out,
-        "Suggested model size (Dedicated)",
-        dedicated_vram_budget_bytes(gpus),
-    );
+    // A "Dedicated" budget of 0 (no GPU with real, hard-ceiling VRAM at
+    // all) would just print an estimated budget of 0 B and a table of
+    // nothing but "-" — noise, not a suggestion — so the whole block is
+    // skipped rather than shown empty.
+    if gpus.iter().any(is_dedicated_for_budget) {
+        push_suggestion_block(
+            &mut out,
+            "Suggested model size (Dedicated)",
+            dedicated_vram_budget_bytes(gpus),
+        );
+    }
     push_suggestion_block(
         &mut out,
         "Suggested model size (Combined)",
@@ -555,5 +561,20 @@ mod tests {
             .and_then(|rest| rest.split("(Combined)").next())
             .unwrap();
         assert!(dedicated_section.contains("4.00 GiB"));
+    }
+
+    #[test]
+    fn format_suggestion_omits_the_dedicated_table_without_a_dedicated_gpu() {
+        for (case, gpus) in [
+            ("shared-only", vec![gpu(MemoryKind::Shared, Some(64 * GIB))]),
+            ("no gpus", Vec::new()),
+        ] {
+            let report = format_suggestion(&cpu(64 * GIB), &gpus);
+            assert!(
+                !report.contains("Suggested model size (Dedicated)"),
+                "unexpected Dedicated table for case: {case}"
+            );
+            assert!(report.contains("Suggested model size (Combined)"));
+        }
     }
 }
