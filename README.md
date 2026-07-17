@@ -302,8 +302,7 @@ Useful first commands:
 - [Latest manual](https://github.com/mnemosyne-systems/orangu/tree/main/doc/manual/en)
 - [Getting Started](https://github.com/mnemosyne-systems/orangu/blob/main/doc/GETTING_STARTED.md)
 - [orangu-coordinator](https://github.com/mnemosyne-systems/orangu/blob/main/doc/COORDINATOR.md) — auto-start/stop llama.cpp for machines that only run one local model at a time
-- [orangu-gguf](https://github.com/mnemosyne-systems/orangu/blob/main/doc/GGUF.md) — detect CPU/GPU hardware and inspect local GGUF model files
-- [orangu-server](https://github.com/mnemosyne-systems/orangu/blob/main/doc/SERVER.md) — a native, pure-Rust GGUF inference server with a llama.cpp-compatible API
+- [orangu-server](https://github.com/mnemosyne-systems/orangu/blob/main/doc/SERVER.md) — a native, pure-Rust GGUF inference server with a llama.cpp-compatible API, plus CPU/GPU hardware detection and local GGUF model inventory
 - [Quick start](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/03-quickstart.md)
 - [Configuration](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/20-configuration.md)
 - [Workspaces](https://github.com/mnemosyne-systems/orangu/blob/main/doc/manual/en/31-workspaces.md)

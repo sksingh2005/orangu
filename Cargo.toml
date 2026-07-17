@@ -15,10 +15,6 @@ name = "orangu-coordinator"
 path = "src/bin/orangu-coordinator/main.rs"
 
 [[bin]]
-name = "orangu-gguf"
-path = "src/bin/orangu-gguf/main.rs"
-
-[[bin]]
 name = "orangu-server"
 path = "src/bin/orangu-server/main.rs"
 

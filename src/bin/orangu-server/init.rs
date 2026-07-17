@@ -72,9 +72,12 @@ pub fn run_init() -> Result<()> {
     Ok(())
 }
 
-/// Same default as `orangu-gguf --init`: where Hugging Face downloads land
-/// by default, so both tools can point at one models directory out of the
-/// box.
+/// Where Hugging Face downloads land by default (`~/.cache/huggingface/hub`
+/// on Linux/macOS, `%USERPROFILE%\.cache\huggingface\hub` on Windows) — the
+/// same directory llama.cpp's own `-hf` falls back to when
+/// `LLAMA_CACHE`/`HF_HUB_CACHE`/etc. aren't set. Offered as `--init`'s
+/// default `models` value so pointing `orangu-server` at whatever's likely
+/// already there is just pressing Enter.
 fn huggingface_cache_dir() -> Option<PathBuf> {
     Some(
         home::home_dir()?
@@ -197,10 +200,10 @@ impl Helper for OptionCompleter {}
 /// Prompts for the optional `model` key — only consulted in `--daemon`
 /// mode — TAB-completing over the models already
 /// installed under `models_dir`: every `NR` *and* every `MODEL` label,
-/// both in exactly the order `orangu-gguf list` prints them (both call the
-/// same `group_models`, which sorts by label — nothing here re-sorts), and
-/// the same pairing `orangu-gguf`'s own shell completion uses for `show`/
-/// `download`'s argument. Like [`prompt_dir`], doesn't require the typed
+/// both in exactly the order `orangu-server list` prints them (both call
+/// the same `group_models`, which sorts by label — nothing here re-sorts),
+/// and the same pairing `orangu-server`'s own shell completion uses for
+/// `show`/`download`'s argument. Like [`prompt_dir`], doesn't require the typed
 /// value to be one of them: a local path or a `<user>/<model>[:quant]`
 /// Hugging Face spec not yet downloaded is equally valid, and an empty
 /// entry is fine too — daemon mode is the only thing that needs it.
@@ -228,8 +231,8 @@ fn prompt_model(models_dir: &Path) -> Result<String> {
 /// 1-based position — `resolve_show_target`'s own NR resolution counts the
 /// exact same way) immediately followed by that row's `MODEL` label, for
 /// every group in turn — the same NR-then-MODEL pairing, in the same
-/// order, `orangu-gguf`'s own shell completion for `show`/`download`
-/// prints from `orangu-gguf list`'s output (`awk 'NR>1 {print $1; print
+/// order, `orangu-server`'s own shell completion for `show`/`download`
+/// prints from `orangu-server list`'s output (`awk 'NR>1 {print $1; print
 /// $2}'`). Split out from [`prompt_model`] so this ordering claim is
 /// actually checked, not just asserted in a doc comment.
 fn model_completion_options(groups: &[orangu::model_spec::ModelGroup]) -> Vec<String> {
@@ -339,9 +342,9 @@ mod tests {
 
     /// The exact claim `model_completion_options`'s own doc comment makes:
     /// `["1", "<first label>", "2", "<second label>", ...]` — matching
-    /// `orangu-gguf list`'s NR column (1-based position in `group_models`'s
+    /// `orangu-server list`'s NR column (1-based position in `group_models`'s
     /// already-sorted-by-label output) paired with its MODEL column, the
-    /// same pairing order `orangu-gguf -s`'s own bash/zsh/fish completion
+    /// same pairing order `orangu-server -s`'s own bash/zsh/fish completion
     /// scripts use for `show`/`download`'s argument.
     #[test]
     fn pairs_each_nr_with_its_label_in_group_models_order() {

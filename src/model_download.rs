@@ -13,12 +13,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! `orangu-gguf download <user>/<model>[:quant]`: downloads a GGUF model
+//! `orangu-server download <user>/<model>[:quant]`: downloads a GGUF model
 //! from the Hugging Face Hub into the configured `models` directory, laid
 //! out exactly the way llama.cpp's own `-hf`/`--hf-repo` downloads into —
-//! `models--<user>--<model>/{blobs,refs,snapshots}` — so `list`/`show`/the
-//! role wizard already read what this writes, and llama.cpp itself
-//! recognizes it as already downloaded rather than fetching it again.
+//! `models--<user>--<model>/{blobs,refs,snapshots}` — so `list`/`show`
+//! already read what this writes, and llama.cpp itself recognizes it as
+//! already downloaded rather than fetching it again.
 //!
 //! Mirrors llama.cpp's own `common/download.cpp`/`common/hf-cache.cpp`
 //! (verified directly against that source, not guessed): the same two Hub
@@ -64,9 +64,9 @@ const DEFAULT_TAG_PREFERENCE: &[&str] = &["Q4_K_M", "Q8_0"];
 /// into `models_dir`, and returns the local path of the primary model file
 /// (the first shard, for a multi-part model) once every selected file
 /// (every shard, plus a bundled `mmproj` sidecar if the repo has one) is in
-/// place. Used both by `orangu-gguf download` (which only cares that the
-/// files land on disk) and `orangu-server` (which also needs the resulting
-/// path to load).
+/// place. Used both by `orangu-server download` (which only cares that the
+/// files land on disk) and model-spec resolution ahead of serving (which
+/// also needs the resulting path to load).
 pub fn download_model(models_dir: &Path, spec: &str) -> Result<PathBuf> {
     let (repo, tag) = split_repo_tag(spec)?;
     let client = build_client()?;
@@ -141,7 +141,7 @@ pub fn download_model(models_dir: &Path, spec: &str) -> Result<PathBuf> {
 
 fn build_client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
-        .user_agent(concat!("orangu-gguf/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("orangu-server/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("failed to build HTTP client")
 }

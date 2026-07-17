@@ -633,7 +633,7 @@ The target **Tab-completes** (and shows the inline ghost hint): after `/build `,
 /build debug
 /build release
 /build docs
-/build release orangu-gguf
+/build release orangu-server
 ```
 
 Natural-language forms:

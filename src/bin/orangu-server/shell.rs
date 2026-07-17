@@ -13,16 +13,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! Hand-written shell completion scripts, mirroring `orangu-gguf`'s own
-//! `-s`/`--shell-completions` (`src/bin/orangu-gguf/shell.rs`): the
-//! positional `model` argument is completed by shelling out to
-//! `orangu-gguf list` and reading its first two columns (NR and MODEL) —
-//! the same trick `orangu-gguf`'s own `show`/`download` completion uses,
-//! reused here since both tools default to the same models directory
-//! convention (`~/.cache/huggingface/hub`, see `init.rs`'s
-//! `huggingface_cache_dir`). This only ever depends on `orangu-gguf` and
-//! `orangu-server` both being on `$PATH` — no clap-generated completion
-//! machinery is involved.
+//! Hand-written shell completion scripts, mirroring `orangu`'s own
+//! `-s`/`--shell-completions` (`src/bin/orangu/shell.rs`): the positional
+//! `model` argument (and `show`'s own argument) are completed by shelling
+//! back out to `orangu-server list` itself and reading its first two
+//! columns (NR and MODEL) — the same trick `orangu`'s own scripts use to
+//! complete session UUIDs. This only ever depends on `orangu-server` itself
+//! being on `$PATH` — no clap-generated completion machinery is involved.
 
 pub const BASH: &str = r#"# bash completion for orangu-server
 #
@@ -32,10 +29,10 @@ pub const BASH: &str = r#"# bash completion for orangu-server
 # Or write once to the bash-completion drop-in directory:
 #   orangu-server -s > ~/.local/share/bash-completion/completions/orangu-server
 
-# Completes the positional MODEL argument with every NR and MODEL from
-# `orangu-gguf list`'s output.
+# Completes the positional MODEL argument (and `show`'s own argument) with
+# every NR and MODEL from `orangu-server list`'s output.
 _orangu_server_models() {
-    orangu-gguf list 2>/dev/null | awk 'NR>1 {print $1; print $2}'
+    orangu-server list 2>/dev/null | awk 'NR>1 {print $1; print $2}'
 }
 
 _orangu_server() {
@@ -43,6 +40,11 @@ _orangu_server() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     COMPREPLY=()
+
+    if [[ "$prev" == "show" ]]; then
+        COMPREPLY=( $(compgen -W "$(_orangu_server_models)" -- "$cur") )
+        return 0
+    fi
 
     case "$prev" in
         -c|--config)
@@ -59,7 +61,10 @@ _orangu_server() {
         return 0
     fi
 
-    COMPREPLY=( $(compgen -W "$(_orangu_server_models)" -- "$cur") )
+    if [[ $COMP_CWORD -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "$(_orangu_server_models) system suggest list show download help" -- "$cur") )
+        return 0
+    fi
 }
 
 complete -F _orangu_server orangu-server
@@ -75,16 +80,28 @@ pub const ZSH: &str = r#"#compdef orangu-server
 #   orangu-server -s > ~/.zsh/completions/_orangu-server
 #   # ~/.zshrc: fpath=(~/.zsh/completions $fpath) && autoload -Uz compinit && compinit
 
-# Completes the positional MODEL argument with every NR and MODEL from
-# `orangu-gguf list`'s output.
+# Completes the positional MODEL argument (and `show`'s own argument) with
+# every NR and MODEL from `orangu-server list`'s output.
 _orangu_server_models() {
     local -a candidates
-    candidates=( ${(f)"$(orangu-gguf list 2>/dev/null | awk 'NR>1 {print $1; print $2}')"} )
+    candidates=( ${(f)"$(orangu-server list 2>/dev/null | awk 'NR>1 {print $1; print $2}')"} )
     compadd -a candidates
 }
 
+_orangu_server_commands() {
+    _values 'command' \
+        'system[Detect the machine'"'"'s CPU and GPU(s)]' \
+        'suggest[Suggest a GGUF model size for this machine'"'"'s hardware]' \
+        'list[List every .gguf file under the models directory]' \
+        'show[Print a GGUF file'"'"'s full metadata]' \
+        'download[Download a GGUF model from Hugging Face]' \
+        'help[Print this message or the help of the given subcommand(s)]'
+}
+
 _orangu_server() {
-    _arguments -s \
+    local curcontext="$curcontext" state line
+
+    _arguments -C \
         '(-c --config)'{-c,--config}'[Path to the configuration file (orangu-server.conf)]:config file:_files' \
         '(-i --init)'{-i,--init}'[Interactively create ~/.orangu/orangu-server.conf and exit]' \
         '(-s --shell-completions)'{-s,--shell-completions}'[Print shell completion script for the detected shell and exit]' \
@@ -96,8 +113,20 @@ _orangu_server() {
         '(--all --code --review --explorer --embedding)--embedding[Embeddings-only role]' \
         '(-h --help)'{-h,--help}'[Print help]' \
         '(-V --version)'{-V,--version}'[Print version]' \
-        '1: :_orangu_server_models' \
+        '1: :->command' \
+        '2: :->arg' \
         && return 0
+
+    case $state in
+        command)
+            _alternative \
+                'models:model:_orangu_server_models' \
+                'commands:command:_orangu_server_commands'
+            ;;
+        arg)
+            [[ ${line[1]} == show ]] && _orangu_server_models
+            ;;
+    esac
 }
 
 _orangu_server "$@"
@@ -111,13 +140,20 @@ pub const FISH: &str = r#"# fish completion for orangu-server
 # Or write once to the fish completions directory:
 #   orangu-server -s > ~/.config/fish/completions/orangu-server.fish
 
-# Completes the positional MODEL argument with every NR and MODEL from
-# `orangu-gguf list`'s output.
+# Completes the positional MODEL argument (and `show`'s own argument) with
+# every NR and MODEL from `orangu-server list`'s output.
 function __orangu_server_models
-    orangu-gguf list 2>/dev/null | awk 'NR>1 {print $1; print $2}'
+    orangu-server list 2>/dev/null | awk 'NR>1 {print $1; print $2}'
 end
 
 complete -c orangu-server -n '__fish_use_subcommand' -a '(__orangu_server_models)'
+complete -c orangu-server -n '__fish_use_subcommand' -a system   -d 'Detect the machine\'s CPU and GPU(s)'
+complete -c orangu-server -n '__fish_use_subcommand' -a suggest  -d 'Suggest a GGUF model size for this machine\'s hardware'
+complete -c orangu-server -n '__fish_use_subcommand' -a list     -d 'List every .gguf file under the models directory'
+complete -c orangu-server -n '__fish_use_subcommand' -a show     -d 'Print a GGUF file\'s full metadata'
+complete -c orangu-server -n '__fish_use_subcommand' -a download -d 'Download a GGUF model from Hugging Face'
+complete -c orangu-server -n '__fish_use_subcommand' -a help     -d 'Print this message or the help of the given subcommand(s)'
+complete -c orangu-server -n '__fish_seen_subcommand_from show' -a '(__orangu_server_models)'
 
 complete -c orangu-server -s c -l config              -r -d 'Path to the configuration file (orangu-server.conf)'
 complete -c orangu-server -s i -l init                    -d 'Interactively create ~/.orangu/orangu-server.conf and exit'

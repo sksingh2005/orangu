@@ -15,7 +15,6 @@
 
 //! Configuration for `orangu-server`: a single `[orangu-server]` section
 //! naming the models directory, and the address the HTTP server binds to.
-//! Mirrors the shape of `orangu-gguf.conf`.
 
 use anyhow::{Context, Result, anyhow};
 use orangu::config::parse_ini_sections;
@@ -41,9 +40,9 @@ pub fn default_web() -> u16 {
 /// `--embedding` (mutually exclusive; `--all` is the default) or the
 /// config file's `role` key. Unlike a real `llama-server` process (a
 /// distinct binary per deployment, so `orangu`'s own conventional roles —
-/// `all`/`code`/`review`/`explorer`/`embeddings`, see `orangu-gguf`'s role
-/// wizard — pick model *and* a whole flag set), a single `orangu-server`
-/// process serves whatever model it's given; this only adjusts the
+/// `all`/`code`/`review`/`explorer`/`embeddings` — pick model *and* a whole
+/// flag set), a single `orangu-server` process serves whatever model it's
+/// given; this only adjusts the
 /// handful of things that are actually role-specific in a from-scratch
 /// engine that doesn't have `--fit`/`--tools`/`--webui-mcp-proxy`/`-sm`/
 /// `--cache-reuse`/`-ctk`/`-ctv` equivalents at all: the default slot
@@ -182,8 +181,10 @@ pub struct ServerConfiguration {
     pub role: Role,
 }
 
-/// Expands a leading `~` or `~/` to the user's home directory, same as
-/// `orangu-gguf.conf`'s `models` key.
+/// Expands a leading `~` or `~/` to the user's home directory — a config
+/// value is otherwise taken literally, but a models directory is the one
+/// place a user is likely to type a `~`-relative path, same as a shell
+/// would accept.
 fn expand_tilde(path: &str) -> PathBuf {
     match path.strip_prefix('~') {
         Some(rest) => match home::home_dir() {

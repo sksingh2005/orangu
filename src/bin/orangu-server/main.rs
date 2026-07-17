@@ -14,17 +14,23 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! `orangu-server <model>`: loads a GGUF model and serves a llama.cpp-
-//! compatible HTTP API.
+//! compatible HTTP API. Also the machine's one-stop GGUF inventory tool —
+//! `system`/`suggest`/`list`/`show`/`download` answer the questions that
+//! matter when *getting* and *choosing* a model to run, before any serving
+//! starts (formerly the separate `orangu-gguf` binary, folded in here so
+//! there's one tool, one config file, and one shell-completion script to
+//! keep in sync with the models directory convention both jobs share).
 
 mod config;
 mod engine;
 mod http;
 mod init;
 mod shell;
+mod suggest;
 mod web;
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use config::{
     BackendPreference, ServerConfiguration, default_server_config_path, load_server_configuration,
 };
@@ -38,7 +44,7 @@ use engine::loader::ArchFamily;
 use engine::loader::LoadedModel;
 use engine::scheduler::SlotPool;
 use engine::tokenizer::Tokenizer;
-use orangu::gguf::{GgufFile, GgufValue};
+use orangu::gguf::{GgufFile, GgufValue, ggml_type_name};
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -47,6 +53,11 @@ use std::{
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Metadata arrays longer than this print a truncated preview instead of
+/// every element — `tokenizer.ggml.tokens` routinely holds 100,000+ entries.
+/// Pass `--full` to disable the cap.
+const DEFAULT_ARRAY_PREVIEW: usize = 8;
 
 const TERMINAL_TITLE: &str = "orangu-server";
 
@@ -81,6 +92,7 @@ struct Args {
     /// models directory, or a <user>/<model>[:quant] Hugging Face repo
     /// (fetched first if not already cached). Omit it to list the models
     /// under the configured models directory and pick one interactively.
+    /// Ignored when a subcommand is given.
     model: Option<String>,
     /// Path to orangu-server.conf. Defaults to ./orangu-server.conf, then
     /// ~/.orangu/orangu-server.conf.
@@ -110,6 +122,50 @@ struct Args {
     /// Embedding only.
     #[arg(long)]
     embedding: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// GGUF-inventory subcommands: everything that matters when *getting* and
+/// *choosing* a model, before serving one — no model is loaded, no HTTP
+/// listener is bound. Serving itself isn't one of these; it stays the
+/// struct's own positional `model` argument (with or without no subcommand
+/// at all), exactly as before this enum existed, so `orangu-server
+/// <model>` keeps working unchanged. The one collision this admits: a local
+/// `.gguf` file whose bare name is exactly `system`/`suggest`/`list`/
+/// `show`/`download` would be parsed as that subcommand instead of a model
+/// spec — resolvable by passing a path (`./system`) instead of the bare
+/// name.
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Detect the machine's CPU and GPU(s) and print their statistics.
+    System,
+    /// Suggest a GGUF model size (not yet a specific model) likely to run
+    /// comfortably on this machine's detected hardware.
+    Suggest,
+    /// List every .gguf file found under the configured models directory.
+    List,
+    /// Print a GGUF file's full metadata.
+    Show {
+        /// A path to a .gguf file, a bare name resolved against the
+        /// configured models directory, an NR from `list`'s first column, or
+        /// a MODEL name from its second.
+        file: String,
+        /// Print every array element instead of a truncated preview.
+        #[arg(long)]
+        full: bool,
+        /// Also list each tensor's name, shape, type, and offset.
+        #[arg(long)]
+        tensors: bool,
+    },
+    /// Download a GGUF model from Hugging Face into the configured models
+    /// directory.
+    Download {
+        /// A Hugging Face repo, `<user>/<model>[:quant]`. Without `:quant`,
+        /// prefers Q4_K_M then Q8_0, falling back to the first GGUF file
+        /// found.
+        repo: String,
+    },
 }
 
 impl Args {
@@ -158,7 +214,7 @@ fn print_shell_completions() -> Result<()> {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     if args.shell_completions {
         return match print_shell_completions() {
@@ -172,6 +228,16 @@ fn main() -> ExitCode {
 
     if args.init {
         return match init::run_init() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if let Some(command) = args.command.take() {
+        return match run_command(args.config, command) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("error: {err:#}");
@@ -400,6 +466,10 @@ async fn serve(prepared: Prepared) -> Result<()> {
     let app = http::build_router(state);
 
     if !daemon {
+        let cpu = orangu::hardware::detect_cpu();
+        let gpus = orangu::hardware::detect_gpus(cpu.total_memory_bytes);
+        print!("{}", orangu::hardware::format_report(&cpu, &gpus));
+        println!();
         println!(
             "Model  {model_label} ({architecture} arch, {backend_label}, {} layers, {} ctx)",
             engine.model.config().n_layer,
@@ -481,6 +551,106 @@ fn metadata_string(gguf: &GgufFile, key: &str) -> Option<String> {
     })
 }
 
+/// Runs one of the GGUF-inventory subcommands (`system`/`suggest`/`list`/
+/// `show`/`download`) to completion and returns — none of these load a
+/// model or bind a listener, so there's no `tokio` runtime involved, unlike
+/// [`serve`]. `system`/`suggest` don't even need a config file (they only
+/// ever look at the local machine's own hardware); `list`/`show`/`download`
+/// resolve against the same `[orangu-server].models` directory the serving
+/// path uses, via the same [`load_config`] — `cli_role`/`daemon` are passed
+/// as `None`/`false` since neither matters to a subcommand that never
+/// serves anything.
+fn run_command(config_arg: Option<PathBuf>, command: Command) -> Result<()> {
+    match command {
+        Command::System => {
+            let cpu = orangu::hardware::detect_cpu();
+            let gpus = orangu::hardware::detect_gpus(cpu.total_memory_bytes);
+            print!("{}", orangu::hardware::format_report(&cpu, &gpus));
+            Ok(())
+        }
+        Command::Suggest => {
+            let cpu = orangu::hardware::detect_cpu();
+            let gpus = orangu::hardware::detect_gpus(cpu.total_memory_bytes);
+            print!("{}", suggest::format_suggestion(&cpu, &gpus));
+            Ok(())
+        }
+        Command::List => {
+            let conf = load_config(config_arg, None, false)?;
+            let models = orangu::model_spec::scan_models_dir(&conf.models)?;
+            print!("{}", orangu::model_spec::format_list(&models, &conf.models));
+            Ok(())
+        }
+        Command::Show {
+            file,
+            full,
+            tensors,
+        } => {
+            let conf = load_config(config_arg, None, false)?;
+            let path = orangu::model_spec::resolve_show_target(&conf.models, &file)?;
+            let gguf = GgufFile::open(&path)?;
+            print!("{}", format_show(&gguf, full, tensors));
+            Ok(())
+        }
+        Command::Download { repo } => {
+            let conf = load_config(config_arg, None, false)?;
+            let path = orangu::model_download::download_model(&conf.models, &repo)?;
+            println!("Downloaded to {}", path.display());
+            Ok(())
+        }
+    }
+}
+
+fn format_show(gguf: &GgufFile, full: bool, tensors: bool) -> String {
+    let preview_limit = if full {
+        usize::MAX
+    } else {
+        DEFAULT_ARRAY_PREVIEW
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("GGUF version   : {}\n", gguf.version));
+    out.push_str(&format!("Metadata pairs : {}\n", gguf.metadata.len()));
+    out.push_str(&format!("Tensors        : {}\n", gguf.tensors.len()));
+    out.push_str(&format!("Alignment      : {} bytes\n", gguf.alignment));
+    out.push_str(&format!("Data offset    : {} bytes\n", gguf.data_offset));
+
+    out.push_str("\nMetadata\n");
+    let key_width = gguf
+        .metadata
+        .iter()
+        .map(|(k, _)| k.len())
+        .max()
+        .unwrap_or(0);
+    for (key, value) in &gguf.metadata {
+        out.push_str(&format!(
+            "  {key:<key_width$} = {}\n",
+            value.display(preview_limit)
+        ));
+    }
+
+    if tensors {
+        out.push_str("\nTensors\n");
+        let name_width = gguf.tensors.iter().map(|t| t.name.len()).max().unwrap_or(0);
+        let type_width = gguf
+            .tensors
+            .iter()
+            .map(|t| ggml_type_name(t.ggml_type).len())
+            .max()
+            .unwrap_or(0);
+        for tensor in &gguf.tensors {
+            out.push_str(&format!(
+                "  {:<name_width$}  {:<type_width$}  {}  (offset {})\n",
+                tensor.name,
+                ggml_type_name(tensor.ggml_type),
+                tensor.shape(),
+                tensor.offset
+            ));
+        }
+    }
+
+    out
+}
+
 /// Dim/grey ANSI SGR codes, used to mark a model whose architecture this
 /// build can't load — visible but visually deprioritized, not hidden: a
 /// user can still pick one (they'll hit the same clear "not yet supported"
@@ -489,8 +659,8 @@ const ANSI_DIM: &str = "\x1b[2m";
 const ANSI_RESET: &str = "\x1b[0m";
 
 /// Lists every `.gguf` model under `models_dir` (the same columns
-/// `orangu-gguf list` prints, plus which ones this build can actually load)
-/// and prompts for an `NR`, for `orangu-server` invoked with no model
+/// `orangu-server list` prints, plus which ones this build can actually
+/// load) and prompts for an `NR`, for `orangu-server` invoked with no model
 /// argument. Returns the chosen model's file path and its display label.
 fn select_model_interactively(models_dir: &Path) -> Result<(PathBuf, String)> {
     let models = orangu::model_spec::scan_models_dir(models_dir)
@@ -498,7 +668,7 @@ fn select_model_interactively(models_dir: &Path) -> Result<(PathBuf, String)> {
     let groups = orangu::model_spec::group_models(&models);
     if groups.is_empty() {
         bail!(
-            "no .gguf models found under {}; download one first (e.g. `orangu-gguf download <user>/<model>`) or pass one directly: orangu-server <model>",
+            "no .gguf models found under {}; download one first (e.g. `orangu-server download <user>/<model>`) or pass one directly: orangu-server <model>",
             models_dir.display()
         );
     }

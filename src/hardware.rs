@@ -25,7 +25,7 @@
 //! OS tools (`system_profiler` / PowerShell's `Win32_VideoController`) on
 //! macOS and Windows. A card that isn't recognized by any source simply
 //! doesn't show up — this is inventory, not a hard dependency of anything
-//! else `orangu-gguf` does.
+//! else `orangu-server` does.
 
 use crate::format::format_bytes;
 use std::process::Command;

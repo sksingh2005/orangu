@@ -12,25 +12,31 @@ loading, tokenization, the transformer forward pass, sampling, and request
 scheduling are implemented directly in Rust, with no dependency on
 llama.cpp/ggml's own compiled code.
 
+It's also the machine's GGUF inventory tool — the `system`/`suggest`/
+`list`/`show`/`download` subcommands (below) answer the questions that
+matter when *getting* and *choosing* a model to run, before any serving
+starts. Those five read GGUF files directly off disk and query the local
+machine, no model loaded and no HTTP listener bound; only `download` talks
+to the Hugging Face Hub.
+
 ## Quick start
 
 ```sh
 orangu-server unsloth/gemma-4-E2B-it-GGUF
 ```
 
-The model argument is resolved the same way `orangu-gguf show`/`download`
-resolve one: an existing local `.gguf` path, an `NR`/`MODEL` label already
-under the configured `models` directory (see `orangu-gguf list`), or a
+The model argument is resolved the same way `show`/`download` resolve one:
+an existing local `.gguf` path, an `NR`/`MODEL` label already under the
+configured `models` directory (see `orangu-server list`), or a
 `<user>/<model>[:quant]` Hugging Face repo — fetched into `models` first if
 it isn't already cached there. No separate download step is needed.
 
 Leave it off entirely and `orangu-server` lists every `.gguf` model under
-the configured `models` directory (the same table `orangu-gguf list`
-prints) and prompts for one by `NR`, then — unless `--all`/`--code`/
-`--review`/`--explorer`/`--embedding` was passed — prompts for a
-[role](#roles) too, TAB-completing over the five valid names (dropdown-
-style: an empty `TAB` press lists all five) and defaulting to `all` on an
-empty entry:
+the configured `models` directory (the same table `list` prints) and
+prompts for one by `NR`, then — unless `--all`/`--code`/`--review`/
+`--explorer`/`--embedding` was passed — prompts for a [role](#roles) too,
+TAB-completing over the five valid names (dropdown-style: an empty `TAB`
+press lists all five) and defaulting to `all` on an empty entry:
 
 ```sh
 orangu-server
@@ -45,16 +51,26 @@ Select a model (NR): 2
 role [all]: 
 ```
 
-On startup:
+On startup, `orangu-server` prints the same CPU/GPU report `system` does
+(so a startup log alone is enough to see what hardware the process actually
+has to work with), followed by the model/UI/API summary:
 
 ```
+CPU
+  Model            : AMD Ryzen 7 4800H with Radeon Graphics
+  ...
+
+GPU
+  [0] AMD Navi 14 [Radeon RX 5500/5500M / Pro 5300/5300M/5500M]
+      ...
+
 Model  unsloth/gemma-4-E2B-it-GGUF (llama arch, CPU/AVX2, 26 layers, 8192 ctx)
 UI     disabled
 API    http://127.0.0.1:8100
 ```
 
-The second field names the backend the forward pass actually ran on:
-`CPU`/`CPU/AVX2`, or `Vulkan/<adapter name>`, `CUDA/<device name>`,
+The model line's second field names the backend the forward pass actually
+ran on: `CPU`/`CPU/AVX2`, or `Vulkan/<adapter name>`, `CUDA/<device name>`,
 `OpenCL/<device name>`, `ROCm/<device name>` when the matching GPU backend
 was used (see **GPU backend** below).
 
@@ -63,6 +79,304 @@ Every completed request logs a throughput line, llama-server-style:
 ```
 orangu-server: [slot 0] prompt 42 tokens in 0.18s (233.33 tok/s), generated 128 tokens in 4.31s (29.70 tok/s)
 ```
+
+## GGUF inventory
+
+Five subcommands cover getting and choosing a model, all sharing the same
+`orangu-server.conf` and its `models` directory (see **Configuration**
+below):
+
+### `download`: fetching a model from Hugging Face
+
+```sh
+orangu-server download unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M
+orangu-server download ggml-org/embeddinggemma-300M-GGUF   # no :quant -> prefers Q4_K_M, then Q8_0
+```
+
+```
+Downloading Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf: 47% [1/1]
+```
+
+Downloads into the configured `models` directory, laid out **exactly** the
+way llama.cpp's own `-hf`/`--hf-repo` downloads into —
+`models--<user>--<model>/{blobs,refs,snapshots}`, content-addressed blobs
+with a relative symlink per file — so `list`/`show` already read what this
+writes, and llama.cpp itself recognizes it as already downloaded rather
+than fetching it again. This isn't a reimplementation guessing at the
+format: it mirrors llama.cpp's own `common/download.cpp`/
+`common/hf-cache.cpp` directly, including which files count as "the model"
+(a bundled `mmproj`/`imatrix`/`mtp-` sidecar never does) and the same
+`Q4_K_M` then `Q8_0` default preference when no `:quant` is given.
+
+If the repository also ships a multimodal projector (`mmproj-*.gguf`,
+needed for vision/audio input), it's fetched alongside the model too —
+picking the same best-matching one llama-server's own `-hf` would auto-fetch
+on first launch anyway (closest quantization bit-depth to the model's own,
+preferring one in the same directory):
+
+```
+Downloading Qwen3.6-35B-A3B-UD-Q4_K_M.gguf: 47% [1/2]
+Downloading mmproj-BF16.gguf: 100% [2/2]
+```
+
+A multi-part model's every shard (and a bundled `mmproj`) downloads
+concurrently rather than one at a time, each printing its own progress line
+in place until all are done — a smaller sidecar file like `mmproj-BF16.gguf`
+above typically finishes well before the main model. An interrupted download
+resumes from where it left off next time, and a file already fully present
+(matching the repository's own reported size) is skipped rather than
+re-fetched. Set `HF_TOKEN` in the environment for a private or gated
+repository.
+
+Not supported (out of scope for a first version): downloading a `--mtp`
+companion file alongside the model, `preset.ini`-based repos, and Docker
+registry sources.
+
+### `system`: CPU and GPU inventory
+
+```sh
+orangu-server system
+```
+
+```
+CPU
+  Model            : AMD Ryzen 7 4800H with Radeon Graphics
+  Vendor           : AuthenticAMD
+  Architecture     : x86_64
+  Physical cores   : 8
+  Logical cores    : 16
+  Frequency        : 4.29 GHz
+  Memory total     : 62.19 GiB
+  Memory available : 36.19 GiB
+
+GPU
+  [0] AMD Navi 14 [Radeon RX 5500/5500M / Pro 5300/5300M/5500M]
+      Memory type  : Dedicated
+      VRAM total   : 3.98 GiB
+      VRAM used    : 3.71 GiB
+      Driver       : amdgpu
+
+  [1] AMD Renoir [Radeon Vega Series / Radeon Vega Mobile Series]
+      Memory type  : Shared
+      VRAM total   : 62.19 GiB
+      VRAM used    : 432.22 MiB
+      Driver       : amdgpu
+```
+
+This is the same report printed at the top of every attached (non-daemon)
+`orangu-server` startup (see **Quick start** above) — `system` is that
+report on its own, with no model involved.
+
+CPU statistics (model, vendor, architecture, physical/logical core counts,
+frequency, total/available system RAM) come from [`sysinfo`](https://docs.rs/sysinfo).
+
+GPU detection has no single cross-platform API, so it layers several
+best-effort sources and reports whatever they find — a card no source
+recognizes simply doesn't show up:
+
+- **NVIDIA** (Linux and Windows): `nvidia-smi`'s CSV query mode, installed
+  alongside any NVIDIA driver. Always reported as `Dedicated` — no consumer
+  NVIDIA GPU is anything but a discrete card.
+- **AMD, Intel, and other PCI display devices on Linux**: `/sys/class/drm`,
+  the kernel interface every Linux GPU driver exposes. VRAM total/used comes
+  from `amdgpu`'s `mem_info_vram_total`/`mem_info_vram_used` sysfs attributes
+  when present; the device's marketing name is looked up in the system's
+  `pci.ids` database (the `hwdata` package on Fedora/RHEL, `pciutils`
+  elsewhere) when installed, falling back to a raw `vendor:device` id
+  otherwise. `Memory type` is `Dedicated` when `amdgpu` also exposes
+  `mem_info_vram_vendor` (the VRAM chip manufacturer — only present for a
+  real dedicated memory pool, not an APU's carve-out of system RAM) and
+  `Shared` otherwise — verified directly against a machine with both a
+  discrete AMD card and an integrated AMD APU.
+- **macOS**: `system_profiler SPDisplaysDataType -json`. `Memory type` comes
+  from which of its own `spdisplays_vram` (dedicated) / `spdisplays_vram_shared`
+  (Apple Silicon unified memory, or an older integrated Mac) keys is present.
+- **Windows**: PowerShell's `Win32_VideoController` WMI class. Its
+  `AdapterRAM` field is a well-known 32-bit value that can misreport VRAM on
+  cards with more than ~4 GiB; it's still the best zero-dependency source
+  available. `Win32_VideoController` has no dedicated/shared field of its
+  own, so `Memory type` is guessed from the adapter name: NVIDIA is always
+  `Dedicated`, Intel is `Shared` unless the name says `Arc` (its rare
+  discrete line), and AMD is reported `Unknown` — its driver names an APU's
+  integrated GPU and a discrete Radeon card too similarly to guess from the
+  name alone.
+
+A `Shared` GPU's `VRAM total` is always the machine's total system RAM,
+regardless of what (if anything) its own platform query reported — the
+Renoir APU above genuinely has only a 512 MiB BIOS-reserved carve-out
+according to `amdgpu`, but system RAM (62.19 GiB) is the real ceiling on how
+much it can actually draw on, and the only figure worth showing as its
+total.
+
+### `suggest`: a hardware-based model-size suggestion
+
+```sh
+orangu-server suggest
+```
+
+```
+CPU
+  Model            : AMD Ryzen 7 4800H with Radeon Graphics
+  ...
+
+GPU
+  [0] AMD Navi 14 [Radeon RX 5500/5500M / Pro 5300/5300M/5500M]
+      Memory type  : Dedicated
+      VRAM total   : 3.98 GiB
+      ...
+
+Suggested model size (Dedicated)
+  Estimated budget : 3.98 GiB
+
+  Context  Suggestion (Q2_K)  Suggestion (Q4_K_M)  Suggestion (Q8_0)
+  -------  -----------------  -------------------  -----------------
+  1K       ~9B parameters     ~4B parameters       ~3B parameters
+  2K       ~9B parameters     ~4B parameters       ~3B parameters
+  4K       ~9B parameters     ~4B parameters       ~3B parameters
+  8K       ~8B parameters     ~4B parameters       ~2B parameters
+  16K      ~4B parameters     ~4B parameters       ~2B parameters
+  32K      ~4B parameters     ~2B parameters       ~1B parameters
+  64K      ~2B parameters     ~1B parameters       -
+  128K     -                  -                    -
+  256K     -                  -                    -
+
+Suggested model size (Combined)
+  Estimated budget : 66.17 GiB
+
+  Context  Suggestion (Q2_K)  Suggestion (Q4_K_M)  Suggestion (Q8_0)
+  -------  -----------------  -------------------  -----------------
+  1K       ~120B parameters   ~110B parameters     ~65B parameters
+  2K       ~120B parameters   ~110B parameters     ~65B parameters
+  4K       ~120B parameters   ~110B parameters     ~34B parameters
+  8K       ~120B parameters   ~110B parameters     ~34B parameters
+  16K      ~120B parameters   ~70B parameters      ~34B parameters
+  32K      ~120B parameters   ~70B parameters      ~34B parameters
+  64K      ~120B parameters   ~70B parameters      ~34B parameters
+  128K     ~70B parameters    ~34B parameters      ~32B parameters
+  256K     ~34B parameters    ~30B parameters      ~14B parameters
+```
+
+Prints the same CPU/GPU report `system` does, then estimates how large a
+model (in parameters) is likely to run comfortably — as a table, one row per
+context length (1K to 256K tokens) and one column per quantization (`Q2_K`,
+`Q4_K_M` — the same default `download` already assumes — and `Q8_0`). Not a
+specific model recommendation yet — just a size class to aim `download` at.
+
+Two such tables are printed, sized against two different budgets:
+
+- **Dedicated**: the sum of every **dedicated** GPU's VRAM alone (multiple
+  dedicated cards add up) — everything fits in real VRAM, no spillover.
+- **Combined**: the sum of *every* GPU's own reported total, dedicated and
+  shared alike (a shared/integrated GPU's is already the system's total RAM,
+  per the note above) — the more permissive figure, representing every
+  device this server could spread layers across at once. Falls back to the
+  CPU's own total RAM when there's no GPU detected at all. Inherently
+  optimistic: the shared part of the pool is the same RAM the OS and
+  everything else on the machine live in, so treat it as a hardware
+  ceiling, not a promise — with dedicated VRAM added on top it can even
+  exceed the machine's total RAM.
+
+The memory-estimation formula mirrors [Sam McLeod's GGUF VRAM
+Estimator](https://smcleod.net/vram-estimator/) (read directly from its
+published source, not guessed) and the general shape of
+[erans/selfhostllm](https://github.com/erans/selfhostllm)'s calculator:
+model weight bytes scale as parameters × bits-per-weight ÷ 8, KV cache bytes
+scale with context length × layers × hidden size, plus a small fixed runtime
+overhead. Since there's no real GGUF file to read yet, hidden size and layer
+count are themselves estimated from the parameter count via the standard
+transformer parameter-count approximation (params ≈ 12 × layers ×
+hidden_size²).
+
+### `list` and `show`: reading GGUF files
+
+```sh
+orangu-server list
+```
+
+```
+NR  MODEL                                                QUANT  SIZE
+ 1  unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M     Q4_K   17.28 GiB
+ 2  unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF:Q4_K_M   Q4_K   270.14 GiB
+ 3  ggml-org/gemma-4-12B-it-GGUF:Q4_K_M                  Q4_K   7.14 GiB
+```
+
+`NR` numbers models in the printed order (alphabetically by `MODEL`), starting
+from 1 — a shorthand for `show` (below) so you don't have to retype or paste a
+long `MODEL` string. It's recomputed fresh on every run from whatever's
+currently on disk, so it only stays stable between one `list`/`show` and the
+next as long as the models directory's contents haven't changed.
+
+Recursively scans the configured `models` directory for `.gguf` files (a file
+is used as-is even when it's reached through a symlink — the layout Hugging
+Face's own hub cache uses to name a file under `blobs/`). A model split into
+multiple shard files (`name-00001-of-00004.gguf`, `name-00002-of-00004.gguf`,
+...) is collapsed into a single `MODEL` row, with `SIZE` summed across every
+shard — `list` reports models, not files. Only unique models are counted and
+listed:
+
+- **A duplicated download counts once.** If two directories reference the
+  exact same underlying bytes — most often two Hugging Face snapshot
+  revisions of one repo whose ref moved without the file's content
+  changing, so the cache reuses (symlinks to) the already-downloaded blob
+  rather than fetching it again — resolving each candidate to its real,
+  symlink-free path collapses those back down to a single entry.
+- **Multimodal projector ("mmproj") sidecar files don't count as their own
+  model.** A vision/audio "mmproj" file is meant to be loaded *alongside* a
+  base model's own checkpoint (llama.cpp's `--mmproj` flag), not to stand
+  in as a model of its own — so if you download 4 models and one of them
+  ships a bundled `mmproj-*.gguf`, `list` still reports 4, not 5. Identified
+  the same way llama.cpp's own `clip.cpp` loader does: `general.architecture`
+  is `"clip"`. You can still `show` an mmproj file by its path (a bare
+  filename only resolves when the file sits directly in the `models` root,
+  not nested inside a cache's per-revision subfolders) — it just isn't
+  counted or given its own `NR`/`MODEL` entry.
+
+When a file was downloaded by `-hf`/`--hf-repo` (llama.cpp stores those in
+the standard Hugging Face hub cache, `models--<user>--<model>/...`), `MODEL`
+is exactly the string to hand back to `-hf`: `<user>/<model>[:quant]` — e.g.
+`unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M` above can be pasted
+straight into `llama-server -hf unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M`
+(or `orangu-server unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M` — see
+**Quick start** above). The `:quant` tag is extracted from the filename the
+same way llama.cpp's own `-hf` resolver does (`common/download.cpp`'s
+`get_gguf_split_info`): the trailing run of letters/digits/underscores after
+the last `-` or `.` in the name, once any shard suffix is stripped. A file
+outside a Hugging Face hub cache directory (no repo to recommend) falls back
+to that same shard-stripped filename on its own.
+
+`QUANT` is a separate, coarser best-effort label: the `ggml_type` accounting
+for the most tensor *elements* overall, combined across every shard (not
+just the most tensors — a model has far more small `F32` bias/norm tensors
+than large weight matrices, but those matrices hold nearly all the
+parameters). It can't distinguish e.g. `Q4_K_S` from `Q4_K_M` — both use the
+`Q4_K` ggml type for most tensors — which is exactly why `MODEL`'s `:quant`
+tag (read from the filename, not the tensor types) is the one to actually use
+with `-hf`. A file that fails to parse (truncated download, not actually a
+GGUF file) is still listed, with its error in place of `QUANT`/`SIZE` — one
+bad file doesn't abort the scan.
+
+```sh
+orangu-server show 3                                     # NR from `list`
+orangu-server show unsloth/Qwen3-Coder-Next-GGUF:Q4_K_M   # MODEL from `list`
+orangu-server show Qwen3-Coder-30B-A3B-Instruct.gguf      # bare name under `models`
+orangu-server show ./relative/or/absolute/path.gguf
+orangu-server show 3 --tensors   # also list every tensor's shape/type/offset
+orangu-server show 3 --full      # print full arrays instead of a preview
+```
+
+Prints every metadata key/value pair in the file — the full [GGUF
+specification](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md)'s
+key-value section, not just the well-known keys. The argument is resolved, in
+order: as a direct or relative file path; as a bare filename under the
+configured `models` directory; as an `NR` from `list`'s first column; as a
+`MODEL` name from its second. For a model split into shards, `show` reads the
+first shard — GGUF metadata for a multi-part model lives there in full.
+
+Array-valued metadata (e.g. `tokenizer.ggml.tokens`, which routinely holds
+well over 100,000 entries) is truncated to a short preview by default —
+`--full` disables that. Tensor data itself is never read, only the header,
+metadata, and tensor-info table — `list`/`show` stay fast even against
+multi-gigabyte model files.
 
 ## Configuration
 
@@ -80,7 +394,12 @@ backend = auto
 role = all
 ```
 
-- `models` — the base directory a model spec resolves (and downloads) into.
+- `models` — the base directory a model spec resolves into: what `list`/
+  `show` scan (recursively) for `.gguf` files, `download` fetches into, and
+  the serving path resolves the CLI's positional `model` argument against. A
+  leading `~`/`~/` is expanded to the home directory. Required by every
+  subcommand except `system` and `suggest` (pure hardware inventory, no
+  models directory involved) and a `show` given a direct path.
 - `model` — a model spec, the same shape as the CLI's positional argument
   (a local `.gguf` path, an `NR`/`MODEL` label, or a `<user>/<model>
   [:quant]` Hugging Face repo). **Only consulted in `--daemon` mode** — a
@@ -88,8 +407,7 @@ role = all
   or prompts interactively if none is given, exactly as before; `model`
   in the config is otherwise ignored. `-i`/`--init` prompts for it with
   TAB-completion over the models already installed under `models` — every
-  `NR` and every `MODEL` label, in the same order `orangu-gguf list` prints
-  them.
+  `NR` and every `MODEL` label, in the same order `list` prints them.
 - `host`/`port` — the bind address, printed on startup.
 - `slots` — how many requests generate concurrently, each with its own KV
   cache (default `1`). Raise it to serve overlapping requests without
@@ -114,31 +432,58 @@ role = all
   that override (there's no CLI model argument to override *with* once
   daemonized, but a role flag can still be passed alongside `--daemon`).
 
-`-c`/`--config` picks a config file explicitly; without it, `./orangu-server.conf`
-then `~/.orangu/orangu-server.conf` are tried, in that order. `-i`/`--init`
-writes `~/.orangu/orangu-server.conf` interactively — it also prompts for
-`role` (TAB-completing over the five valid names, defaulting to `all`),
-right after `model`, and only writes the `role =` line when a non-default
-value was chosen. `-d`/`--daemon` detaches
-from the terminal and runs in the background (Unix-only) — it requires
-`model` to be set in the config, since there's no attached terminal left to
-pass a CLI argument to or prompt on; the config and model are resolved, and
-both listeners bound, *before* detaching, so a bad config or a port already
-in use is still reported to the invoking terminal rather than silently lost.
-`-h`/`--help` and `-V`/`--version` are also available. `-s`/
-`--shell-completions` prints a bash/zsh/fish completion script for the
-shell detected from `$SHELL` (`eval "$(orangu-server -s)"`, or write it once
-to your shell's completions directory) — covering every flag above plus the
-positional `model` argument, completed by shelling out to `orangu-gguf list`
-(both tools default to the same models directory convention).
+Default lookup order for the config file: `-c`/`--config` picks one
+explicitly; without it, `./orangu-server.conf` then
+`~/.orangu/orangu-server.conf` are tried, in that order — the same order
+every subcommand above resolves it in too, not just serving.
+
+`-i`/`--init` writes `~/.orangu/orangu-server.conf` interactively: prompts
+for `models` (TAB-completing the typed path against the filesystem, the
+same as a shell would; defaults to Hugging Face's own cache location —
+`~/.cache/huggingface/hub` on Linux/macOS,
+`%USERPROFILE%\.cache\huggingface\hub` on Windows, the same directory
+llama.cpp's own `-hf` falls back to — so pressing Enter without typing
+anything points `orangu-server` at whatever's likely already there), then
+`model` and `role` (TAB-completing the five valid names, defaulting to
+`all`), then `host`/`port`/`web`, shows the resulting file, and asks for
+confirmation before writing (creating the directory if needed, and
+overwriting any existing file). Only writes the `role =` line when a
+non-default value was chosen.
+
+`-d`/`--daemon` detaches from the terminal and runs in the background
+(Unix-only) — it requires `model` to be set in the config, since there's no
+attached terminal left to pass a CLI argument to or prompt on; the config
+and model are resolved, and both listeners bound, *before* detaching, so a
+bad config or a port already in use is still reported to the invoking
+terminal rather than silently lost. `-h`/`--help` and `-V`/`--version` are
+also available.
+
+`-s`/`--shell-completions` prints a bash/zsh/fish completion script for the
+shell detected from `$SHELL`:
+
+```sh
+# bash — add to ~/.bashrc:
+eval "$(orangu-server -s)"
+# zsh — write once to your fpath directory:
+orangu-server -s > ~/.zsh/completions/_orangu-server
+# fish — add to ~/.config/fish/config.fish:
+orangu-server -s | source
+```
+
+Covers every flag above, the five subcommand names, and both the positional
+`model` argument and `show`'s own argument — the latter two completed by
+shelling back out to `orangu-server list` itself and reading its first two
+columns (`NR`/`MODEL`), the same way `orangu`'s own shell completions read
+`~/.orangu/sessions` directly rather than needing any extra plumbing in the
+binary.
 
 ## Roles
 
 `--all`/`--code`/`--review`/`--explorer`/`--embedding` (mutually exclusive;
 `--all` is the default) hint at which of `orangu-server`'s own features
 matter for a given deployment. These mirror `orangu`'s conventional
-deployment roles (see `orangu-gguf`'s role wizard), but a single
-`orangu-server` process serves whatever model it's given rather than
+deployment roles (`all`/`code`/`review`/`explorer`/`embeddings`), but a
+single `orangu-server` process serves whatever model it's given rather than
 picking one — so unlike a real `llama-server` process per role, this only
 adjusts the handful of things that are actually role-specific in an engine
 that doesn't have `llama-server`'s `--fit`/`--tools`/`--webui-mcp-proxy`/

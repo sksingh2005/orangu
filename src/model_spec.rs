@@ -114,7 +114,7 @@ pub fn scan_models_dir(dir: &Path) -> Result<Vec<ModelSummary>> {
 /// Resolves a `show` target that names a file directly: used as-is if it
 /// names an existing file (relative to the current directory or absolute),
 /// otherwise resolved against the configured models directory — so
-/// `orangu-gguf show my-model.gguf` works without repeating the full path.
+/// `orangu-server show my-model.gguf` works without repeating the full path.
 fn resolve_model_path(models_dir: &Path, requested: &str) -> Result<PathBuf> {
     let direct = PathBuf::from(requested);
     if direct.is_file() {
@@ -134,7 +134,7 @@ fn resolve_model_path(models_dir: &Path, requested: &str) -> Result<PathBuf> {
 /// first — no directory scan needed, so the common case of passing a path
 /// stays instant), an `NR` from `list`'s first column, or a `MODEL` name
 /// from its second. `list`'s numbering and grouping are recomputed here
-/// (`orangu-gguf` keeps no state between runs), so `NR` is only meaningful
+/// (`orangu-server` keeps no state between runs), so `NR` is only meaningful
 /// as of the current directory contents — matching `list`'s exact sort
 /// order is what keeps it stable between one `list` call and the next.
 pub fn resolve_show_target(models_dir: &Path, requested: &str) -> Result<PathBuf> {
@@ -152,7 +152,7 @@ pub fn resolve_show_target(models_dir: &Path, requested: &str) -> Result<PathBuf
             .map(|group| group.representative_path.clone())
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "no model with NR {nr} ({} model(s) found under {}; run 'orangu-gguf list' to see them)",
+                    "no model with NR {nr} ({} model(s) found under {}; run 'orangu-server list' to see them)",
                     groups.len(),
                     models_dir.display()
                 )
@@ -165,7 +165,7 @@ pub fn resolve_show_target(models_dir: &Path, requested: &str) -> Result<PathBuf
         .map(|group| group.representative_path.clone())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "'{requested}' was not found as a file, an NR, or a MODEL name; run 'orangu-gguf list' to see valid values"
+                "'{requested}' was not found as a file, an NR, or a MODEL name; run 'orangu-server list' to see valid values"
             )
         })
 }
@@ -175,8 +175,9 @@ pub fn resolve_show_target(models_dir: &Path, requested: &str) -> Result<PathBuf
 /// [`resolve_show_target`]), or a `<user>/<model>[:quant]` Hugging Face
 /// repo — to a local `.gguf` path, **fetching it from the Hub first** when
 /// it names a repo not already cached under `models_dir`. This is what lets
-/// `orangu-server <spec>` and `orangu-gguf download <spec>` both start from
-/// the same bare model reference with no separate download step.
+/// `orangu-server <spec>` start straight from a bare model reference (the
+/// same one `orangu-server download <spec>` would fetch explicitly) with no
+/// separate download step.
 pub fn resolve_or_fetch_model(models_dir: &Path, requested: &str) -> Result<PathBuf> {
     if let Ok(path) = resolve_show_target(models_dir, requested) {
         return Ok(path);

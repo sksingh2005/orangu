@@ -13,17 +13,16 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! `orangu-gguf suggest`: a rough, hardware-based suggestion for which GGUF
-//! model *size* (parameter count) is likely to run comfortably on this
+//! `orangu-server suggest`: a rough, hardware-based suggestion for which
+//! GGUF model *size* (parameter count) is likely to run comfortably on this
 //! machine — not a specific model yet, just a size class. Reuses the same
 //! CPU/GPU detection `system` reports, then estimates the total VRAM a
 //! candidate model would need across a curated ladder of common open-weight
 //! parameter counts, recommending the largest that fits — for each of
 //! several context lengths ([`CONTEXT_LADDER`], 1K to 256K) and each of a
 //! few common quantizations ([`QUANT_LADDER`]: `Q2_K`, `Q4_K_M` — this
-//! project's own default, matching `download.rs`'s `DEFAULT_TAG_PREFERENCE`
-//! and the role wizard's own `-hf ...` examples — and `Q8_0`), presented as
-//! a table.
+//! project's own default, matching `orangu::model_download`'s
+//! `DEFAULT_TAG_PREFERENCE` — and `Q8_0`), presented as a table.
 //!
 //! The memory-estimation formula mirrors Sam McLeod's GGUF VRAM Estimator
 //! (<https://smcleod.net/vram-estimator/>, read directly from its published
@@ -47,13 +46,13 @@ const RUNTIME_OVERHEAD_BYTES: u64 = 500 * 1024 * 1024;
 
 /// Bits per weight for Q4_K_M, from smcleod's own per-quantization
 /// bits-per-weight table — this project's own default quantization
-/// (`download.rs`'s `DEFAULT_TAG_PREFERENCE`, the role wizard's examples).
+/// (`orangu::model_download`'s `DEFAULT_TAG_PREFERENCE`).
 const DEFAULT_BITS_PER_WEIGHT: f64 = 4.83;
 
 /// Quantizations (tag, bits-per-weight) the suggestion table sizes model
 /// weights against, in ascending bit-depth order — bits-per-weight values
 /// from smcleod's own per-quantization table. `Q2_K` and `Q8_0` bracket this
-/// project's own default (`Q4_K_M`, matching `download.rs`'s
+/// project's own default (`Q4_K_M`, matching `orangu::model_download`'s
 /// `DEFAULT_TAG_PREFERENCE`).
 const QUANT_LADDER: &[(&str, f64)] = &[
     ("Q2_K", 3.00),
@@ -61,14 +60,14 @@ const QUANT_LADDER: &[(&str, f64)] = &[
     ("Q8_0", 8.5),
 ];
 
-/// KV cache held at Q8_0 (8 bits/element), matching the role wizard's own
-/// `-ctk q8_0 -ctv q8_0` default rather than assuming a full FP16 cache.
+/// KV cache held at Q8_0 (8 bits/element) rather than a full FP16 cache —
+/// matches how `orangu-server` itself stores it (see `engine::kv_cache`).
 const KV_CACHE_BITS: f64 = 8.0;
 
 /// Context lengths (in tokens) the suggestion table sizes the KV cache
-/// against, from a bare minimum up to the role wizard's own largest default
-/// (262144, for `all`/`review`) — since KV cache grows linearly with context,
-/// the model size that comfortably fits shrinks as context grows.
+/// against, from a bare minimum up to a generous long-context ceiling —
+/// since KV cache grows linearly with context, the model size that
+/// comfortably fits shrinks as context grows.
 const CONTEXT_LADDER: &[u64] = &[1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
 
 /// A curated ladder of common open-weight model parameter counts (in
@@ -181,7 +180,7 @@ fn is_combined_budget_eligible(gpu: &GpuInfo) -> bool {
 }
 
 /// The sum of every dedicated GPU's `vram_total_bytes` (multi-GPU
-/// tensor-split, matching the role wizard's `-sm layer`), `0` when there's
+/// tensor-split across every dedicated device found), `0` when there's
 /// none at all (see [`is_dedicated_for_budget`] for what counts as dedicated
 /// per platform). The conservative, GPU-only budget: everything fits in real
 /// VRAM, no spillover to a shared pool or system RAM.

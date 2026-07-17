@@ -139,9 +139,9 @@ fn parses_build_commands() {
     let request = build_of("/build docs").unwrap();
     assert_eq!(request.profile, BuildProfile::Release);
     assert_eq!(request.target.as_deref(), Some("docs"));
-    let request = build_of("/build debug orangu-gguf").unwrap();
+    let request = build_of("/build debug orangu-server").unwrap();
     assert_eq!(request.profile, BuildProfile::Debug);
-    assert_eq!(request.target.as_deref(), Some("orangu-gguf"));
+    assert_eq!(request.target.as_deref(), Some("orangu-server"));
     let request = build_of("/build install release").unwrap();
     assert_eq!(request.profile, BuildProfile::Release);
     assert_eq!(request.target.as_deref(), Some("install"));

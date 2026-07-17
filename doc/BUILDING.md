@@ -1,11 +1,10 @@
 # Building orangu
 
-`orangu` is a Rust project with four binaries: the interactive client
+`orangu` is a Rust project with three binaries: the interactive client
 (`orangu`), an optional HTTP proxy that starts/stops llama.cpp on demand
-(`orangu-coordinator`, see [doc/COORDINATOR.md](COORDINATOR.md)), a
-standalone CPU/GPU and GGUF file inventory tool (`orangu-gguf`, see
-[doc/GGUF.md](GGUF.md)), and a native GGUF inference server
-(`orangu-server`, see [doc/SERVER.md](SERVER.md)).
+(`orangu-coordinator`, see [doc/COORDINATOR.md](COORDINATOR.md)), and a
+native GGUF inference server that doubles as a standalone CPU/GPU and GGUF
+file inventory tool (`orangu-server`, see [doc/SERVER.md](SERVER.md)).
 
 ## Prerequisites
 
@@ -139,8 +138,8 @@ cargo run --bin orangu-coordinator -- --config ./doc/etc/orangu-coordinator.conf
 ```
 
 ```sh
-cargo run --bin orangu-gguf -- system
-cargo run --bin orangu-gguf -- --config ./doc/etc/orangu-gguf.conf list
+cargo run --bin orangu-server -- system
+cargo run --bin orangu-server -- --config ./doc/etc/orangu-server.conf list
 ```
 
 ```sh
