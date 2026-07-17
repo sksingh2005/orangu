@@ -1861,8 +1861,12 @@ async fn run() -> Result<()> {
                 // window and copy its raw Markdown to the system clipboard; the
                 // Markdown is also kept for `/comment <n> with review` and
                 // `/export review`.
-                let (lines, markdown) =
-                    review_exit_output(&review.files, &review.comments, &review.general_notes);
+                let (lines, markdown) = review_exit_output(
+                    &review.files,
+                    &review.comments,
+                    &review.general_notes,
+                    orangu::tui::display_model_name(header_status.is_coordinator, &active_model_id),
+                );
                 last_review_report = Some(markdown.clone());
                 // Capture the per-comment source code for the export's appendix
                 // (the `/show_file` view around each comment).

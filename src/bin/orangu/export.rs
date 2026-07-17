@@ -4400,7 +4400,7 @@ mod tests {
                 patch: String::new(),
             },
         ];
-        let (_lines, markdown) = crate::review::review_exit_output(&files, &[], &[]);
+        let (_lines, markdown) = crate::review::review_exit_output(&files, &[], &[], "gemma");
         assert!(markdown.contains("Not reviewed: **b.txt**"));
         // A file left unreviewed rejects the patch (so the banner is red).
         assert_eq!(overall_verdict(&markdown), Verdict::Rejected);
