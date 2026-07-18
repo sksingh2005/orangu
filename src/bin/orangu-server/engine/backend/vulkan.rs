@@ -521,9 +521,10 @@ pub struct VulkanBackend {
     /// Scoped to its most clearly
     /// justified single piece: the per-request KV mirror
     /// (`engine::kv_cache::LayerCache::sync_gpu`) stored as `f16` instead
-    /// of `f32`. **`false` unless both** the adapter supports native WGSL
-    /// `f16` **and** `ORANGU_KV_F16=1` is set — see `Self::try_init`'s own
-    /// comment at this flag's construction site. Only the KV mirror is
+    /// of `f32`. **`true` whenever the adapter supports native WGSL
+    /// `f16`**, unless `ORANGU_NO_KV_F16=1` opts out — see `Self::
+    /// try_init`'s own comment at this flag's construction site. Only the
+    /// KV mirror is
     /// converted; f16 dequant/dot math in the matmul kernels, f16
     /// activation buffers between fused-chain stages, and f16 elementwise/
     /// norm/softmax are **not** part of this flag (those
@@ -581,8 +582,9 @@ pub struct VulkanBackend {
     /// kernels (this one, wide-load-alone, packed-alone) are chosen among.
     ///
     /// Correctness-verified; kept available as a selectable combination
-    /// rather than a default (same precedent as `kv_f16`/`gpu_sample`/
-    /// `ORANGU_BATCH_DECODE`).
+    /// rather than a default (same precedent as `gpu_sample`/
+    /// `ORANGU_BATCH_DECODE` — `kv_f16` moved off this list once it became
+    /// on-by-default itself).
     wide_packed_pipeline: Option<wgpu::ComputePipeline>,
     /// Memory-level-parallelism decode kernel for `Q4_K`
     /// (`vulkan_shaders::shader_source_reduce_q4k_wide_unroll`).
@@ -787,23 +789,26 @@ impl VulkanBackend {
         let limits = adapter.limits();
         // An `f16`-stored KV
         // mirror (see `Self::kv_f16`'s own doc comment for what else that
-        // idea does and does not cover), gated **off by default** and only
-        // enabled by `ORANGU_KV_F16=1`, even on adapters that support
-        // `wgpu::Features::SHADER_F16`. Built and cross-checked (`Self::
-        // kv_cast_pipeline`, `engine::kv_cache`'s `f16` upload path). The
-        // KV-cache write's extra compute-shader dispatch (replacing what
-        // was a plain `copy_buffer_to_buffer`) trades off against the
-        // halved KV-read memory traffic, so whether it helps depends on
-        // context length; left available and opt-in rather than made the
-        // default.
+        // idea does and does not cover). **On by default whenever the
+        // adapter supports `wgpu::Features::SHADER_F16`** — matches
+        // llama.cpp's own default KV cache type (`GGML_TYPE_F16` for both K
+        // and V, `llama_context_default_params()`), which this was
+        // previously *worse* than by defaulting to `f32`, doubling KV-read
+        // memory traffic on every attention dispatch for no benefit; see
+        // `doc/SERVER_ROADMAP.md`'s "Done" section. Built and
+        // cross-checked (`Self::kv_cast_pipeline`, `engine::kv_cache`'s
+        // `f16` upload path). Opt out with `ORANGU_NO_KV_F16=1` (same
+        // opt-out-of-a-default naming convention as `wide_unroll`'s
+        // `ORANGU_NO_MLP_UNROLL`) if a specific adapter/driver combination
+        // turns out to regress on it.
         // Requested whenever the hardware supports it, independent of
-        // whether either `f16`-gated opt-in below (`kv_f16`,
+        // whether either `f16`-gated flag below (`kv_f16`,
         // `packed_dot_f16`) is actually turned on — a device that never
         // requested this feature can't retroactively use it, so both
-        // opt-ins need it present at device-creation time even if only one
-        // (or neither) ends up used.
+        // need it present at device-creation time even if only one (or
+        // neither) ends up used.
         let supports_f16 = adapter.features().contains(wgpu::Features::SHADER_F16);
-        let kv_f16 = supports_f16 && std::env::var_os("ORANGU_KV_F16").is_some();
+        let kv_f16 = supports_f16 && std::env::var_os("ORANGU_NO_KV_F16").is_none();
         // See `Self::
         // packed_dot_f16`'s own doc comment.
         let packed_dot_f16 = supports_f16 && std::env::var_os("ORANGU_PACKED_DOT").is_some();
@@ -851,7 +856,7 @@ impl VulkanBackend {
         // separate `subgroupAdd` calls per workgroup, one per row) was pure
         // overhead. **Off by default; opt in with `ORANGU_SUBGROUP=1`** —
         // kept available as an honest negative result, the same precedent
-        // as `kv_f16`/`gpu_sample`/`ORANGU_BATCH_DECODE`, not deleted, since
+        // as `gpu_sample`/`ORANGU_BATCH_DECODE`, not deleted, since
         // a different adapter/driver's `subgroupAdd` lowering could still
         // make this pay off.
         // Not stored as a field — every kernel it affects is a straight

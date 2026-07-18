@@ -117,11 +117,19 @@ impl Sampler {
             .enumerate()
             .map(|(i, &v)| (i as u32, v))
             .collect();
-        candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
 
+        // A full `sort_by` here is an O(n log n) pass over the entire
+        // vocabulary (262k tokens for Gemma) on every sampled token. When
+        // top_k narrows the field first, partition around the k-th largest
+        // logit in O(n) with `select_nth_unstable_by` and only sort that
+        // small prefix — top_p/min_p below still need descending order,
+        // just over `top_k` elements instead of the whole vocab.
         if self.params.top_k > 0 && self.params.top_k < candidates.len() {
-            candidates.truncate(self.params.top_k);
+            let k = self.params.top_k;
+            candidates.select_nth_unstable_by(k - 1, |a, b| b.1.total_cmp(&a.1));
+            candidates.truncate(k);
         }
+        candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         softmax_pairs(&mut candidates);
         apply_top_p(&mut candidates, self.params.top_p);
