@@ -996,12 +996,20 @@ mod tests {
             .path()
             .join("models--bartowski--Llama-3.2-3B-Instruct-GGUF/snapshots/rev1");
         std::fs::create_dir_all(&old_dir).unwrap();
-        write_minimal_gguf(&old_dir.join("Llama-3.2-3B-Instruct-Q4_K_M.gguf"), "llama", None);
+        write_minimal_gguf(
+            &old_dir.join("Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
+            "llama",
+            None,
+        );
         let current_dir = dir
             .path()
             .join("models--bartowski--Llama-3.2-3B-Instruct-GGUF/snapshots/rev2");
         std::fs::create_dir_all(&current_dir).unwrap();
-        write_minimal_gguf(&current_dir.join("Llama-3.2-3B-Instruct-Q8_0.gguf"), "llama", None);
+        write_minimal_gguf(
+            &current_dir.join("Llama-3.2-3B-Instruct-Q8_0.gguf"),
+            "llama",
+            None,
+        );
 
         let models = scan_models_dir(dir.path()).unwrap();
         let groups = group_models(&models);
