@@ -19,34 +19,34 @@ name = "orangu-server"
 path = "src/bin/orangu-server/main.rs"
 
 [dependencies]
-anyhow = "1.0.100"
+anyhow = "1.0.103"
 arboard = { version = "3.6.1", default-features = false }
 axum = "0.8.9"
-clap = { version = "4.5.39", features = ["derive"] }
+clap = { version = "4.6.2", features = ["derive"] }
 crossterm = "0.29.0"
-home = "0.5.11"
+home = "0.5.12"
 html2text = "0.17.1"
-ignore = "0.4.24"
+ignore = "0.4.30"
 markdown = "1.0.0"
-printpdf = { version = "0.10.0", default-features = false, features = ["text_layout"] }
-regex = "1.10"
+printpdf = { version = "0.12.0", default-features = false, features = ["text_layout"] }
+regex = "1.13"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream", "blocking"] }
-rust-fontconfig = "4.4.4"
+rust-fontconfig = "4.4.6"
 rustyline = "18.0.1"
-rayon = "1.10.0"
+rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 shell-words = "1.1"
 syntect = { version = "5.3.0", features = ["html"] }
-terminal_size = "0.4.1"
+terminal_size = "0.4.4"
 ttf-parser = "0.25.1"
 sha2 = "0.11.0"
 tiktoken-rs = "0.12.0"
-tokio = { version = "1.48.0", features = ["full"] }
+tokio = { version = "1.53.0", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2.5.0"
-infer = "0.19.0"
+infer = "0.22.0"
 mime_guess = "2.0.5"
 strum = "0.28.0"
 strum_macros = "0.28.0"
@@ -66,7 +66,7 @@ tree-sitter-swift = "0.7"
 tree-sitter-dart = "0.2"
 tree-sitter-erlang = "0.19"
 petgraph = "0.8.3"
-tree-sitter = "0.26.9"
+tree-sitter = "0.26.11"
 tree-sitter-rust = "0.24.2"
 streaming-iterator = "0.1.9"
 tree-sitter-python = "0.25.0"
@@ -76,11 +76,11 @@ tree-sitter-java = "0.23.5"
 tree-sitter-cpp = "0.23.4"
 tree-sitter-typescript = "0.23.2"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
-minijinja = "2.5"
-minijinja-contrib = { version = "2.5", features = ["pycompat"] }
-half = "2.4"
+minijinja = "2.21"
+minijinja-contrib = { version = "2.21", features = ["pycompat"] }
+half = "2.7"
 memmap2 = "0.9"
-rand = "0.9"
+rand = "0.10"
 tokio-stream = "0.1"
 futures = "0.3"
 async-stream = "0.3"
@@ -100,7 +100,7 @@ libc = "0.2"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
-tempfile = "3.20.0"
+tempfile = "3.27.0"
 
 [[bench]]
 name = "compression"

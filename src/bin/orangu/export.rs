@@ -50,12 +50,11 @@ use printpdf::{
     PaintMode, ParsedFont, PdfDocument, PdfFontHandle, PdfPage, PdfSaveOptions, Point, Pt, Rect,
     Rgb, TextItem,
 };
-use rust_fontconfig::FontBytes;
 use std::{
     fs::File,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -2102,14 +2101,12 @@ fn load_fonts(doc: &mut PdfDocument) -> Result<DocFonts> {
 
 /// Parse and register one embedded face, returning its document font handle.
 ///
-/// `ParsedFont::from_bytes` alone leaves the font's source bytes unattached,
-/// which then makes printpdf embed an empty (0-byte) `FontFile`/`FontFile2`
-/// stream — the PDF opens with the right layout but no visible text. Attach
-/// the source via `with_source_bytes` so embedding (and subsetting) has the
-/// actual font program to draw from.
+/// `ParsedFont::from_bytes` retains the font's source bytes, which
+/// `doc.add_font` needs to embed the actual font program (rather than an
+/// empty `FontFile`/`FontFile2` stream — a PDF with the right layout but no
+/// visible text).
 fn add_external_font(doc: &mut PdfDocument, bytes: &'static [u8]) -> Option<PdfFontHandle> {
-    let parsed = ParsedFont::from_bytes(bytes, 0, &mut Vec::new())?
-        .with_source_bytes(Arc::new(FontBytes::Owned(Arc::from(bytes))));
+    let parsed = ParsedFont::from_bytes(bytes, 0, &mut Vec::new())?;
     Some(PdfFontHandle::External(doc.add_font(&parsed)))
 }
 

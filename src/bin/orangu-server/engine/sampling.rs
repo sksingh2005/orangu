@@ -18,7 +18,7 @@
 //! closely enough for these parameters. `temperature <= 0.0` means greedy
 //! (always the highest-logit token) and is fully deterministic.
 
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 
 #[derive(Clone, Debug)]
 pub struct SamplingParams {
