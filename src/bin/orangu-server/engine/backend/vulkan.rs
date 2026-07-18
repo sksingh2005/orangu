@@ -2088,11 +2088,11 @@ impl VulkanBackend {
     /// fourth time (`gpu_rope`/`gpu_perhead_rmsnorm`/`gpu_perhead_rmsnorm_
     /// weightless` — all standalone, cross-check-test-only entry points;
     /// `matmul_batch`/`fused_post_attention`/`gpu_attention` predate this
-    /// and aren't worth the churn of switching over). `pub` since
-    /// `GemmaModel::forward`
-    /// also uses this directly to finish its own hand-assembled
-    /// full-forward-pass encoder.
-    pub fn submit_and_readback(
+    /// and aren't worth the churn of switching over). Every caller's own
+    /// output size varies from call to call, unlike `Self::
+    /// submit_and_readback_for`'s fixed-per-weight one, so a fresh buffer
+    /// each time is the right call here, not a cache.
+    fn submit_and_readback(
         &self,
         mut encoder: wgpu::CommandEncoder,
         src: &wgpu::Buffer,
@@ -3777,6 +3777,44 @@ impl VulkanBackend {
             self.record_matmul(&mut pass, w, &g);
         }
         g.output_buffer.clone()
+    }
+
+    /// Finishes and submits `encoder`, then reads back `w`'s own
+    /// `record_full_matmul` output — `w`'s `CachedOpResources` entry
+    /// (`Self::op_entry_for`) already has a `readback_buffer` sized to
+    /// `w`'s output once and reused forever, the same one `matmul_batch`
+    /// reads its own results through, so this copies into *that* buffer
+    /// instead of `submit_and_readback`'s fresh one. Callers whose output
+    /// size can vary from call to call (`submit_and_readback`'s own —
+    /// `gpu_rope`/`gpu_perhead_rmsnorm`/etc.) can't do this; `w`'s output
+    /// length is fixed for the model's lifetime, so one persistent buffer
+    /// is always the right size.
+    pub fn submit_and_readback_for(
+        &self,
+        mut encoder: wgpu::CommandEncoder,
+        w: &QuantMatrix,
+    ) -> Vec<f32> {
+        let entry = self.op_entry_for(w);
+        let g = entry.lock().expect("op cache entry poisoned");
+        encoder.copy_buffer_to_buffer(&g.output_buffer, 0, &g.readback_buffer, 0, g.output_len);
+        self.queue.submit(Some(encoder.finish()));
+        self.submission_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        g.readback_buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |result| {
+                result.expect("mapping the cached matmul readback buffer failed");
+            });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("polling for the cached matmul readback failed");
+        let data = g.readback_buffer.slice(..).get_mapped_range().expect(
+            "cached matmul readback buffer was not mapped after a successful map_async + poll",
+        );
+        let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        g.readback_buffer.unmap();
+        result
     }
 
     /// Records gemma4's per-layer-embedding (PLE) *input* projection —

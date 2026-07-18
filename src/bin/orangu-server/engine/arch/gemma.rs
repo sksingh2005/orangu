@@ -898,9 +898,9 @@ impl ModelForward for GemmaModel {
             // PLE fusion folded into the same encoder. Prefill (`n_tokens
             // > 1`) and the CPU backend still take the fully-CPU-
             // orchestrated `else` branch below.
-            let (encoder, logits_buf) =
+            let (encoder, _logits_buf) =
                 self.record_decode_forward(vulkan, cache, tokens[0], start_pos, &x)?;
-            vulkan.submit_and_readback(encoder, &logits_buf, self.output_weight.out_dim)
+            vulkan.submit_and_readback_for(encoder, &self.output_weight)
         } else {
             let x = self.run_layers_cpu(cache, &x, tokens, start_pos)?;
             let last = &mut x[(n_tokens - 1) * n_embd..].to_vec();
