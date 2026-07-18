@@ -118,6 +118,27 @@ pub struct GpuAttnDispatch {
     pub k_cast: Option<KvCastDispatch>,
     /// Same as `k_cast`, for V.
     pub v_cast: Option<KvCastDispatch>,
+    /// Split-k attention (`doc/SERVER_ROADMAP.md` item 6) — `None` unless
+    /// `VulkanBackend::attn_split` is set. See [`AttnSplitDispatch`]'s
+    /// own doc comment.
+    pub split: Option<AttnSplitDispatch>,
+}
+
+/// Split-k attention's own per-(calling layer, `LayerCache`) resources —
+/// same per-calling-layer keying rationale as [`GpuAttnDispatch`] itself
+/// (the `split_bind_group`'s `aq` binding points at a specific layer's Q
+/// output buffer, the same cross-layer-donor hazard that struct's own doc
+/// comment describes). `reduce_bind_group` writes into the *same*
+/// [`GpuAttnDispatch::out_buf`] the un-split path would have written
+/// directly, so downstream readers of `out_buf` (the readback that turns
+/// it into `attn_out`) don't need to know or care which path actually
+/// filled it.
+#[allow(dead_code)]
+pub struct AttnSplitDispatch {
+    pub split_bind_group: wgpu::BindGroup,
+    pub split_meta_buf: wgpu::Buffer,
+    pub reduce_bind_group: wgpu::BindGroup,
+    pub reduce_meta_buf: wgpu::Buffer,
 }
 
 /// One cached `f32 -> f16` cast dispatch (`VulkanBackend::kv_cast_pipeline`)

@@ -447,6 +447,20 @@ impl GemmaModel {
 
         let mut encoder = vulkan.new_encoder("orangu-server full forward encoder");
 
+        // See `VulkanBackend::gpu_timestamps`'s own doc comment for what
+        // this measures and `ORANGU_GPU_TIMESTAMPS=1` to enable it —
+        // `timestamps` is `None` (and every `write_timestamp` below a
+        // no-op) unless it's set. Fetched once per decode step, not
+        // cached across steps, since the query set itself is what's
+        // cached (`VulkanBackend::timestamp_query_set` — cheap to clone,
+        // built once for the model's lifetime).
+        let timestamps = vulkan
+            .gpu_timestamps()
+            .then(|| vulkan.timestamp_query_set(self.layers.len()));
+        if let Some(t) = &timestamps {
+            encoder.write_timestamp(t, 0);
+        }
+
         let ple_buf = if has_ple {
             let gathered = self.gather_per_layer_tok_embd(&[token], 1);
             Some(
@@ -472,6 +486,9 @@ impl GemmaModel {
         } else {
             None
         };
+        if let Some(t) = &timestamps {
+            encoder.write_timestamp(t, 1);
+        }
 
         let mut prev_buf: Option<wgpu::Buffer> = None;
         for (il, layer) in self.layers.iter().enumerate() {
@@ -561,6 +578,9 @@ impl GemmaModel {
                 },
             );
             prev_buf = Some(out);
+            if let Some(t) = &timestamps {
+                encoder.write_timestamp(t, (2 + il) as u32);
+            }
         }
         let last_buf = prev_buf.expect("a gemma4 model always has at least one layer");
         let normed_buf = vulkan.record_output_norm(
@@ -575,6 +595,10 @@ impl GemmaModel {
             GpuInput::Gpu(&normed_buf, 0),
             &self.output_weight,
         );
+        if let Some(t) = &timestamps {
+            encoder.write_timestamp(t, (2 + self.layers.len()) as u32);
+            vulkan.finish_timestamps(&mut encoder);
+        }
         Ok((encoder, logits_buf))
     }
 
@@ -900,7 +924,15 @@ impl ModelForward for GemmaModel {
             // orchestrated `else` branch below.
             let (encoder, _logits_buf) =
                 self.record_decode_forward(vulkan, cache, tokens[0], start_pos, &x)?;
-            vulkan.submit_and_readback_for(encoder, &self.output_weight)
+            let logits = vulkan.submit_and_readback_for(encoder, &self.output_weight);
+            // `submit_and_readback_for`'s own `poll(wait_indefinitely())`
+            // already blocked until this whole submission (timestamp
+            // resolve included) finished, so the readback here is never
+            // premature.
+            if vulkan.gpu_timestamps() {
+                vulkan.report_timestamps(start_pos, self.layers.len());
+            }
+            logits
         } else {
             let x = self.run_layers_cpu(cache, &x, tokens, start_pos)?;
             let last = &mut x[(n_tokens - 1) * n_embd..].to_vec();

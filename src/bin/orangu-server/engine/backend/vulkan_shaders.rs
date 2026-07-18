@@ -2396,6 +2396,296 @@ pub fn shader_source_attention(kv_f16: bool, subgroup: bool) -> String {
         .replace("%SUM_REDUCE_BLOCK%", sum_block)
 }
 
+/// Split-k phase 1 of two — see `doc/SERVER_ROADMAP.md` item 6. Same
+/// per-tile online-softmax algorithm as [`ATTENTION_SHADER_TEMPLATE`]
+/// (`score_at`, the tile loop, the rescale-and-merge update — all
+/// unchanged line for line), but each workgroup now covers one `(head,
+/// split)` pair instead of one whole head: `wid.x` selects the head (as
+/// before), `wid.y` selects which of `am.k_num` roughly-equal slices of
+/// `[0, n_pos)` this workgroup's tile loop runs over
+/// (`split_start`/`split_end`, computed from `wid.y` and `am.k_num`).
+/// `n_head=8, n_head_kv=1` (E2B's own, unusually aggressive 8:1 GQA
+/// ratio) means the un-split kernel dispatches only 8 workgroups total,
+/// regardless of context length — measured (`_scratch_measure_attention_
+/// dispatch_cost`, `vulkan.rs`) at ~39% of a decode layer's own GPU time
+/// despite doing very little arithmetic, the signature of an occupancy-
+/// bound dispatch, not a compute-bound one. `am.k_num` workgroups per
+/// head instead of one raises that occupancy `k_num`-fold (`ATTN_SPLIT_K`
+/// in `vulkan.rs`), the same split-k idea `flash_attn_split_k_reduce.comp`
+/// implements in llama.cpp's own Vulkan backend (landed for the identical
+/// reason, ["Implement split_k for coopmat2 flash
+/// attention"](https://github.com/ggml-org/llama.cpp/pull/12627)).
+///
+/// Writes unnormalized partial results instead of the final softmax
+/// output — this phase's own `(m, l, acc)` for its slice, not `acc / l`
+/// — into `partial_ml`/`partial_acc` at index `h * am.k_num +
+/// wid.y`, for [`ATTENTION_SPLIT_REDUCE_SHADER`] to merge. An empty
+/// slice (`split_start >= split_end`, only possible when `am.n_pos <
+/// am.k_num`, i.e. very early in a generation) leaves `m`/`l` at their
+/// initial neutral values (`-1e30`/`0.0`) — the same identity element the
+/// un-split kernel's own rescale-and-merge update already relies on
+/// between tiles, so the reduce phase needs no special case for it.
+///
+/// Binding shape (3 read-only storage, 2 read-write storage, 1 uniform)
+/// deliberately matches [`ATTENTION_SHADER_TEMPLATE`]'s own (`aq`/
+/// `k_cache`/`v_cache` unchanged; `partial_ml`/`partial_acc` standing in
+/// for `probs_scratch`/`aout`), so this reuses `VulkanBackend::
+/// attn_bind_group_layout`/`attn_pipeline_layout` rather than needing new
+/// ones.
+const ATTENTION_SPLIT_SHADER_TEMPLATE: &str = r#"
+%KV_ENABLE%
+struct AttnSplitMeta {
+    n_head: u32,
+    n_head_kv: u32,
+    head_dim: u32,
+    window_start: u32,
+    n_pos: u32,
+    k_num: u32,
+    scale: f32,
+    _pad: u32,
+}
+
+@group(0) @binding(0) var<storage, read> aq: array<f32>;
+@group(0) @binding(1) var<storage, read> k_cache: array<%KV_TYPE%>;
+@group(0) @binding(2) var<storage, read> v_cache: array<%KV_TYPE%>;
+@group(0) @binding(3) var<storage, read_write> partial_ml: array<f32>;
+@group(0) @binding(4) var<storage, read_write> partial_acc: array<f32>;
+@group(0) @binding(5) var<uniform> am: AttnSplitMeta;
+
+const MAX_HEAD_DIM: u32 = 2048u;
+
+var<workgroup> shared_reduce: array<f32, 64>;
+var<workgroup> tile_probs: array<f32, 64>;
+var<workgroup> acc: array<f32, MAX_HEAD_DIM>;
+
+fn score_at(h: u32, kv_head: u32, p: u32) -> f32 {
+    let head_dim = am.head_dim;
+    let q_base = h * head_dim;
+    let k_base = (p * am.n_head_kv + kv_head) * head_dim;
+    var s: f32 = 0.0;
+    var d: u32 = 0u;
+    loop {
+        if (d >= head_dim) {
+            break;
+        }
+        s = s + aq[q_base + d] * f32(k_cache[k_base + d]);
+        d = d + 1u;
+    }
+    return s * am.scale;
+}
+
+@compute @workgroup_size(64)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    %SUBGROUP_PARAMS%
+) {
+    let h = wid.x;
+    let split_idx = wid.y;
+    let local = lid.x;
+    let group_size = am.n_head / am.n_head_kv;
+    let kv_head = h / group_size;
+    let head_dim = am.head_dim;
+    let k_num = am.k_num;
+
+    let split_len = (am.n_pos + k_num - 1u) / k_num;
+    let split_start = split_idx * split_len;
+    let split_end = min(split_start + split_len, am.n_pos);
+
+    var zd: u32 = local;
+    loop {
+        if (zd >= head_dim) {
+            break;
+        }
+        acc[zd] = 0.0;
+        zd = zd + 64u;
+    }
+
+    var m: f32 = -1e30;
+    var l: f32 = 0.0;
+
+    if (split_start < split_end) {
+        var tile_start: u32 = split_start;
+        loop {
+            if (tile_start >= split_end) {
+                break;
+            }
+            let tile_len = min(64u, split_end - tile_start);
+            let has_pos = local < tile_len;
+            let p = am.window_start + tile_start + local;
+
+            var my_score: f32 = -1e30;
+            if (has_pos) {
+                my_score = score_at(h, kv_head, p);
+            }
+            %MAX_REDUCE_BLOCK%
+
+            var my_prob: f32 = 0.0;
+            if (has_pos) {
+                my_prob = exp(my_score - tile_max);
+            }
+            tile_probs[local] = my_prob;
+            %SUM_REDUCE_BLOCK%
+
+            let new_m = max(m, tile_max);
+            let alpha_old = exp(m - new_m);
+            let alpha_tile = exp(tile_max - new_m);
+            l = l * alpha_old + tile_sum * alpha_tile;
+
+            var d2: u32 = local;
+            loop {
+                if (d2 >= head_dim) {
+                    break;
+                }
+                var tile_contribution: f32 = 0.0;
+                var j: u32 = 0u;
+                loop {
+                    if (j >= tile_len) {
+                        break;
+                    }
+                    let vp = am.window_start + tile_start + j;
+                    let v_base = (vp * am.n_head_kv + kv_head) * head_dim;
+                    tile_contribution = tile_contribution + tile_probs[j] * f32(v_cache[v_base + d2]);
+                    j = j + 1u;
+                }
+                acc[d2] = acc[d2] * alpha_old + alpha_tile * tile_contribution;
+                d2 = d2 + 64u;
+            }
+
+            m = new_m;
+            workgroupBarrier();
+            tile_start = tile_start + 64u;
+        }
+    }
+
+    let out_base = h * k_num + split_idx;
+    if (local == 0u) {
+        partial_ml[out_base * 2u] = m;
+        partial_ml[out_base * 2u + 1u] = l;
+    }
+    var d3: u32 = local;
+    loop {
+        if (d3 >= head_dim) {
+            break;
+        }
+        partial_acc[out_base * head_dim + d3] = acc[d3];
+        d3 = d3 + 64u;
+    }
+}
+"#;
+
+pub fn shader_source_attention_split(kv_f16: bool, subgroup: bool) -> String {
+    let (max_block, sum_block) = if subgroup {
+        attention_subgroup_blocks()
+    } else {
+        attention_classic_blocks()
+    };
+    let subgroup_params = if subgroup {
+        "@builtin(subgroup_invocation_id) subgroup_invocation_id: u32,\n    @builtin(subgroup_id) subgroup_id: u32,\n    @builtin(num_subgroups) num_subgroups: u32,"
+    } else {
+        ""
+    };
+    ATTENTION_SPLIT_SHADER_TEMPLATE
+        .replace("%KV_ENABLE%", if kv_f16 { "enable f16;" } else { "" })
+        .replace("%KV_TYPE%", if kv_f16 { "f16" } else { "f32" })
+        .replace("%SUBGROUP_PARAMS%", subgroup_params)
+        .replace("%MAX_REDUCE_BLOCK%", max_block)
+        .replace("%SUM_REDUCE_BLOCK%", sum_block)
+}
+
+/// Split-k phase 2 of two — merges [`ATTENTION_SPLIT_SHADER_TEMPLATE`]'s
+/// `k_num` partial `(m, l, acc)` triples for one head into the same final
+/// `aout[h * head_dim .. (h+1) * head_dim]` the un-split kernel writes
+/// directly, via the identical rescale-and-merge rule the un-split
+/// kernel's own tile loop already uses between tiles (`m = max(...)`,
+/// `alpha = exp(prev_m - new_m)`, rescale-and-add) — just applied across
+/// `k_num` splits instead of `n_pos / 64` tiles.
+///
+/// One workgroup per head (`wid.x = h`, matching the un-split kernel's
+/// own dispatch shape and `k_num=1`'s trivial case), but no
+/// `workgroupBarrier` anywhere: every thread redundantly recomputes the
+/// same tiny `m`/`l` merge from `partial_ml` (`k_num` is small — `ATTN_
+/// SPLIT_K` in `vulkan.rs` — so this redundancy costs nothing measurable,
+/// the same "every lane redundantly runs the tiny combine" trade-off
+/// `PERHEAD_RMSNORM_SHADER_SUBGROUP` already makes), and each thread then
+/// only *writes* the disjoint `head_dim / 64` slice of `aout` its own
+/// `local` index owns — no cross-thread communication needed at all once
+/// every thread has its own copy of the merged `m`/`l`.
+///
+/// Binding shape (2 read-only storage, 1 read-write storage, 1 uniform)
+/// matches `elem4_bind_group_layout`'s (`add`/`mul`/`rmsnorm`/`vulkan_
+/// shaders::FUSED_NORM_ROPE_SHADER`'s own shape), so this reuses
+/// `VulkanBackend::elem4_bind_group_layout`/`elem4_pipeline_layout`
+/// rather than needing a bind-group layout of its own.
+const ATTENTION_SPLIT_REDUCE_SHADER: &str = r#"
+struct AttnReduceMeta {
+    head_dim: u32,
+    k_num: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read> rml: array<f32>;
+@group(0) @binding(1) var<storage, read> racc: array<f32>;
+@group(0) @binding(2) var<storage, read_write> raout: array<f32>;
+@group(0) @binding(3) var<uniform> rm: AttnReduceMeta;
+
+@compute @workgroup_size(64)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let h = wid.x;
+    let local = lid.x;
+    let head_dim = rm.head_dim;
+    let k_num = rm.k_num;
+
+    var m: f32 = -1e30;
+    var s: u32 = 0u;
+    loop {
+        if (s >= k_num) {
+            break;
+        }
+        m = max(m, rml[(h * k_num + s) * 2u]);
+        s = s + 1u;
+    }
+
+    var l: f32 = 0.0;
+    s = 0u;
+    loop {
+        if (s >= k_num) {
+            break;
+        }
+        let base = h * k_num + s;
+        l = l + rml[base * 2u + 1u] * exp(rml[base * 2u] - m);
+        s = s + 1u;
+    }
+
+    var d: u32 = local;
+    loop {
+        if (d >= head_dim) {
+            break;
+        }
+        var acc_val: f32 = 0.0;
+        var s2: u32 = 0u;
+        loop {
+            if (s2 >= k_num) {
+                break;
+            }
+            let base = h * k_num + s2;
+            acc_val = acc_val + racc[base * head_dim + d] * exp(rml[base * 2u] - m);
+            s2 = s2 + 1u;
+        }
+        raout[h * head_dim + d] = acc_val / l;
+        d = d + 64u;
+    }
+}
+"#;
+
+pub fn shader_source_attention_split_reduce() -> String {
+    ATTENTION_SPLIT_REDUCE_SHADER.to_string()
+}
+
 /// Casts `cm.len` elements of a freshly RoPE'd/normed `f32` key or value
 /// row (`csrc`) into the `f16`-stored KV mirror (`cdst`) at element offset
 /// `cm.offset` — only ever built
@@ -2769,6 +3059,154 @@ pub fn shader_source_perhead_rmsnorm_weightless(subgroup: bool) -> String {
     } else {
         PERHEAD_RMSNORM_WEIGHTLESS_SHADER.to_string()
     }
+}
+
+/// Fuses [`PERHEAD_RMSNORM_SHADER`] immediately followed by [`ROPE_SHADER`]
+/// into one dispatch — Q-norm+Q-RoPE and (when this layer owns its own V
+/// projection — see `VulkanBackend::build_fused_attn_layer_resources`'s own
+/// comment for the one case this can't safely replace) K-norm+K-RoPE.
+/// Concatenates the same two already-verified algorithms in the same
+/// order — the reduce-then-scale-then-weight loop is a line-for-line copy
+/// of `PERHEAD_RMSNORM_SHADER`'s, the rotation loop a line-for-line copy of
+/// `ROPE_SHADER`'s (`half`/`freq`/`theta`/`sin`/`cos` all computed
+/// identically) — so this produces bit-identical output to running the two
+/// original shaders back to back, not just numerically-close output; no
+/// operation is reordered or re-associated relative to either source.
+///
+/// The one real change: the normalized-but-not-yet-rotated head lives in
+/// `fn_head` (`workgroup`-shared, not global) between the two stages, so
+/// RoPE reads values a *different* thread just wrote without a trip through
+/// global memory (`px`'s round-trip through VRAM between the old two
+/// dispatches). `fn_head`'s `1024`-element bound matches llama.cpp's own
+/// `rms_norm.comp` fused-rope shared array (`shared FLOAT_TYPE
+/// rope_data_a[1024]`) — comfortably above every `head_dim` this project
+/// loads (512 is gemma4-E2B's own largest, for its full-attention layers);
+/// `VulkanBackend::build_fused_attn_layer_resources` asserts this before
+/// ever dispatching, since `head_dim > 1024` would silently write past the
+/// array on the GPU rather than fail loudly. Same 3-`workgroupBarrier()`-
+/// per-head cost as the un-fused pair combined would already pay (reduce,
+/// scale-visibility, rotate-visibility) — the saving is the *dispatch*
+/// (one `begin_compute_pass`/pipeline-bind/launch instead of two) and the
+/// eliminated intermediate global read+write, not fewer barriers.
+///
+/// Binding order (`fnw` the learned norm weight, `fnff` RoPE's per-
+/// frequency divisor, `fnx` the buffer normalized and rotated in place,
+/// `fnm` the uniform meta) matches [`elem4_bind_group_layout`]'s shape —
+/// the same one `add`/`mul`/`rmsnorm` already share — so this needs no
+/// bind-group layout or pipeline layout of its own, only its own pipeline
+/// (`VulkanBackend::fused_norm_rope_pipeline`).
+const FUSED_NORM_ROPE_SHADER: &str = r#"
+struct FusedNormRopeMeta {
+    n_head: u32,
+    head_dim: u32,
+    rope_dim: u32,
+    pos: u32,
+    freq_base: f32,
+    eps: f32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read> fnw: array<f32>;
+@group(0) @binding(1) var<storage, read> fnff: array<f32>;
+@group(0) @binding(2) var<storage, read_write> fnx: array<f32>;
+@group(0) @binding(3) var<uniform> fnm: FusedNormRopeMeta;
+
+var<workgroup> fn_head: array<f32, 1024>;
+var<workgroup> fn_partial: array<f32, 64>;
+
+@compute @workgroup_size(64)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let h = wid.x;
+    let local = lid.x;
+    let base = h * fnm.head_dim;
+
+    // Stage 1 (= PERHEAD_RMSNORM_SHADER's own first stage): sum of
+    // squares, staging each raw value into `fn_head` on the way so stage 2
+    // doesn't need to re-read `fnx`.
+    var partial: f32 = 0.0;
+    var k: u32 = local;
+    loop {
+        if (k >= fnm.head_dim) {
+            break;
+        }
+        let v = fnx[base + k];
+        fn_head[k] = v;
+        partial = partial + v * v;
+        k = k + 64u;
+    }
+    fn_partial[local] = partial;
+    workgroupBarrier();
+    var stride: u32 = 32u;
+    loop {
+        if (stride == 0u) {
+            break;
+        }
+        if (local < stride) {
+            fn_partial[local] = fn_partial[local] + fn_partial[local + stride];
+        }
+        workgroupBarrier();
+        stride = stride / 2u;
+    }
+    let mean_sq = fn_partial[0] / f32(fnm.head_dim);
+    let norm_scale = 1.0 / sqrt(mean_sq + fnm.eps);
+
+    // Stage 2 (= PERHEAD_RMSNORM_SHADER's own second stage): scale +
+    // learned weight, written into `fn_head` instead of back to `fnx`.
+    k = local;
+    loop {
+        if (k >= fnm.head_dim) {
+            break;
+        }
+        fn_head[k] = fn_head[k] * norm_scale * fnw[k];
+        k = k + 64u;
+    }
+    workgroupBarrier();
+
+    // Stage 3 (= ROPE_SHADER's own body, unchanged): rotate the now-
+    // normalized pairs, reading/writing `fn_head` instead of `rx`.
+    let half = fnm.rope_dim / 2u;
+    k = local;
+    loop {
+        if (k >= half) {
+            break;
+        }
+        let freq = pow(fnm.freq_base, -2.0 * f32(k) / f32(fnm.rope_dim)) / fnff[k];
+        let theta = f32(fnm.pos) * freq;
+        let s = sin(theta);
+        let c = cos(theta);
+        let a = fn_head[k];
+        let b = fn_head[k + half];
+        fn_head[k] = a * c - b * s;
+        fn_head[k + half] = a * s + b * c;
+        k = k + 64u;
+    }
+    workgroupBarrier();
+
+    // Stage 4: the one write back to global memory — normalized+rotated
+    // for `[0, rope_dim)`, normalized-only pass-through (untouched by
+    // stage 3) for `[rope_dim, head_dim)`, exactly matching what running
+    // the two original shaders back to back would leave in `fnx`.
+    k = local;
+    loop {
+        if (k >= fnm.head_dim) {
+            break;
+        }
+        fnx[base + k] = fn_head[k];
+        k = k + 64u;
+    }
+}
+"#;
+
+/// The maximum `head_dim` [`FUSED_NORM_ROPE_SHADER`]'s `fn_head` shared
+/// array supports — see that constant's own doc comment.
+pub const FUSED_NORM_ROPE_MAX_HEAD_DIM: usize = 1024;
+
+pub fn shader_source_fused_norm_rope() -> String {
+    FUSED_NORM_ROPE_SHADER.to_string()
 }
 
 /// Greedy (argmax) decode with repeat penalty, entirely on-GPU, so a

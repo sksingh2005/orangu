@@ -138,6 +138,40 @@ struct AttnMeta {
     _pad: u32,
 }
 
+/// `AttnSplitMeta` in `vulkan_shaders::ATTENTION_SPLIT_SHADER_TEMPLATE` —
+/// `#[repr(C)]` so its layout matches WGSL's `struct AttnSplitMeta {
+/// n_head: u32, n_head_kv: u32, head_dim: u32, window_start: u32, n_pos:
+/// u32, k_num: u32, scale: f32, _pad: u32 }` field-for-field. Almost
+/// `AttnMeta`'s own shape, `capacity` swapped for `k_num` — split-k phase
+/// 1 doesn't need `capacity` (it never reads past `n_pos`, unlike the
+/// un-split kernel which doesn't either — `capacity` is otherwise unused
+/// dead weight in `AttnMeta` too, kept there only for layout stability
+/// with `probs_scratch`-era code).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AttnSplitMeta {
+    n_head: u32,
+    n_head_kv: u32,
+    head_dim: u32,
+    window_start: u32,
+    n_pos: u32,
+    k_num: u32,
+    scale: f32,
+    _pad: u32,
+}
+
+/// `AttnReduceMeta` in `vulkan_shaders::ATTENTION_SPLIT_REDUCE_SHADER` —
+/// `#[repr(C)]` so its layout matches WGSL's `struct AttnReduceMeta {
+/// head_dim: u32, k_num: u32, _pad0: u32, _pad1: u32 }` field-for-field.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AttnReduceMeta {
+    head_dim: u32,
+    k_num: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
 /// `RopeMeta` in `vulkan_shaders::ROPE_SHADER` — `#[repr(C)]` so its
 /// layout matches WGSL's `struct RopeMeta { n_head: u32, head_dim: u32,
 /// rope_dim: u32, pos: u32, freq_base: f32, _pad0: u32, _pad1: u32,
@@ -166,6 +200,25 @@ struct PerHeadNormMeta {
     head_dim: u32,
     eps: f32,
     _pad: u32,
+}
+
+/// `FusedNormRopeMeta` in `vulkan_shaders::FUSED_NORM_ROPE_SHADER` —
+/// `#[repr(C)]` so its layout matches WGSL's `struct FusedNormRopeMeta {
+/// n_head: u32, head_dim: u32, rope_dim: u32, pos: u32, freq_base: f32,
+/// eps: f32, _pad0: u32, _pad1: u32 }` field-for-field. The union of
+/// `RopeMeta`'s and `PerHeadNormMeta`'s own fields (`n_head` is common to
+/// both, so this has one copy, not two).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FusedNormRopeMeta {
+    n_head: u32,
+    head_dim: u32,
+    rope_dim: u32,
+    pos: u32,
+    freq_base: f32,
+    eps: f32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 /// `SampleMeta` in `vulkan_shaders::ARGMAX_SAMPLE_SHADER` — `#[repr(C)]`
@@ -482,7 +535,21 @@ pub struct VulkanBackend {
     attn_bind_group_layout: wgpu::BindGroupLayout,
     /// GPU-resident causal attention for decode (`n_tokens == 1`) — see
     /// `vulkan_shaders::shader_source_attention` and `Self::gpu_attention`.
+    /// Superseded in the production decode path by `attn_split_pipeline`/
+    /// `attn_split_reduce_pipeline` below (`doc/SERVER_ROADMAP.md` item
+    /// 6) — kept for `gpu_attention`'s own cross-check tests, which stay
+    /// pointed at this un-split kernel as the correctness reference the
+    /// split path's own tests check against.
     attn_pipeline: wgpu::ComputePipeline,
+    /// Split-k attention, phase 1 — see `vulkan_shaders::
+    /// ATTENTION_SPLIT_SHADER_TEMPLATE`'s own doc comment and `Self::
+    /// gpu_attention_split`. Reuses `attn_bind_group_layout` (same
+    /// binding shape).
+    attn_split_pipeline: wgpu::ComputePipeline,
+    /// Split-k attention, phase 2 — see `vulkan_shaders::
+    /// ATTENTION_SPLIT_REDUCE_SHADER`'s own doc comment. Reuses
+    /// `elem4_bind_group_layout` (same binding shape).
+    attn_split_reduce_pipeline: wgpu::ComputePipeline,
     /// Total `queue.submit` calls across this backend's lifetime — a
     /// decode-step-scoped delta of this (see `Self::submission_count`)
     /// reflects how many GPU round trips a decode step makes.
@@ -491,8 +558,19 @@ pub struct VulkanBackend {
     /// `elem3_bind_group_layout` (its bindings match that shape).
     rope_pipeline: wgpu::ComputePipeline,
     /// Per-head weighted RMSNorm (Q-norm/K-norm) — also reuses
-    /// `elem3_bind_group_layout`.
+    /// `elem3_bind_group_layout`. Superseded for Q always, and for K
+    /// whenever `Self::build_fused_attn_layer_resources`'s fusion
+    /// precondition holds, by `fused_norm_rope_pipeline` below — kept for
+    /// the remaining (K, when this layer doesn't own its own V
+    /// projection) case, V's own norm (never fused, no RoPE), and this
+    /// module's own standalone `gpu_perhead_rmsnorm` cross-check test.
     perhead_rmsnorm_pipeline: wgpu::ComputePipeline,
+    /// Fuses per-head RMSNorm immediately followed by RoPE into one
+    /// dispatch — see `vulkan_shaders::FUSED_NORM_ROPE_SHADER`'s own doc
+    /// comment. Reuses `elem4_bind_group_layout`/`elem4_pipeline_layout`
+    /// (same shape as `add`/`mul`/`rmsnorm`), so no bind-group layout of
+    /// its own.
+    fused_norm_rope_pipeline: wgpu::ComputePipeline,
     /// Bind group layout for `perhead_rmsnorm_weightless_pipeline` (V's
     /// norm) — see `elem2_bind_group_layout`.
     elem2_bind_group_layout: wgpu::BindGroupLayout,
@@ -644,6 +722,41 @@ pub struct VulkanBackend {
     /// this is `true`, whatever `greedy_sample` says — the caller still
     /// gets `ForwardOutcome::Logits`, exactly as if no fast path existed.
     gpu_sample: bool,
+    /// Whether `record_fused_attention`/`Self::gpu_attention_split` use
+    /// split-k attention (`attn_split_pipeline`/`attn_split_reduce_
+    /// pipeline`) instead of the single-workgroup-per-head `attn_pipeline`
+    /// — see `Self::try_init`'s own construction-site comment for why
+    /// this is on by default.
+    attn_split: bool,
+    /// Whether `GemmaModel::record_decode_forward` should write per-layer
+    /// GPU timestamps — see `Self::try_init`'s own construction-site
+    /// comment for why this needs both `TIMESTAMP_QUERY` and
+    /// `TIMESTAMP_QUERY_INSIDE_ENCODERS`, and why it's opt-in.
+    gpu_timestamps: bool,
+    /// Lazily built on the first decode step (`Self::timestamp_query_set`)
+    /// once the model's own layer count is known — `VulkanBackend` exists
+    /// before any model is loaded, so this can't be sized at construction
+    /// time the way every other pipeline/bind-group field above is. Built
+    /// once and reused for the rest of the process's life, like every
+    /// other cache here: one `orangu-server` process only ever loads one
+    /// model, so the layer count this needs to be sized to never changes
+    /// after the first call.
+    timestamps: Mutex<Option<TimestampQueries>>,
+}
+
+/// The query set + resolve/readback buffers `Self::timestamp_query_set`
+/// builds once and `Self::finish_timestamps`/`report_timestamps` write into
+/// and read back from every decode step. `capacity` is `n_layer + 3`: one
+/// timestamp right after the encoder is created (index 0), one after the
+/// per-layer-embedding (PLE) projection (index 1), one after each model
+/// layer (indices `2..=n_layer+1`), and one after `output_norm`/`lm_head`
+/// (index `n_layer + 2`) — `n_layer + 3` boundary points bracketing
+/// `n_layer + 2` segments (PLE, each layer, and the output/lm_head tail).
+struct TimestampQueries {
+    query_set: wgpu::QuerySet,
+    resolve_buffer: wgpu::Buffer,
+    readback_buffer: wgpu::Buffer,
+    capacity: u32,
 }
 
 /// `(wq.cache_key().0, wq.cache_key().1, n_head, n_head_kv, head_dim,
@@ -747,6 +860,23 @@ const COOP_MIN_N_TOKENS: usize = 64;
 /// genuinely parameterized rather than only accidentally correct at `4`.
 const REDUCE_N_ROWS: usize = 4;
 
+/// How many workgroups split-k attention (`doc/SERVER_ROADMAP.md` item 6,
+/// `vulkan_shaders::ATTENTION_SPLIT_SHADER_TEMPLATE`) splits each query
+/// head's KV-position range across, instead of the un-split kernel's one
+/// workgroup per head. `4` was chosen the same way as the tiled prefill
+/// kernel's own tuning constants: a starting point measured against
+/// `_scratch_measure_attention_dispatch_cost`'s isolated GPU-timestamp
+/// benchmark (`vulkan.rs`'s own test module) rather than picked blind —
+/// `n_head=8 * k_num=4 = 32` workgroups for E2B, up from 8, on hardware
+/// with (per `orangu-server system`) far more than 8 compute units to
+/// fill. A higher value adds more of split-k phase 2's own (cheap, but
+/// not free) reduce work per head without necessarily finding more real
+/// parallelism once workgroups already exceed the GPU's own compute-unit
+/// count; `4` is a reasonable middle point, not asserted to be optimal —
+/// unlike `REDUCE_N_ROWS`, this hasn't been swept across several
+/// candidate values yet.
+const ATTN_SPLIT_K: u32 = 4;
+
 /// The `ggml_type`s a shader exists for — kept in one place so
 /// construction (build every pipeline up front) and the `matmul` dispatch
 /// (look one up) can't drift apart.
@@ -828,6 +958,19 @@ impl VulkanBackend {
         // gate — the arithmetic is all `f32`, only `unpack2x16float` (core
         // WGSL) touches half-floats.
         let wide_unroll = std::env::var_os("ORANGU_NO_MLP_UNROLL").is_none();
+        // Split-k attention (`doc/SERVER_ROADMAP.md` item 6) — **on by
+        // default** (opt out with `ORANGU_NO_ATTN_SPLIT=1`), same
+        // precedent as `wide_unroll`/`kv_f16`: measured, on real hardware
+        // (`_scratch_measure_attention_dispatch_cost`, this module's own
+        // test suite), that the un-split kernel's `n_head`-workgroup
+        // dispatch (8 for E2B) spends ~39% of a decode layer's own GPU
+        // time at low occupancy, the concrete evidence item 5's own null
+        // result asked for before committing to a shader rewrite like
+        // this one. No adapter-feature gate — both new shaders use only
+        // core WGSL plus whatever `kv_f16`/`subgroup_reduce` themselves
+        // already gate, nothing this flag needs its own capability check
+        // for.
+        let attn_split = std::env::var_os("ORANGU_NO_ATTN_SPLIT").is_none();
         // See `Self::gpu_sample`'s own doc comment for why this stays
         // opt-in.
         let gpu_sample = std::env::var_os("ORANGU_GPU_SAMPLE").is_some();
@@ -867,6 +1010,27 @@ impl VulkanBackend {
         // left for any call site to branch on afterward.
         let supports_subgroup = adapter.features().contains(wgpu::Features::SUBGROUP);
         let subgroup_reduce = supports_subgroup && std::env::var_os("ORANGU_SUBGROUP").is_some();
+        // Per-layer GPU timestamps for one decode step (`Self::
+        // timestamp_query_set`/`finish_timestamps`/`report_timestamps`,
+        // written from `GemmaModel::record_decode_forward`). Needs both the
+        // base query-write capability and the encoder-level `write_
+        // timestamp` variant — `record_decode_forward` writes a timestamp
+        // between layers at the encoder level (each layer's own dispatches
+        // span several separate compute passes, not one it could bracket
+        // with a single pass's own `timestamp_writes`), not inside any one
+        // compute pass, which is what `TIMESTAMP_QUERY_INSIDE_ENCODERS`
+        // (distinct from the stricter `TIMESTAMP_QUERY_INSIDE_PASSES`)
+        // covers. **Off by default; opt in with `ORANGU_GPU_TIMESTAMPS=1`**
+        // — same precedent as `gpu_sample`/`ORANGU_BATCH_DECODE`: a
+        // diagnostic for measuring where a decode step's time actually
+        // goes (which `doc/SERVER_ROADMAP.md` needs before prioritizing
+        // among its own P1/P2 items), not something to run by default.
+        let supports_timestamp_query = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY)
+            && adapter
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+        let gpu_timestamps =
+            supports_timestamp_query && std::env::var_os("ORANGU_GPU_TIMESTAMPS").is_some();
         // A persistent, on-disk pipeline
         // cache — `wgpu::util::pipeline_cache_key` returns
         // `Some` only for the Vulkan backend (the only one this project
@@ -887,6 +1051,10 @@ impl VulkanBackend {
         }
         if supports_subgroup {
             required_features |= wgpu::Features::SUBGROUP;
+        }
+        if supports_timestamp_query {
+            required_features |=
+                wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("orangu-server"),
@@ -1034,6 +1202,34 @@ impl VulkanBackend {
             cache: pipeline_cache.as_ref(),
         });
 
+        // Split-k attention (`doc/SERVER_ROADMAP.md` item 6) — same
+        // binding shape as `attn_pipeline` (`vulkan_shaders::
+        // ATTENTION_SPLIT_SHADER_TEMPLATE`'s own doc comment), so this
+        // reuses `attn_pipeline_layout` rather than needing its own.
+        let attn_split_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("orangu-server attention split shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                vulkan_shaders::shader_source_attention_split(kv_f16, subgroup_reduce).into(),
+            ),
+        });
+        let attn_split_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("orangu-server attention split pipeline"),
+            layout: Some(&attn_pipeline_layout),
+            module: &attn_split_module,
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: pipeline_cache.as_ref(),
+        });
+        // Reduces split-k's `ATTN_SPLIT_K` partial results per head into
+        // the final attention output — same binding shape as `add`/`mul`/
+        // `rmsnorm`/`fused_norm_rope_pipeline` (`vulkan_shaders::
+        // ATTENTION_SPLIT_REDUCE_SHADER`'s own doc comment), so this
+        // reuses `elem4_pipeline_layout` rather than needing its own.
+        let attn_split_reduce_pipeline = build_elem_pipeline(
+            &elem4_pipeline_layout,
+            vulkan_shaders::shader_source_attention_split_reduce(),
+        );
+
         // RoPE and per-head weighted RMSNorm both have the same binding
         // shape as `gelu`/`scale` (read-only storage, read-write storage,
         // uniform — see each shader's own doc comment), so they reuse
@@ -1043,6 +1239,15 @@ impl VulkanBackend {
         let perhead_rmsnorm_pipeline = build_elem_pipeline(
             &elem3_pipeline_layout,
             vulkan_shaders::shader_source_perhead_rmsnorm(subgroup_reduce),
+        );
+        // Same `(read-only, read-only, read-write, uniform)` shape as
+        // `add`/`mul`/`rmsnorm`, so this reuses `elem4_pipeline_layout`
+        // rather than needing its own — see `vulkan_shaders::
+        // FUSED_NORM_ROPE_SHADER`'s own doc comment for what it fuses and
+        // why.
+        let fused_norm_rope_pipeline = build_elem_pipeline(
+            &elem4_pipeline_layout,
+            vulkan_shaders::shader_source_fused_norm_rope(),
         );
 
         let elem2_bind_group_layout = elem2_bind_group_layout(&device);
@@ -1210,9 +1415,12 @@ impl VulkanBackend {
             fused_cache: Mutex::new(HashMap::new()),
             attn_bind_group_layout,
             attn_pipeline,
+            attn_split_pipeline,
+            attn_split_reduce_pipeline,
             submission_count: std::sync::atomic::AtomicU64::new(0),
             rope_pipeline,
             perhead_rmsnorm_pipeline,
+            fused_norm_rope_pipeline,
             elem2_bind_group_layout,
             perhead_rmsnorm_weightless_pipeline,
             fused_attn_layer_cache: Mutex::new(HashMap::new()),
@@ -1231,6 +1439,9 @@ impl VulkanBackend {
             argmax_bind_group_layout,
             argmax_sample_pipeline,
             gpu_sample,
+            attn_split,
+            gpu_timestamps,
+            timestamps: Mutex::new(None),
         })
     }
 
@@ -1857,6 +2068,22 @@ pub struct GpuRopeInput<'a> {
     pub freq_factors: Option<&'a [f32]>,
 }
 
+/// [`VulkanBackend::gpu_fused_norm_rope`]'s parameters — see
+/// [`GpuAttentionInput`]'s doc comment for why this (and the method
+/// itself) is `#[allow(dead_code)]`.
+#[allow(dead_code)]
+pub struct GpuFusedNormRopeInput<'a> {
+    pub x: &'a [f32],
+    pub weight: &'a [f32],
+    pub n_head: usize,
+    pub head_dim: usize,
+    pub rope_dim: usize,
+    pub pos: usize,
+    pub freq_base: f32,
+    pub freq_factors: Option<&'a [f32]>,
+    pub eps: f32,
+}
+
 /// This layer's own K/V projection, when it has one (`layer.has_kv`) —
 /// see [`FusedAttnInput::kv`].
 pub struct FusedAttnProjection<'a> {
@@ -2264,6 +2491,71 @@ impl VulkanBackend {
         self.submit_and_readback(encoder, &x_buf, x.len())
     }
 
+    /// GPU per-head weighted RMSNorm immediately followed by RoPE, fused
+    /// into one dispatch (`vulkan_shaders::FUSED_NORM_ROPE_SHADER`) —
+    /// cross-checked against calling `tensor::rmsnorm_inplace(x, weight,
+    /// n_head, head_dim, eps)` then `tensor::rope_apply_scaled_inplace`
+    /// on the result, the same two calls `gpu_perhead_rmsnorm`/`gpu_rope`
+    /// are each already cross-checked against individually — this is the
+    /// standalone entry point for the fused Q-norm+Q-RoPE (and, on a
+    /// layer that owns its own V projection, K-norm+K-RoPE) dispatch
+    /// `record_fused_attention` uses.
+    #[allow(dead_code)]
+    pub fn gpu_fused_norm_rope(&self, input: GpuFusedNormRopeInput<'_>) -> Vec<f32> {
+        let GpuFusedNormRopeInput {
+            x,
+            weight,
+            n_head,
+            head_dim,
+            rope_dim,
+            pos,
+            freq_base,
+            freq_factors,
+            eps,
+        } = input;
+        debug_assert_eq!(x.len(), n_head * head_dim);
+        debug_assert_eq!(weight.len(), head_dim);
+        let half = rope_dim / 2;
+        let ff_owned;
+        let ff: &[f32] = match freq_factors {
+            Some(ff) => ff,
+            None => {
+                ff_owned = vec![1.0f32; half];
+                &ff_owned
+            }
+        };
+        debug_assert_eq!(ff.len(), half);
+
+        let x_buf = self.upload_new(x);
+        let w_buf = self.upload_new(weight);
+        let ff_buf = self.upload_new(ff);
+        let meta_buf = self.fused_norm_rope_meta_buffer(
+            n_head as u32,
+            head_dim as u32,
+            rope_dim as u32,
+            pos as u32,
+            freq_base,
+            eps,
+        );
+        let bind_group = self.elem4_bind_group(&w_buf, &ff_buf, &x_buf, &meta_buf);
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("orangu-server fused norm+rope encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("orangu-server fused norm+rope pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.fused_norm_rope_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(n_head as u32, 1, 1);
+        }
+        self.submit_and_readback(encoder, &x_buf, x.len())
+    }
+
     /// GPU per-head weighted RMSNorm (Q-norm/K-norm) — cross-checked
     /// against `tensor::rmsnorm_inplace(x, weight, n_head, head_dim,
     /// eps)`. `weight` (`[head_dim]`) is shared across every head.
@@ -2398,6 +2690,47 @@ impl VulkanBackend {
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("orangu-server rope meta (fused)"),
             size: std::mem::size_of::<RopeMeta>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buf, 0, bytemuck::bytes_of(&meta));
+        buf
+    }
+
+    /// Meta buffer for `fused_norm_rope_pipeline` — the union of
+    /// `perhead_norm_meta_buffer`'s and `rope_meta_buffer`'s own fields,
+    /// see `FusedNormRopeMeta`'s own doc comment. `head_dim` must be at
+    /// most `vulkan_shaders::FUSED_NORM_ROPE_MAX_HEAD_DIM` — the shader's
+    /// `fn_head` shared array is sized to exactly that bound, and a
+    /// larger `head_dim` would silently write past it on the GPU rather
+    /// than fail loudly, so this is asserted here instead.
+    fn fused_norm_rope_meta_buffer(
+        &self,
+        n_head: u32,
+        head_dim: u32,
+        rope_dim: u32,
+        pos: u32,
+        freq_base: f32,
+        eps: f32,
+    ) -> wgpu::Buffer {
+        assert!(
+            (head_dim as usize) <= vulkan_shaders::FUSED_NORM_ROPE_MAX_HEAD_DIM,
+            "head_dim {head_dim} exceeds fused_norm_rope_pipeline's {}-element shared array",
+            vulkan_shaders::FUSED_NORM_ROPE_MAX_HEAD_DIM
+        );
+        let meta = FusedNormRopeMeta {
+            n_head,
+            head_dim,
+            rope_dim,
+            pos,
+            freq_base,
+            eps,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orangu-server fused norm+rope meta"),
+            size: std::mem::size_of::<FusedNormRopeMeta>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -2961,6 +3294,156 @@ impl VulkanBackend {
         result
     }
 
+    /// Split-k twin of [`Self::gpu_attention`] — same inputs, same
+    /// output, but routed through `attn_split_pipeline` (phase 1, one
+    /// `(head, k_num)` workgroup pair each computing a partial
+    /// online-softmax over its own slice of the KV-position range) and
+    /// `attn_split_reduce_pipeline` (phase 2, one workgroup per head
+    /// merging the `k_num` partial `(m, l, acc)` triples into the final
+    /// `aout`). Exists so the split-k path used by
+    /// [`Self::record_fused_attention`] (see `doc/SERVER_ROADMAP.md`
+    /// item 6) has its own standalone, directly testable entry point —
+    /// `gpu_attention`'s own tests only ever exercised the un-split
+    /// kernel.
+    #[cfg(test)]
+    pub fn gpu_attention_split(&self, input: GpuAttentionInput<'_>) -> Vec<f32> {
+        let GpuAttentionInput {
+            q,
+            cache,
+            pos,
+            window_start,
+            n_head,
+            n_head_kv,
+            head_dim,
+            scale,
+        } = input;
+        debug_assert_eq!(q.len(), n_head * head_dim);
+        debug_assert!(window_start <= pos);
+        let (k_buf, v_buf, _probs_buf) =
+            cache.sync_gpu(&self.device, &self.queue, n_head, self.kv_f16);
+
+        let q_buf = self.upload_new(q);
+        let out_buf = self.scratch_buffer(n_head * head_dim);
+        let k_num = ATTN_SPLIT_K;
+        let partial_ml = self.scratch_buffer(n_head * k_num as usize * 2);
+        let partial_acc = self.scratch_buffer(n_head * k_num as usize * head_dim);
+
+        let split_meta = AttnSplitMeta {
+            n_head: n_head as u32,
+            n_head_kv: n_head_kv as u32,
+            head_dim: head_dim as u32,
+            window_start: window_start as u32,
+            n_pos: (pos - window_start + 1) as u32,
+            k_num,
+            scale,
+            _pad: 0,
+        };
+        let split_meta_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orangu-server attention split meta"),
+            size: std::mem::size_of::<AttnSplitMeta>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue
+            .write_buffer(&split_meta_buf, 0, bytemuck::bytes_of(&split_meta));
+
+        let split_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("orangu-server attention split bind group"),
+            layout: &self.attn_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: q_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: k_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: v_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: partial_ml.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: partial_acc.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: split_meta_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let reduce_meta = AttnReduceMeta {
+            head_dim: head_dim as u32,
+            k_num,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        let reduce_meta_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orangu-server attention split reduce meta"),
+            size: std::mem::size_of::<AttnReduceMeta>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue
+            .write_buffer(&reduce_meta_buf, 0, bytemuck::bytes_of(&reduce_meta));
+        let reduce_bind_group =
+            self.elem4_bind_group(&partial_ml, &partial_acc, &out_buf, &reduce_meta_buf);
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("orangu-server attention split encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("orangu-server attention split pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.attn_split_pipeline);
+            pass.set_bind_group(0, &split_bind_group, &[]);
+            pass.dispatch_workgroups(n_head as u32, k_num, 1);
+            pass.set_pipeline(&self.attn_split_reduce_pipeline);
+            pass.set_bind_group(0, &reduce_bind_group, &[]);
+            pass.dispatch_workgroups(n_head as u32, 1, 1);
+        }
+        let readback_len = (n_head * head_dim) as u64 * 4;
+        let readback_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orangu-server attention split readback"),
+            size: readback_len,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(&out_buf, 0, &readback_buffer, 0, readback_len);
+
+        self.queue.submit(Some(encoder.finish()));
+        self.submission_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        readback_buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |result| {
+                result.expect("mapping the attention split readback buffer failed");
+            });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("polling the device for the attention split readback failed");
+        let data = readback_buffer
+            .slice(..)
+            .get_mapped_range()
+            .expect(
+                "attention split readback buffer was not mapped after a successful map_async + poll",
+            );
+        let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        readback_buffer.unmap();
+        result
+    }
+
     /// Builds (never cached itself — callers cache the whole
     /// [`FusedAttnLayerResources`] this returns) every bind group
     /// `fused_attention` needs that doesn't touch a per-request KV-cache
@@ -2983,32 +3466,76 @@ impl VulkanBackend {
         };
 
         let q_norm_w = self.upload_new(input.q_norm);
-        let q_norm_meta =
-            self.perhead_norm_meta_buffer(input.n_head as u32, input.head_dim as u32, input.eps);
-        let q_norm_bg = self.elem3_bind_group(&q_norm_w, &wq_g.output_buffer, &q_norm_meta);
-        let q_norm_wg = input.n_head as u32;
-
         let q_ff = self.upload_new(ff);
-        let q_rope_meta_buf = self.rope_meta_buffer(
+        let q_norm_rope_meta_buf = self.fused_norm_rope_meta_buffer(
             input.n_head as u32,
             input.head_dim as u32,
             input.rope_dim as u32,
             input.pos as u32,
             input.rope_freq_base,
+            input.eps,
         );
-        let q_rope_bg = self.elem3_bind_group(&q_ff, &wq_g.output_buffer, &q_rope_meta_buf);
-        let q_rope_wg = ((input.n_head * half) as u32).div_ceil(64).max(1);
+        let q_norm_rope_bg =
+            self.elem4_bind_group(&q_norm_w, &q_ff, &wq_g.output_buffer, &q_norm_rope_meta_buf);
+        let q_norm_rope_wg = input.n_head as u32;
 
         let kv = if let (Some(proj), Some(wk_guard)) = (&input.kv, wk_g) {
-            let k_norm_w = self.upload_new(proj.k_norm);
-            let k_norm_meta = self.perhead_norm_meta_buffer(
-                input.n_head_kv as u32,
-                input.head_dim as u32,
-                input.eps,
-            );
-            let k_norm_bg = self.elem3_bind_group(&k_norm_w, &wk_guard.output_buffer, &k_norm_meta);
-
+            // See `KNormRope`'s own doc comment for why this specific
+            // condition decides fused vs. split.
             let owns_v = wv_g.is_some();
+
+            let k_norm_rope = if owns_v {
+                let k_norm_w = self.upload_new(proj.k_norm);
+                let k_ff = self.upload_new(ff);
+                let meta_buf = self.fused_norm_rope_meta_buffer(
+                    input.n_head_kv as u32,
+                    input.head_dim as u32,
+                    input.rope_dim as u32,
+                    input.pos as u32,
+                    input.rope_freq_base,
+                    input.eps,
+                );
+                let bg = self.elem4_bind_group(
+                    &k_norm_w,
+                    &k_ff,
+                    &wk_guard.output_buffer,
+                    &meta_buf,
+                );
+                KNormRope::Fused {
+                    bg,
+                    meta_buf,
+                    wg: input.n_head_kv as u32,
+                }
+            } else {
+                let k_norm_w = self.upload_new(proj.k_norm);
+                let k_norm_meta = self.perhead_norm_meta_buffer(
+                    input.n_head_kv as u32,
+                    input.head_dim as u32,
+                    input.eps,
+                );
+                let k_norm_bg =
+                    self.elem3_bind_group(&k_norm_w, &wk_guard.output_buffer, &k_norm_meta);
+
+                let k_ff = self.upload_new(ff);
+                let k_rope_meta_buf = self.rope_meta_buffer(
+                    input.n_head_kv as u32,
+                    input.head_dim as u32,
+                    input.rope_dim as u32,
+                    input.pos as u32,
+                    input.rope_freq_base,
+                );
+                let k_rope_bg =
+                    self.elem3_bind_group(&k_ff, &wk_guard.output_buffer, &k_rope_meta_buf);
+
+                KNormRope::Split {
+                    k_norm_bg,
+                    k_norm_wg: input.n_head_kv as u32,
+                    k_rope_bg,
+                    k_rope_meta_buf,
+                    k_rope_wg: ((input.n_head_kv * half) as u32).div_ceil(64).max(1),
+                }
+            };
+
             let v_scratch = if owns_v {
                 None
             } else {
@@ -3025,36 +3552,20 @@ impl VulkanBackend {
             };
             let v_norm_bg = self.elem2_bind_group(v_target, &v_norm_meta);
 
-            let k_ff = self.upload_new(ff);
-            let k_rope_meta_buf = self.rope_meta_buffer(
-                input.n_head_kv as u32,
-                input.head_dim as u32,
-                input.rope_dim as u32,
-                input.pos as u32,
-                input.rope_freq_base,
-            );
-            let k_rope_bg = self.elem3_bind_group(&k_ff, &wk_guard.output_buffer, &k_rope_meta_buf);
-
             Some(FusedAttnKvLayerResources {
-                k_norm_bg,
-                k_norm_wg: input.n_head_kv as u32,
+                k_norm_rope,
                 v_scratch,
                 v_norm_bg,
                 v_norm_wg: input.n_head_kv as u32,
-                k_rope_bg,
-                k_rope_meta_buf,
-                k_rope_wg: ((input.n_head_kv * half) as u32).div_ceil(64).max(1),
             })
         } else {
             None
         };
 
         FusedAttnLayerResources {
-            q_norm_bg,
-            q_norm_wg,
-            q_rope_bg,
-            q_rope_meta_buf,
-            q_rope_wg,
+            q_norm_rope_bg,
+            q_norm_rope_meta_buf,
+            q_norm_rope_wg,
             kv,
         }
     }
@@ -3153,7 +3664,7 @@ impl VulkanBackend {
             rope_dim,
             rope_freq_base,
             freq_factors: _,
-            eps: _,
+            eps,
             pos,
             window_start,
             scale,
@@ -3163,34 +3674,54 @@ impl VulkanBackend {
         // `pos` is the one field in these cached meta buffers that
         // genuinely changes every call.
         self.queue.write_buffer(
-            &layer.q_rope_meta_buf,
+            &layer.q_norm_rope_meta_buf,
             0,
-            bytemuck::bytes_of(&RopeMeta {
+            bytemuck::bytes_of(&FusedNormRopeMeta {
                 n_head: n_head as u32,
                 head_dim: head_dim as u32,
                 rope_dim: rope_dim as u32,
                 pos: pos as u32,
                 freq_base: rope_freq_base,
+                eps,
                 _pad0: 0,
                 _pad1: 0,
-                _pad2: 0,
             }),
         );
         if let Some(kv_res) = &layer.kv {
-            self.queue.write_buffer(
-                &kv_res.k_rope_meta_buf,
-                0,
-                bytemuck::bytes_of(&RopeMeta {
-                    n_head: n_head_kv as u32,
-                    head_dim: head_dim as u32,
-                    rope_dim: rope_dim as u32,
-                    pos: pos as u32,
-                    freq_base: rope_freq_base,
-                    _pad0: 0,
-                    _pad1: 0,
-                    _pad2: 0,
-                }),
-            );
+            match &kv_res.k_norm_rope {
+                KNormRope::Fused { meta_buf, .. } => {
+                    self.queue.write_buffer(
+                        meta_buf,
+                        0,
+                        bytemuck::bytes_of(&FusedNormRopeMeta {
+                            n_head: n_head_kv as u32,
+                            head_dim: head_dim as u32,
+                            rope_dim: rope_dim as u32,
+                            pos: pos as u32,
+                            freq_base: rope_freq_base,
+                            eps,
+                            _pad0: 0,
+                            _pad1: 0,
+                        }),
+                    );
+                }
+                KNormRope::Split { k_rope_meta_buf, .. } => {
+                    self.queue.write_buffer(
+                        k_rope_meta_buf,
+                        0,
+                        bytemuck::bytes_of(&RopeMeta {
+                            n_head: n_head_kv as u32,
+                            head_dim: head_dim as u32,
+                            rope_dim: rope_dim as u32,
+                            pos: pos as u32,
+                            freq_base: rope_freq_base,
+                            _pad0: 0,
+                            _pad1: 0,
+                            _pad2: 0,
+                        }),
+                    );
+                }
+            }
         }
 
         // Captured *before* anything below runs — this call (if `kv` is
@@ -3286,6 +3817,76 @@ impl VulkanBackend {
             } else {
                 None
             };
+            // Split-k attention (`doc/SERVER_ROADMAP.md` item 6) — see
+            // `Self::try_init`'s own comment on `attn_split`. `partial_ml`/
+            // `partial_acc` are scratch, consumed entirely within the
+            // decode step that writes them (never read back to the CPU,
+            // never persisted across steps), so there's no correctness
+            // reason to size them any larger than `ATTN_SPLIT_K` needs.
+            let split = self.attn_split.then(|| {
+                let partial_ml = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("orangu-server attention split partial m/l"),
+                    size: (n_head as u64) * (ATTN_SPLIT_K as u64) * 2 * 4,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+                let partial_acc = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("orangu-server attention split partial acc"),
+                    size: (n_head as u64) * (ATTN_SPLIT_K as u64) * (head_dim as u64) * 4,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+                let split_meta_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("orangu-server attention split meta"),
+                    size: std::mem::size_of::<AttnSplitMeta>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let split_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("orangu-server attention split bind group"),
+                    layout: &self.attn_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wq_g.output_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: k_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: v_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: partial_ml.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: partial_acc.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: split_meta_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+                let reduce_meta_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("orangu-server attention reduce meta"),
+                    size: std::mem::size_of::<AttnReduceMeta>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let reduce_bind_group =
+                    self.elem4_bind_group(&partial_ml, &partial_acc, &out_buf, &reduce_meta_buf);
+                crate::engine::kv_cache::AttnSplitDispatch {
+                    split_bind_group,
+                    split_meta_buf,
+                    reduce_bind_group,
+                    reduce_meta_buf,
+                }
+            });
             cache.set_attn_dispatch(
                 wq_key,
                 crate::engine::kv_cache::GpuAttnDispatch {
@@ -3295,6 +3896,7 @@ impl VulkanBackend {
                     readback_buf,
                     k_cast,
                     v_cast,
+                    split,
                 },
             );
         }
@@ -3315,12 +3917,38 @@ impl VulkanBackend {
                 _pad: 0,
             }),
         );
+        if let Some(split) = &dispatch.split {
+            self.queue.write_buffer(
+                &split.split_meta_buf,
+                0,
+                bytemuck::bytes_of(&AttnSplitMeta {
+                    n_head: n_head as u32,
+                    n_head_kv: n_head_kv as u32,
+                    head_dim: head_dim as u32,
+                    window_start: window_start as u32,
+                    n_pos: (pos - window_start + 1) as u32,
+                    k_num: ATTN_SPLIT_K,
+                    scale,
+                    _pad: 0,
+                }),
+            );
+            self.queue.write_buffer(
+                &split.reduce_meta_buf,
+                0,
+                bytemuck::bytes_of(&AttnReduceMeta {
+                    head_dim: head_dim as u32,
+                    k_num: ATTN_SPLIT_K,
+                    _pad0: 0,
+                    _pad1: 0,
+                }),
+            );
+        }
 
         // Pass A: QKV matmuls, Q-norm, Q-RoPE, K-norm (independent of the
         // v_scratch copy below, so all safe in one pass).
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("orangu-server fused attention qkv+qnorm+qrope+knorm pass"),
+                label: Some("orangu-server fused attention qkv+qnormrope+knormrope pass"),
                 timestamp_writes: None,
             });
             self.record_matmul(&mut pass, wq, &wq_g);
@@ -3333,25 +3961,41 @@ impl VulkanBackend {
                 self.record_matmul(&mut pass, proj.wv.unwrap(), wv_guard);
             }
 
-            pass.set_pipeline(&self.perhead_rmsnorm_pipeline);
-            pass.set_bind_group(0, &layer.q_norm_bg, &[]);
-            pass.dispatch_workgroups(layer.q_norm_wg, 1, 1);
+            pass.set_pipeline(&self.fused_norm_rope_pipeline);
+            pass.set_bind_group(0, &layer.q_norm_rope_bg, &[]);
+            pass.dispatch_workgroups(layer.q_norm_rope_wg, 1, 1);
 
-            pass.set_pipeline(&self.rope_pipeline);
-            pass.set_bind_group(0, &layer.q_rope_bg, &[]);
-            pass.dispatch_workgroups(layer.q_rope_wg, 1, 1);
-
+            // K's own norm(+RoPE, when fused — `KNormRope::Fused` is only
+            // reachable when this layer owns its own V projection, so
+            // there's no V-copy dependency on K's intermediate value to
+            // order around). When split, only K-norm runs here; K's own
+            // RoPE waits for pass B below, same as before this fusion.
             if let Some(kv_res) = &layer.kv {
-                pass.set_pipeline(&self.perhead_rmsnorm_pipeline);
-                pass.set_bind_group(0, &kv_res.k_norm_bg, &[]);
-                pass.dispatch_workgroups(kv_res.k_norm_wg, 1, 1);
+                match &kv_res.k_norm_rope {
+                    KNormRope::Fused { bg, wg, .. } => {
+                        pass.set_pipeline(&self.fused_norm_rope_pipeline);
+                        pass.set_bind_group(0, bg, &[]);
+                        pass.dispatch_workgroups(*wg, 1, 1);
+                    }
+                    KNormRope::Split {
+                        k_norm_bg,
+                        k_norm_wg,
+                        ..
+                    } => {
+                        pass.set_pipeline(&self.perhead_rmsnorm_pipeline);
+                        pass.set_bind_group(0, k_norm_bg, &[]);
+                        pass.dispatch_workgroups(*k_norm_wg, 1, 1);
+                    }
+                }
             }
         }
 
         // V = copy of K's (post-norm) output, only when this layer
         // doesn't own its own V projection — must happen between passes:
         // it needs K-norm (pass A) already done, and K's RoPE (pass B)
-        // must not have run yet (V never gets RoPE'd).
+        // must not have run yet (V never gets RoPE'd). Only ever true
+        // when `kv_res.k_norm_rope` is `KNormRope::Split` — see that
+        // enum's own doc comment for why the two conditions match.
         if let (Some(wk_guard), Some(kv_res)) = (&wk_g, &layer.kv)
             && let Some(scratch) = &kv_res.v_scratch
         {
@@ -3364,7 +4008,8 @@ impl VulkanBackend {
             );
         }
 
-        // Pass B: V's weightless norm, K's RoPE.
+        // Pass B: V's weightless norm, and K's own RoPE when it wasn't
+        // already folded into pass A's fused dispatch above.
         if let Some(kv_res) = &layer.kv {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("orangu-server fused attention vnorm+krope pass"),
@@ -3374,9 +4019,16 @@ impl VulkanBackend {
             pass.set_bind_group(0, &kv_res.v_norm_bg, &[]);
             pass.dispatch_workgroups(kv_res.v_norm_wg, 1, 1);
 
-            pass.set_pipeline(&self.rope_pipeline);
-            pass.set_bind_group(0, &kv_res.k_rope_bg, &[]);
-            pass.dispatch_workgroups(kv_res.k_rope_wg, 1, 1);
+            if let KNormRope::Split {
+                k_rope_bg,
+                k_rope_wg,
+                ..
+            } = &kv_res.k_norm_rope
+            {
+                pass.set_pipeline(&self.rope_pipeline);
+                pass.set_bind_group(0, k_rope_bg, &[]);
+                pass.dispatch_workgroups(*k_rope_wg, 1, 1);
+            }
         }
 
         // KV-cache write: this token's (fully processed) key/value into
@@ -3441,8 +4093,24 @@ impl VulkanBackend {
         }
 
         // Pass C: attention, now that the cache includes this token's own
-        // key/value.
-        {
+        // key/value. Split-k (`doc/SERVER_ROADMAP.md` item 6) when
+        // `dispatch.split` was built (`Self::attn_split`) — phase 1
+        // dispatches `n_head * ATTN_SPLIT_K` workgroups instead of
+        // `n_head`, phase 2 merges each head's `ATTN_SPLIT_K` partial
+        // results into the same `out_buf` the un-split path would have
+        // written directly.
+        if let Some(split) = &dispatch.split {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("orangu-server fused attention split pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.attn_split_pipeline);
+            pass.set_bind_group(0, &split.split_bind_group, &[]);
+            pass.dispatch_workgroups(n_head as u32, ATTN_SPLIT_K, 1);
+            pass.set_pipeline(&self.attn_split_reduce_pipeline);
+            pass.set_bind_group(0, &split.reduce_bind_group, &[]);
+            pass.dispatch_workgroups(n_head as u32, 1, 1);
+        } else {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("orangu-server fused attention pass"),
                 timestamp_writes: None,
@@ -3817,6 +4485,149 @@ impl VulkanBackend {
         result
     }
 
+    /// Whether `GemmaModel::record_decode_forward` should write per-layer
+    /// timestamps this decode step — see `Self::gpu_timestamps`'s own
+    /// field doc comment.
+    pub fn gpu_timestamps(&self) -> bool {
+        self.gpu_timestamps
+    }
+
+    /// The query set `record_decode_forward` writes this decode step's
+    /// timestamps into — built once, on the first call, sized to `n_layer`
+    /// (see `TimestampQueries`'s own doc comment for the exact slot
+    /// layout), and reused for every later call. Cheap to clone: like
+    /// `wgpu::Buffer`, `QuerySet` is itself just a handle to the real
+    /// GPU-side resource.
+    pub fn timestamp_query_set(&self, n_layer: usize) -> wgpu::QuerySet {
+        let mut guard = self.timestamps.lock().expect("timestamp queries poisoned");
+        let capacity = (n_layer + 3) as u32;
+        if let Some(existing) = &*guard {
+            debug_assert_eq!(
+                existing.capacity, capacity,
+                "n_layer changed between decode steps — a single orangu-server \
+                 process only ever loads one model, so this should be impossible"
+            );
+            return existing.query_set.clone();
+        }
+        let query_set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("orangu-server timestamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: capacity,
+        });
+        let byte_len = (capacity as u64) * 8;
+        let resolve_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orangu-server timestamp resolve"),
+            size: byte_len,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orangu-server timestamp readback"),
+            size: byte_len,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let handle = query_set.clone();
+        *guard = Some(TimestampQueries {
+            query_set,
+            resolve_buffer,
+            readback_buffer,
+            capacity,
+        });
+        handle
+    }
+
+    /// Appends the commands that turn this decode step's raw timestamp
+    /// writes into CPU-readable data — `resolve_query_set` (GPU-side,
+    /// converts the query set's opaque per-slot data into `u64`s in
+    /// `resolve_buffer`) then a `copy_buffer_to_buffer` into
+    /// `readback_buffer` (`MAP_READ`, which `resolve_buffer` itself can't
+    /// be) — into the *same* `encoder` `record_decode_forward` wrote the
+    /// timestamps into, right before it's finished and submitted
+    /// (`GemmaModel::forward`'s `submit_and_readback_for` call). Only
+    /// meaningful once `Self::timestamp_query_set` has already been called
+    /// this decode step (`record_decode_forward` always calls it first
+    /// when `Self::gpu_timestamps` is set, before any timestamp write).
+    pub fn finish_timestamps(&self, encoder: &mut wgpu::CommandEncoder) {
+        let guard = self.timestamps.lock().expect("timestamp queries poisoned");
+        let t = guard
+            .as_ref()
+            .expect("finish_timestamps called without a prior timestamp_query_set this step");
+        encoder.resolve_query_set(&t.query_set, 0..t.capacity, &t.resolve_buffer, 0);
+        encoder.copy_buffer_to_buffer(
+            &t.resolve_buffer,
+            0,
+            &t.readback_buffer,
+            0,
+            (t.capacity as u64) * 8,
+        );
+    }
+
+    /// Reads back this decode step's resolved timestamps (written by
+    /// `finish_timestamps`, already resident on the CPU side by the time
+    /// this runs — `GemmaModel::forward` calls this only after `submit_
+    /// and_readback_for` has already submitted and polled for the whole
+    /// step) and logs a one-line breakdown: the per-layer-embedding (PLE)
+    /// projection, the sum and average across all `n_layer` model layers
+    /// (plus whichever one was slowest — the concrete "which layer" a
+    /// pure sum can't tell you), and the output-norm-plus-`lm_head` tail —
+    /// see `TimestampQueries`'s own doc comment for the slot layout these
+    /// deltas come from. Values are in milliseconds, converted from raw
+    /// GPU ticks via `Queue::get_timestamp_period`
+    /// (nanoseconds-per-tick — the conversion factor is device/driver-
+    /// specific, so this can't just assume nanoseconds like a CPU
+    /// `Instant` would). A separate, small map/poll/read cycle from
+    /// `submit_and_readback_for`'s own — simpler than threading timestamp
+    /// data through that call's `Vec<f32>` return type, and the extra
+    /// blocking poll is a non-issue for a diagnostic that only runs at all
+    /// when explicitly opted into.
+    pub fn report_timestamps(&self, start_pos: usize, n_layer: usize) {
+        let guard = self.timestamps.lock().expect("timestamp queries poisoned");
+        let t = guard
+            .as_ref()
+            .expect("report_timestamps called without a prior timestamp_query_set this step");
+        t.readback_buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |result| {
+                result.expect("mapping the timestamp readback buffer failed");
+            });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("polling for the timestamp readback failed");
+        let data = t.readback_buffer.slice(..).get_mapped_range().expect(
+            "timestamp readback buffer was not mapped after a successful map_async + poll",
+        );
+        let ticks: Vec<u64> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        t.readback_buffer.unmap();
+
+        let ns_per_tick = self.queue.get_timestamp_period() as f64;
+        let ms = |from: usize, to: usize| -> f64 {
+            (ticks[to].saturating_sub(ticks[from])) as f64 * ns_per_tick / 1_000_000.0
+        };
+
+        let ple_ms = ms(0, 1);
+        let mut layers_ms = 0.0;
+        let mut slowest = (0usize, 0.0f64);
+        for il in 0..n_layer {
+            let layer_ms = ms(1 + il, 2 + il);
+            layers_ms += layer_ms;
+            if layer_ms > slowest.1 {
+                slowest = (il, layer_ms);
+            }
+        }
+        let tail_ms = ms(1 + n_layer, 2 + n_layer);
+        let total_ms = ms(0, 2 + n_layer);
+        eprintln!(
+            "orangu-server: [gpu-timestamps] pos {start_pos}: ple={ple_ms:.3}ms \
+             layers={layers_ms:.3}ms ({n_layer} layers, avg {:.3}ms, slowest #{} @{:.3}ms) \
+             output+lm_head={tail_ms:.3}ms total_gpu={total_ms:.3}ms",
+            layers_ms / n_layer.max(1) as f64,
+            slowest.0,
+            slowest.1,
+        );
+    }
+
     /// Records gemma4's per-layer-embedding (PLE) *input* projection —
     /// `GemmaModel::compute_per_layer_inputs`'s GPU-fused equivalent — into
     /// `encoder` (does **not** submit), returning a `[n_layer, per_layer]`
@@ -4059,27 +4870,63 @@ struct FusedScaleResources {
 /// thing here that change call to call; everything else, including every
 /// bind group, is fixed once built.
 struct FusedAttnLayerResources {
-    q_norm_bg: wgpu::BindGroup,
-    q_norm_wg: u32,
-    q_rope_bg: wgpu::BindGroup,
-    q_rope_meta_buf: wgpu::Buffer,
-    q_rope_wg: u32,
+    /// Q-norm and Q-RoPE, fused into one `fused_norm_rope_pipeline`
+    /// dispatch — always safe, unlike K's own (see [`KNormRope`]'s own
+    /// doc comment): nothing ever needs to read Q's post-norm-but-pre-
+    /// RoPE intermediate value the way V sometimes needs K's.
+    q_norm_rope_bg: wgpu::BindGroup,
+    q_norm_rope_meta_buf: wgpu::Buffer,
+    q_norm_rope_wg: u32,
     kv: Option<FusedAttnKvLayerResources>,
 }
 
 /// [`FusedAttnLayerResources::kv`] — only present for layers that own
 /// their own K/V projection.
 struct FusedAttnKvLayerResources {
-    k_norm_bg: wgpu::BindGroup,
-    k_norm_wg: u32,
+    k_norm_rope: KNormRope,
     /// `Some` only when this layer doesn't own its own V projection (V
-    /// is a copy of K's post-norm output instead).
+    /// is a copy of K's post-norm output instead) — the same condition
+    /// [`KNormRope::Split`] is chosen under, since it's the same
+    /// dependency: V needs K's post-norm-but-pre-RoPE value, which only
+    /// exists as a readable intermediate when K's norm and RoPE are two
+    /// separate dispatches.
     v_scratch: Option<wgpu::Buffer>,
     v_norm_bg: wgpu::BindGroup,
     v_norm_wg: u32,
-    k_rope_bg: wgpu::BindGroup,
-    k_rope_meta_buf: wgpu::Buffer,
-    k_rope_wg: u32,
+}
+
+/// K's own norm+RoPE resources — fused into one dispatch when safe,
+/// split into two (the pre-fusion shape) when not.
+///
+/// Fusing norm and RoPE into one dispatch (`vulkan_shaders::
+/// FUSED_NORM_ROPE_SHADER`) keeps the normalized-but-not-yet-rotated head
+/// in `workgroup`-shared memory the whole time — nothing else can read
+/// that intermediate value once the dispatch starts. That's fine for Q
+/// (nothing ever needs Q's own intermediate), but not for K on a layer
+/// that doesn't own its own V projection: `record_fused_attention`'s own
+/// V-copy step needs to read K's post-norm-*but-pre-RoPE* output between
+/// the two stages (`FusedAttnKvLayerResources::v_scratch`'s own doc
+/// comment). `build_fused_attn_layer_resources` picks `Fused` exactly
+/// when this layer owns its own V projection (`wv_g.is_some()` — the
+/// same condition `v_scratch` being `None` already encodes) and `Split`
+/// otherwise, so the fallback only costs anything on the one model shape
+/// that structurally needs it — every gemma4-E2B layer that has a K
+/// projection also has its own V one (verified via `orangu-server show
+/// --tensors`), so this falls back to `Split` on none of them in
+/// practice.
+enum KNormRope {
+    Fused {
+        bg: wgpu::BindGroup,
+        meta_buf: wgpu::Buffer,
+        wg: u32,
+    },
+    Split {
+        k_norm_bg: wgpu::BindGroup,
+        k_norm_wg: u32,
+        k_rope_bg: wgpu::BindGroup,
+        k_rope_meta_buf: wgpu::Buffer,
+        k_rope_wg: u32,
+    },
 }
 
 /// One gemma4 layer's cached [`VulkanBackend::fused_layer`] resources —
@@ -4165,6 +5012,181 @@ mod tests {
     fn shared_vulkan() -> Option<&'static VulkanBackend> {
         static BACKEND: OnceLock<Option<VulkanBackend>> = OnceLock::new();
         BACKEND.get_or_init(VulkanBackend::try_init).as_ref()
+    }
+
+    /// Scratch measurement for roadmap item 6 (`doc/SERVER_ROADMAP.md`) —
+    /// NOT a correctness test, deleted once the number is recorded.
+    /// Duplicates `gpu_attention`'s exact body (same pipeline, same bind
+    /// group layout, same `n_head`-workgroup dispatch shape) but wraps its
+    /// one compute pass with GPU-timestamp `timestamp_writes` instead of
+    /// `None`, to measure the `attn_pipeline` dispatch's own GPU execution
+    /// time in isolation — via hardware timer, not CPU wall-clock, so
+    /// submission/poll overhead doesn't confound the number. Real
+    /// gemma4-E2B full-attention-layer shape (`n_head=8`, `n_head_kv=1`,
+    /// `head_dim=512`, confirmed via `orangu-server show`) and a
+    /// context length matching the range item 4/5's own measurements
+    /// already used.
+    #[test]
+    #[ignore]
+    fn _scratch_measure_attention_dispatch_cost() {
+        let Some(vulkan) = shared_vulkan() else {
+            eprintln!("skipping: no Vulkan adapter available in this environment");
+            return;
+        };
+
+        let n_head = 8;
+        let n_head_kv = 1;
+        let head_dim = 512;
+        let kv_dim = n_head_kv * head_dim;
+        let capacity = 64;
+        let n_positions = 32;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+
+        let mut seed = 0xA77E17_u64;
+        let mut kv_cache = crate::engine::kv_cache::KvCache::new_with_dims(capacity, &[kv_dim]);
+        for _ in 0..n_positions {
+            let k: Vec<f32> = (0..kv_dim)
+                .map(|_| (next_byte(&mut seed) as f32 - 128.0) / 64.0)
+                .collect();
+            let v: Vec<f32> = (0..kv_dim)
+                .map(|_| (next_byte(&mut seed) as f32 - 128.0) / 64.0)
+                .collect();
+            kv_cache.layers[0].push(&k, &v);
+        }
+        let pos = n_positions - 1;
+        let window_start = 0;
+        let q: Vec<f32> = (0..n_head * head_dim)
+            .map(|_| (next_byte(&mut seed) as f32 - 128.0) / 64.0)
+            .collect();
+        let cache = &mut kv_cache.layers[0];
+
+        let cap = cache.capacity();
+        let (k_buf, v_buf, probs_buf) =
+            cache.sync_gpu(&vulkan.device, &vulkan.queue, n_head, vulkan.kv_f16);
+        let q_buf = vulkan.upload_new(&q);
+        let out_buf = vulkan.scratch_buffer(n_head * head_dim);
+        let meta = AttnMeta {
+            n_head: n_head as u32,
+            n_head_kv: n_head_kv as u32,
+            head_dim: head_dim as u32,
+            window_start: window_start as u32,
+            n_pos: (pos - window_start + 1) as u32,
+            capacity: cap as u32,
+            scale,
+            _pad: 0,
+        };
+        let meta_buf = vulkan.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scratch attention meta"),
+            size: std::mem::size_of::<AttnMeta>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        vulkan
+            .queue
+            .write_buffer(&meta_buf, 0, bytemuck::bytes_of(&meta));
+        let bind_group = vulkan.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scratch attention bind group"),
+            layout: &vulkan.attn_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: q_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: k_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: v_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: probs_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: out_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: meta_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let query_set = vulkan.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("scratch timestamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        });
+        let resolve_buf = vulkan.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scratch timestamp resolve"),
+            size: 16,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback_buf = vulkan.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scratch timestamp readback"),
+            size: 16,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Run several times, in separate submissions (matching how one
+        // decode step's attention dispatch is one among many separate
+        // GPU-side passes, not a tight synthetic loop), and report the
+        // minimum — the same "min, not mean" instinct as a microbenchmark,
+        // to reduce first-touch/driver-side noise across runs.
+        let mut samples = Vec::new();
+        for _ in 0..20 {
+            let mut encoder = vulkan
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("scratch attention encoder"),
+                });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("scratch attention pass"),
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set: &query_set,
+                        beginning_of_pass_write_index: Some(0),
+                        end_of_pass_write_index: Some(1),
+                    }),
+                });
+                pass.set_pipeline(&vulkan.attn_pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(n_head as u32, 1, 1);
+            }
+            encoder.resolve_query_set(&query_set, 0..2, &resolve_buf, 0);
+            encoder.copy_buffer_to_buffer(&resolve_buf, 0, &readback_buf, 0, 16);
+            vulkan.queue.submit(Some(encoder.finish()));
+            readback_buf
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |r| r.expect("map failed"));
+            vulkan
+                .device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("poll failed");
+            let data = readback_buf
+                .slice(..)
+                .get_mapped_range()
+                .expect("readback buffer was not mapped after a successful map_async + poll");
+            let ticks: Vec<u64> = bytemuck::cast_slice(&data).to_vec();
+            drop(data);
+            readback_buf.unmap();
+            let ns_per_tick = vulkan.queue.get_timestamp_period() as f64;
+            let ms = (ticks[1].saturating_sub(ticks[0])) as f64 * ns_per_tick / 1_000_000.0;
+            samples.push(ms);
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!(
+            "orangu-server: [scratch] attn_pipeline dispatch (n_head={n_head}, n_head_kv={n_head_kv}, \
+             head_dim={head_dim}, n_positions={n_positions}): min={:.4}ms median={:.4}ms max={:.4}ms samples={samples:?}",
+            samples[0],
+            samples[samples.len() / 2],
+            samples[samples.len() - 1],
+        );
     }
 
     fn next_byte(seed: &mut u64) -> u8 {
@@ -5209,6 +6231,169 @@ mod tests {
         }
     }
 
+    /// Cross-checks `gpu_attention_split` (roadmap item 6's split-k
+    /// phase-1 + reduce phase-2 pipeline pair) against the same CPU
+    /// reference loop the `gpu_attention` tests above use. `n_positions =
+    /// 37` deliberately doesn't divide evenly by `ATTN_SPLIT_K = 4`
+    /// (37 = 9+9+9+10), exercising the uneven-remainder split-range
+    /// bookkeeping in `ATTENTION_SPLIT_SHADER_TEMPLATE`, not just the
+    /// tidy multiple-of-k_num case.
+    #[test]
+    fn gpu_attention_split_matches_cpu_reference() {
+        let Some(vulkan) = shared_vulkan() else {
+            eprintln!("skipping: no Vulkan adapter available in this environment");
+            return;
+        };
+
+        let n_head = 4;
+        let n_head_kv = 2;
+        let head_dim = 8;
+        let group_size = n_head / n_head_kv;
+        let kv_dim = n_head_kv * head_dim;
+        let capacity = 64;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+
+        let mut seed = 0x59717_u64;
+        let mut kv_cache = crate::engine::kv_cache::KvCache::new_with_dims(capacity, &[kv_dim]);
+        let n_positions = 37;
+        for _ in 0..n_positions {
+            let k: Vec<f32> = (0..kv_dim)
+                .map(|_| (next_byte(&mut seed) as f32 - 128.0) / 64.0)
+                .collect();
+            let v: Vec<f32> = (0..kv_dim)
+                .map(|_| (next_byte(&mut seed) as f32 - 128.0) / 64.0)
+                .collect();
+            kv_cache.layers[0].push(&k, &v);
+        }
+        let pos = n_positions - 1;
+        let window_start = 0;
+
+        let q: Vec<f32> = (0..n_head * head_dim)
+            .map(|_| (next_byte(&mut seed) as f32 - 128.0) / 64.0)
+            .collect();
+
+        let mut expected = vec![0f32; n_head * head_dim];
+        for h in 0..n_head {
+            let kv_head = h / group_size;
+            let qh = &q[h * head_dim..(h + 1) * head_dim];
+            let mut scores = Vec::with_capacity(pos + 1 - window_start);
+            for p in window_start..=pos {
+                let kh = kv_cache.layers[0].key_at(p, kv_head, head_dim);
+                scores.push(crate::engine::tensor::dot(qh, kh) * scale);
+            }
+            crate::engine::tensor::softmax_inplace(&mut scores);
+            let out = &mut expected[h * head_dim..(h + 1) * head_dim];
+            for (offset, &weight) in scores.iter().enumerate() {
+                let p = window_start + offset;
+                let vh = kv_cache.layers[0].value_at(p, kv_head, head_dim);
+                for (o, vi) in out.iter_mut().zip(vh.iter()) {
+                    *o += weight * vi;
+                }
+            }
+        }
+
+        let got = vulkan.gpu_attention_split(GpuAttentionInput {
+            q: &q,
+            cache: &mut kv_cache.layers[0],
+            pos,
+            window_start,
+            n_head,
+            n_head_kv,
+            head_dim,
+            scale,
+        });
+
+        assert_eq!(expected.len(), got.len());
+        for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            let tol = 6e-2 * a.abs().max(1.0);
+            assert!(
+                (a - b).abs() <= tol,
+                "mismatch at index {i}: cpu={a} gpu={b}"
+            );
+        }
+    }
+
+    /// `n_positions = 2 < ATTN_SPLIT_K = 4` — most of the `k_num` split
+    /// workgroups get an *empty* `[split_start, split_end)` range. Checks
+    /// that phase 1 leaves those workgroups' partial state as a proper
+    /// softmax identity (`m = -inf`, `l = 0`, `acc = 0`) and phase 2's
+    /// merge correctly ignores them, rather than corrupting the result
+    /// with e.g. uninitialized-buffer garbage or a `NaN` from `0/0`.
+    #[test]
+    fn gpu_attention_split_matches_cpu_reference_fewer_positions_than_splits() {
+        let Some(vulkan) = shared_vulkan() else {
+            eprintln!("skipping: no Vulkan adapter available in this environment");
+            return;
+        };
+
+        let n_head = 2;
+        let n_head_kv = 1;
+        let head_dim = 8;
+        let group_size = n_head / n_head_kv;
+        let kv_dim = n_head_kv * head_dim;
+        let capacity = 16;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+
+        let mut seed = 0xF0F0F_u64;
+        let mut kv_cache = crate::engine::kv_cache::KvCache::new_with_dims(capacity, &[kv_dim]);
+        let n_positions = 2;
+        for _ in 0..n_positions {
+            let k: Vec<f32> = (0..kv_dim)
+                .map(|_| (next_byte(&mut seed) as f32 - 128.0) / 64.0)
+                .collect();
+            let v: Vec<f32> = (0..kv_dim)
+                .map(|_| (next_byte(&mut seed) as f32 - 128.0) / 64.0)
+                .collect();
+            kv_cache.layers[0].push(&k, &v);
+        }
+        let pos = n_positions - 1;
+        let window_start = 0;
+
+        let q: Vec<f32> = (0..n_head * head_dim)
+            .map(|_| (next_byte(&mut seed) as f32 - 128.0) / 64.0)
+            .collect();
+
+        let mut expected = vec![0f32; n_head * head_dim];
+        for h in 0..n_head {
+            let kv_head = h / group_size;
+            let qh = &q[h * head_dim..(h + 1) * head_dim];
+            let mut scores = Vec::with_capacity(pos + 1 - window_start);
+            for p in window_start..=pos {
+                let kh = kv_cache.layers[0].key_at(p, kv_head, head_dim);
+                scores.push(crate::engine::tensor::dot(qh, kh) * scale);
+            }
+            crate::engine::tensor::softmax_inplace(&mut scores);
+            let out = &mut expected[h * head_dim..(h + 1) * head_dim];
+            for (offset, &weight) in scores.iter().enumerate() {
+                let p = window_start + offset;
+                let vh = kv_cache.layers[0].value_at(p, kv_head, head_dim);
+                for (o, vi) in out.iter_mut().zip(vh.iter()) {
+                    *o += weight * vi;
+                }
+            }
+        }
+
+        let got = vulkan.gpu_attention_split(GpuAttentionInput {
+            q: &q,
+            cache: &mut kv_cache.layers[0],
+            pos,
+            window_start,
+            n_head,
+            n_head_kv,
+            head_dim,
+            scale,
+        });
+
+        assert_eq!(expected.len(), got.len());
+        for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            let tol = 6e-2 * a.abs().max(1.0);
+            assert!(
+                (a - b).abs() <= tol,
+                "mismatch at index {i}: cpu={a} gpu={b}"
+            );
+        }
+    }
+
     /// Cross-checks `gpu_rope` against `tensor::rope_apply_scaled_inplace`
     /// — no `freq_factors` (the common case: SWA layers, and every layer
     /// in models without Gemma4's proportional-RoPE tensor).
@@ -5343,6 +6528,134 @@ mod tests {
         crate::engine::tensor::rmsnorm_inplace(&mut expected, &weight, n_head, head_dim, eps);
 
         let got = vulkan.gpu_perhead_rmsnorm(&x, &weight, n_head, head_dim, eps);
+
+        assert_eq!(expected.len(), got.len());
+        for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            let tol = 3e-3 * a.abs().max(1.0);
+            assert!(
+                (a - b).abs() <= tol,
+                "mismatch at index {i}: cpu={a} gpu={b}"
+            );
+        }
+    }
+
+    /// Cross-checks `gpu_fused_norm_rope` against calling `tensor::
+    /// rmsnorm_inplace` then `tensor::rope_apply_scaled_inplace` on the
+    /// result — the same two CPU references `gpu_perhead_rmsnorm_matches_
+    /// cpu_reference`/`gpu_rope_matches_cpu_reference_without_freq_
+    /// factors` each check individually, run back to back, since that's
+    /// exactly what the fused dispatch replaces. No `freq_factors` (SWA
+    /// layers, and every layer in models without Gemma4's proportional
+    /// RoPE).
+    #[test]
+    fn gpu_fused_norm_rope_matches_cpu_reference_without_freq_factors() {
+        let Some(vulkan) = shared_vulkan() else {
+            eprintln!("skipping: no Vulkan adapter available in this environment");
+            return;
+        };
+
+        let n_head = 5;
+        let head_dim = 16;
+        let rope_dim = 16;
+        let pos = 17;
+        let freq_base = 10000.0;
+        let eps = 1e-6;
+
+        let mut seed = 0xB00B00_u64;
+        let x: Vec<f32> = (0..n_head * head_dim)
+            .map(|_| (next_byte(&mut seed) as f32 - 128.0) / 64.0)
+            .collect();
+        let weight: Vec<f32> = (0..head_dim)
+            .map(|_| (next_byte(&mut seed) as f32) / 128.0)
+            .collect();
+
+        let mut expected = x.clone();
+        crate::engine::tensor::rmsnorm_inplace(&mut expected, &weight, n_head, head_dim, eps);
+        crate::engine::tensor::rope_apply_scaled_inplace(
+            &mut expected,
+            n_head,
+            head_dim,
+            rope_dim,
+            pos,
+            freq_base,
+            None,
+        );
+
+        let got = vulkan.gpu_fused_norm_rope(GpuFusedNormRopeInput {
+            x: &x,
+            weight: &weight,
+            n_head,
+            head_dim,
+            rope_dim,
+            pos,
+            freq_base,
+            freq_factors: None,
+            eps,
+        });
+
+        assert_eq!(expected.len(), got.len());
+        for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            let tol = 3e-3 * a.abs().max(1.0);
+            assert!(
+                (a - b).abs() <= tol,
+                "mismatch at index {i}: cpu={a} gpu={b}"
+            );
+        }
+    }
+
+    /// Like the above, but with `freq_factors` set (Gemma4's proportional
+    /// RoPE, full-attention layers) and a partial-rope shape (`head_dim >
+    /// rope_dim`, so the tail of each head must pass through the norm's
+    /// output untouched by the rotation) — the exact shape `record_fused_
+    /// attention` dispatches for E2B's full-attention layers.
+    #[test]
+    fn gpu_fused_norm_rope_matches_cpu_reference_with_freq_factors_and_partial_rope() {
+        let Some(vulkan) = shared_vulkan() else {
+            eprintln!("skipping: no Vulkan adapter available in this environment");
+            return;
+        };
+
+        let n_head = 3;
+        let head_dim = 10;
+        let rope_dim = 6; // < head_dim: elements [6, 10) must stay unchanged
+        let pos = 5;
+        let freq_base = 1_000_000.0;
+        let eps = 1e-6;
+
+        let mut seed = 0xFACE0FF_u64;
+        let x: Vec<f32> = (0..n_head * head_dim)
+            .map(|_| (next_byte(&mut seed) as f32 - 128.0) / 64.0)
+            .collect();
+        let weight: Vec<f32> = (0..head_dim)
+            .map(|_| (next_byte(&mut seed) as f32) / 128.0)
+            .collect();
+        let freq_factors: Vec<f32> = (0..rope_dim / 2)
+            .map(|_| 1.0 + next_byte(&mut seed) as f32 / 255.0)
+            .collect();
+
+        let mut expected = x.clone();
+        crate::engine::tensor::rmsnorm_inplace(&mut expected, &weight, n_head, head_dim, eps);
+        crate::engine::tensor::rope_apply_scaled_inplace(
+            &mut expected,
+            n_head,
+            head_dim,
+            rope_dim,
+            pos,
+            freq_base,
+            Some(&freq_factors),
+        );
+
+        let got = vulkan.gpu_fused_norm_rope(GpuFusedNormRopeInput {
+            x: &x,
+            weight: &weight,
+            n_head,
+            head_dim,
+            rope_dim,
+            pos,
+            freq_base,
+            freq_factors: Some(&freq_factors),
+            eps,
+        });
 
         assert_eq!(expected.len(), got.len());
         for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {

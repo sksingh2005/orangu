@@ -813,6 +813,7 @@ only (set to `1`), except where noted.
 | `ORANGU_GPU_SAMPLE` | unset (off) | Runs greedy (temperature-0) argmax sampling with repeat penalty on the GPU in the same submission as the forward pass, reading back one token id instead of the full `[n_vocab]` logits vector. |
 | `ORANGU_BATCH_DECODE` | unset (off) | Fuses the matmul steps of concurrent requests that submit a decode step within a short window into one batched call (attention/RoPE/KV-write stay per-sequence). Only takes effect when `slots > 1`. |
 | `ORANGU_GPU_TRACE` | unset (off) | Logs the number of GPU submissions per decode step to stdout — a diagnostic for round-trip counting, no effect on the computation. |
+| `ORANGU_GPU_TIMESTAMPS` | unset (off) | Logs a per-decode-step GPU timing breakdown to stderr — the per-layer-embedding (PLE) projection, the sum/average/slowest across all model layers, and the output-norm-plus-`lm_head` tail, in milliseconds. Requires an adapter with `TIMESTAMP_QUERY` and `TIMESTAMP_QUERY_INSIDE_ENCODERS`; a diagnostic for measuring where a decode step's GPU time actually goes, no effect on the computation. |
 
 Shader compilation is cached to disk across restarts
 (`~/.orangu/server/<adapter-key>/cache.bin`, keyed by a vendor/device-
