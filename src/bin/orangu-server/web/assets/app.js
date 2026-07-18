@@ -5,6 +5,7 @@
   const input = document.getElementById("input");
   const composer = document.getElementById("composer");
   const sendBtn = document.getElementById("send-btn");
+  const reloadBtn = document.getElementById("reload-btn");
   const newChatBtn = document.getElementById("new-chat-btn");
   const historyBtn = document.getElementById("history-btn");
   const historyPanel = document.getElementById("history-panel");
@@ -60,6 +61,16 @@
     transcript.appendChild(el);
     transcript.scrollTop = transcript.scrollHeight;
     return el;
+  }
+
+  // While a code block is still filling up during streaming, keep it
+  // scrolled to its latest line (like `tail -f`) instead of leaving it
+  // pinned to the top — the horizontal/vertical scrollbars (`.message
+  // pre` in app.css) stay available throughout for manual scrolling.
+  function pinCodeBlocksToLatest(el) {
+    for (const pre of el.querySelectorAll("pre")) {
+      pre.scrollTop = pre.scrollHeight;
+    }
   }
 
   function setBusy(busy) {
@@ -161,10 +172,10 @@
       await newChat();
     }
     addMessage("user", text);
-    const assistantEl = addMessage("assistant", "");
+    const assistantEl = addMessage("assistant", "🤖");
+    assistantEl.classList.add("pending");
     setBusy(true);
 
-    let buffer = "";
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(state.sessionId)}/messages`, {
         method: "POST",
@@ -189,12 +200,16 @@
           const line = raw.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
           const payload = JSON.parse(line.slice("data: ".length));
-          if (payload.type === "token") {
-            buffer += payload.text;
-            assistantEl.textContent = buffer;
-            transcript.scrollTop = transcript.scrollHeight;
-          } else if (payload.type === "done") {
+          assistantEl.classList.remove("pending");
+          if (payload.type === "token" || payload.type === "done") {
             assistantEl.innerHTML = payload.html;
+            pinCodeBlocksToLatest(assistantEl);
+            if (payload.type === "done" && payload.truncated) {
+              const notice = document.createElement("p");
+              notice.className = "truncated-notice";
+              notice.textContent = "⚠️ Response was cut off at the token limit.";
+              assistantEl.appendChild(notice);
+            }
             transcript.scrollTop = transcript.scrollHeight;
           } else if (payload.type === "error") {
             showFailure(assistantEl, "orangu-server generation error:", payload.message);
@@ -227,6 +242,36 @@
   newChatBtn.addEventListener("click", () => {
     newChat().catch((err) => console.error(err));
   });
+
+  reloadBtn.addEventListener("click", () => {
+    window.location.reload();
+  });
+
+  // The Reload button stays hidden (see index.html) until the running
+  // server's assets no longer match what this page was loaded with —
+  // otherwise there's nothing for it to fix.
+  const ASSET_VERSION = window.__ORANGU_ASSET_VERSION__;
+  const UPDATE_CHECK_INTERVAL_MS = 60000;
+
+  async function checkForUpdate() {
+    if (!reloadBtn.hidden) return;
+    try {
+      const res = await fetch("/api/asset-version", { cache: "no-store" });
+      if (!res.ok) return;
+      const { version } = await res.json();
+      if (version && version !== ASSET_VERSION) {
+        reloadBtn.hidden = false;
+      }
+    } catch {
+      // Server unreachable right now — nothing to report.
+    }
+  }
+
+  setInterval(() => checkForUpdate().catch((err) => console.error(err)), UPDATE_CHECK_INTERVAL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") checkForUpdate().catch((err) => console.error(err));
+  });
+  checkForUpdate().catch((err) => console.error(err));
 
   historyBtn.addEventListener("click", () => {
     if (historyPanel.hidden) {

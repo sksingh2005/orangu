@@ -35,13 +35,15 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
+    collections::hash_map::DefaultHasher,
     convert::Infallible,
-    sync::Arc,
+    hash::{Hash, Hasher},
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::engine::chat_template::{ChatMessage, ChatTemplate};
-use crate::engine::generate::{Engine, GenerateRequest, StreamEvent};
+use crate::engine::generate::{Engine, FinishReason, GenerateRequest, StreamEvent};
 use crate::engine::sampling::SamplingParams;
 use sessions::{Session, SessionMessage};
 
@@ -50,8 +52,12 @@ const APP_CSS: &str = include_str!("assets/app.css");
 const APP_JS: &str = include_str!("assets/app.js");
 
 /// Response-length cap for a web-UI turn — generous for a chat reply
-/// without risking one runaway request pinning a slot indefinitely.
-const MAX_TOKENS: usize = 1024;
+/// (a full worked example, e.g. a from-scratch data-structure
+/// implementation, easily runs past 1024 tokens) without risking one
+/// runaway request pinning a slot indefinitely. The engine additionally
+/// clamps this to what's left of the model's context window, so raising
+/// it here never risks overrunning `n_ctx_train`.
+const MAX_TOKENS: usize = 8192;
 
 pub struct WebState {
     pub engine: Arc<Engine>,
@@ -64,6 +70,7 @@ pub fn build_router(state: Arc<WebState>) -> Router {
         .route("/", get(index))
         .route("/static/app.css", get(app_css))
         .route("/static/app.js", get(app_js))
+        .route("/api/asset-version", get(asset_version_handler))
         .route("/api/sessions", post(create_session).get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/messages", post(send_message))
@@ -74,8 +81,35 @@ async fn index(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let html = INDEX_HTML
         .replace("{{VERSION}}", state.version)
         .replace("{{MODEL}}", &html_escape(&state.model_label))
-        .replace("{{YEAR}}", &current_year().to_string());
+        .replace("{{YEAR}}", &current_year().to_string())
+        .replace("{{ASSET_VERSION}}", asset_version());
     Html(html)
+}
+
+/// A stable fingerprint of the embedded web assets — same input, same
+/// hash, across every request in this process and across separate
+/// processes built from identical sources; changes only when
+/// `index.html`/`app.css`/`app.js` actually change. The client compares
+/// this against the version it was served at load time (`web::index`) to
+/// notice a newer binary is now running behind it (see `/api/asset-version`
+/// and the Reload button in `app.js`).
+fn asset_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        let mut hasher = DefaultHasher::new();
+        INDEX_HTML.hash(&mut hasher);
+        APP_CSS.hash(&mut hasher);
+        APP_JS.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    })
+}
+
+async fn asset_version_handler() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("Cache-Control", "no-cache")],
+        Json(json!({ "version": asset_version() })),
+    )
 }
 
 /// The current UTC calendar year, for the footer's copyright-style link —
@@ -108,7 +142,10 @@ fn html_escape(text: &str) -> String {
 async fn app_css() -> impl IntoResponse {
     (
         StatusCode::OK,
-        [("Content-Type", "text/css; charset=utf-8")],
+        [
+            ("Content-Type", "text/css; charset=utf-8"),
+            ("Cache-Control", "no-cache"),
+        ],
         APP_CSS,
     )
 }
@@ -116,7 +153,10 @@ async fn app_css() -> impl IntoResponse {
 async fn app_js() -> impl IntoResponse {
     (
         StatusCode::OK,
-        [("Content-Type", "application/javascript; charset=utf-8")],
+        [
+            ("Content-Type", "application/javascript; charset=utf-8"),
+            ("Cache-Control", "no-cache"),
+        ],
         APP_JS,
     )
 }
@@ -229,12 +269,13 @@ async fn send_message(
             match event {
                 StreamEvent::Token(text) => {
                     full.push_str(&text);
+                    let html = render::render_markdown_to_html(&full);
                     yield Ok::<_, Infallible>(
                         axum::response::sse::Event::default()
-                            .data(json!({"type": "token", "text": text}).to_string()),
+                            .data(json!({"type": "token", "html": html}).to_string()),
                     );
                 }
-                StreamEvent::Done { .. } => {
+                StreamEvent::Done { finish_reason, .. } => {
                     let full = state.engine.tokenizer.clean_up_tokenization_spaces(&full);
                     let html = render::render_markdown_to_html(&full);
                     if let Err(err) = sessions::append_turn(&mut session, &user_message, &full) {
@@ -242,8 +283,9 @@ async fn send_message(
                             .data(json!({"type": "error", "message": err.to_string()}).to_string()));
                         break;
                     }
+                    let truncated = finish_reason == FinishReason::Length;
                     yield Ok(axum::response::sse::Event::default()
-                        .data(json!({"type": "done", "html": html}).to_string()));
+                        .data(json!({"type": "done", "html": html, "truncated": truncated}).to_string()));
                     break;
                 }
                 StreamEvent::Error(err) => {

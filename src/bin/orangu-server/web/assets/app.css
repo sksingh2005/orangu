@@ -241,11 +241,13 @@ button:disabled {
 }
 
 .message {
-  max-width: 72ch;
+  max-width: 50%;
+  width: fit-content;
   padding: 10px 14px;
   border-radius: var(--radius);
   line-height: 1.5;
   overflow-wrap: break-word;
+  box-sizing: border-box;
 }
 
 .message.user {
@@ -257,6 +259,16 @@ button:disabled {
   align-self: flex-start;
   background: var(--assistant-bubble);
   border: 1px solid var(--border);
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.message.pending {
+  animation: blink 1s step-start infinite;
 }
 
 .message.error {
@@ -276,8 +288,16 @@ button:disabled {
   margin-bottom: 0;
 }
 
+.truncated-notice {
+  color: var(--text-dim);
+  font-size: 0.85em;
+  font-style: italic;
+}
+
 .message pre {
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: 400px;
   padding: 10px;
   border-radius: 8px;
   font-size: 0.88em;
@@ -321,6 +341,24 @@ button:disabled {
   border-radius: var(--radius);
   padding: 10px 12px;
   font: inherit;
+}
+
+#composer-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Reload stays its own compact size; Send grows to fill whatever's left —
+   so with Reload hidden, Send alone fills the full column and matches the
+   input area's height, and with Reload visible, Send fills the remainder
+   below it. */
+#send-btn {
+  flex: 1;
+}
+
+#reload-btn[hidden] {
+  display: none;
 }
 
 #input:focus, button:focus-visible {

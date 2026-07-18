@@ -7,6 +7,12 @@
 <title>orangu-server</title>
 <link rel="stylesheet" href="/static/app.css">
 <script>
+  // The asset fingerprint this page was served with — app.js polls
+  // /api/asset-version and compares against this to notice a newer
+  // binary is now running behind it, so the Reload button only appears
+  // when a reload is actually needed.
+  window.__ORANGU_ASSET_VERSION__ = "{{ASSET_VERSION}}";
+
   // Applied before first paint so a saved preference doesn't flash the
   // wrong theme for a frame — the rest of the toggle lives in app.js.
   (() => {
@@ -39,9 +45,14 @@
 
   <form id="composer">
     <textarea id="input" placeholder="Message orangu-server… (Enter to send, Shift+Enter for a new line)" rows="2"></textarea>
-    <button id="send-btn" class="icon-btn" type="submit" aria-label="Send" title="Send">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-    </button>
+    <div id="composer-actions">
+      <button id="reload-btn" class="icon-btn" type="button" hidden aria-label="Reload" title="Reload (pick up new features or CSS)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      </button>
+      <button id="send-btn" class="icon-btn" type="submit" aria-label="Send" title="Send">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      </button>
+    </div>
   </form>
 
   <footer id="footer">
