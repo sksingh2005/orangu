@@ -336,7 +336,11 @@
     if (
       !historyPanel.hidden &&
       !historyPanel.contains(event.target) &&
-      event.target !== historyBtn
+      // historyBtn.contains(), not `!== historyBtn` — a click lands on the
+      // button's inner <svg>/<path>, never the <button> element itself, so
+      // the strict equality check always treated it as an outside click
+      // and closed the panel the instant showHistory() had just opened it.
+      !historyBtn.contains(event.target)
     ) {
       hideHistory();
     }
