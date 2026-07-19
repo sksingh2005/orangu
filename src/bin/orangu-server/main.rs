@@ -402,6 +402,25 @@ fn prepare(args: Args) -> Result<Prepared> {
     // batch across otherwise) *and* the env var is set.
     let batch_coordinator = (conf.slots > 1 && std::env::var_os("ORANGU_BATCH_DECODE").is_some())
         .then(|| engine::batch::BatchCoordinator::new(slots.clone()));
+    // Cross-request KV-cache prefix reuse (`engine::prefix_cache`),
+    // **off by default; opt in with `ORANGU_PREFIX_CACHE=1`**. Unlike
+    // every other opt-in-then-promoted flag in this codebase (`wide_load`,
+    // `packed_dot_f16`, `subgroup_reduce`), the risk here isn't a modest
+    // performance regression on some adapter — a bug in prefix matching
+    // or reuse would silently produce a *wrong* generation, not just a
+    // slow one, so this starts opt-in on general principle even though
+    // nothing has actually been measured to regress. `PREFIX_CACHE_
+    // ENTRIES` is a small fixed pool size, not exposed as its own env
+    // var, the same way `ATTN_SPLIT_K`/`ARGMAX_SPLIT_N`
+    // (`engine/backend/vulkan.rs`) are fixed constants rather than
+    // per-deployment tuning knobs — each entry holds a whole `KvCache`'s
+    // worth of `f32` K/V buffers (easily hundreds of MB at real context
+    // lengths), so this is sized to stay well within ordinary system RAM,
+    // not tuned per-deployment.
+    const PREFIX_CACHE_ENTRIES: usize = 4;
+    let prefix_cache = std::env::var_os("ORANGU_PREFIX_CACHE")
+        .is_some()
+        .then(|| Arc::new(engine::prefix_cache::PrefixCache::new(PREFIX_CACHE_ENTRIES)));
 
     let engine = Arc::new(Engine {
         model,
@@ -409,6 +428,7 @@ fn prepare(args: Args) -> Result<Prepared> {
         chat_template_source,
         slots,
         batch_coordinator,
+        prefix_cache,
         role,
     });
 

@@ -439,6 +439,53 @@ impl LayerCache {
         let row = &self.v[pos * self.kv_dim..(pos + 1) * self.kv_dim];
         &row[kv_head * head_dim..(kv_head + 1) * head_dim]
     }
+
+    /// Overwrites this (freshly allocated, empty) layer's first `len`
+    /// cached positions with `src`'s own already-computed ones — the raw
+    /// float copy [`KvCache::copy_prefix_from`] needs. `src`'s positions
+    /// `[0, len)` were computed from the exact same token ids this layer
+    /// is about to be asked to continue from, so there's nothing to
+    /// recompute for them. Drops any GPU mirror `self` already had so one
+    /// gets rebuilt lazily, sized to `self`'s own capacity, the next time
+    /// [`Self::sync_gpu`] runs — `src` and `self` can have different
+    /// capacities (two different requests' own prompt-plus-max-tokens
+    /// budgets), so this never tries to reuse `src`'s GPU buffers
+    /// directly.
+    ///
+    /// A no-op when `src.len == 0` — a cross-layer KV-donor layer's own
+    /// array slot (`engine::arch::gemma`'s `kv_donor`) never gets pushed
+    /// to directly (its writes/reads always redirect to the donor
+    /// target's own slot instead), so it stays at `len == 0` for its
+    /// whole lifetime no matter how far the model has actually
+    /// progressed — nothing downstream ever reads such a slot's own
+    /// `len`/`k`/`v`, so leaving `self`'s corresponding slot at its own
+    /// freshly allocated (all-zero) state is exactly correct, not a
+    /// partial or best-effort copy. [`KvCache::copy_prefix_from`]'s
+    /// caller (`engine::prefix_cache::PrefixCache::take_best_match`)
+    /// already bounds `len` by the *maximum* `len` across every layer
+    /// precisely so a real owning layer's `src.len` is never smaller than
+    /// `len` — only a permanently-dead donor slot can still be `0` here.
+    fn copy_prefix_from(&mut self, src: &LayerCache, len: usize) {
+        debug_assert_eq!(self.kv_dim, src.kv_dim);
+        if src.len == 0 {
+            return;
+        }
+        assert!(
+            len <= self.capacity,
+            "reused prefix ({len}) exceeds this request's own KV capacity ({})",
+            self.capacity
+        );
+        assert!(
+            len <= src.len,
+            "reused prefix ({len}) exceeds the source cache's own committed length ({})",
+            src.len
+        );
+        let n = len * self.kv_dim;
+        self.k[..n].copy_from_slice(&src.k[..n]);
+        self.v[..n].copy_from_slice(&src.v[..n]);
+        self.len = len;
+        self.gpu = None;
+    }
 }
 
 pub struct KvCache {
@@ -487,6 +534,33 @@ impl KvCache {
             .collect();
         cache
     }
+
+    /// Reuses `src`'s already-computed positions `[0, len)` instead of
+    /// recomputing them — the mechanism `crate::engine::prefix_cache`
+    /// needs to skip re-prefilling a prompt prefix a previous request
+    /// already processed (e.g. the same conversation's prior turns, or a
+    /// system prompt shared with an earlier, unrelated request). `self`
+    /// must already be a freshly allocated cache (this request's own
+    /// `capacity`, `len == 0` on every layer) — see [`LayerCache::
+    /// copy_prefix_from`] for why this always copies into a fresh cache
+    /// rather than adopting `src`'s buffers directly.
+    ///
+    /// Recurrent (SSM / gated-delta-net) layer state has no per-position
+    /// history to truncate — a caller may only pass `len == src`'s own
+    /// full committed length when `src.recurrent` is non-empty (i.e. the
+    /// new request's prompt is `src`'s own tokens plus a strict suffix,
+    /// never a shorter, older prefix of them); `crate::engine::
+    /// prefix_cache::PrefixCache::take_best_match` enforces exactly that
+    /// restriction before this is ever called on a mixed-architecture
+    /// cache.
+    pub fn copy_prefix_from(&mut self, src: &KvCache, len: usize) {
+        for (dst, src_layer) in self.layers.iter_mut().zip(src.layers.iter()) {
+            dst.copy_prefix_from(src_layer, len);
+        }
+        for (dst, src_r) in self.recurrent.iter_mut().zip(src.recurrent.iter()) {
+            dst.copy_from(src_r);
+        }
+    }
 }
 
 /// One recurrent (SSM / gated-delta-net) layer's persistent state: a
@@ -514,6 +588,18 @@ impl RecurrentLayerState {
             delta_state: vec![0.0; num_heads * head_dim * head_dim],
             head_dim,
         }
+    }
+
+    /// Overwrites this state with `src`'s own — the whole-state carryover
+    /// [`KvCache::copy_prefix_from`] uses for the recurrent-layer case
+    /// (never a partial/truncated copy; see that method's own doc comment
+    /// for why only a full carryover is ever valid here).
+    fn copy_from(&mut self, src: &RecurrentLayerState) {
+        debug_assert_eq!(self.conv_channels, src.conv_channels);
+        debug_assert_eq!(self.d_conv, src.d_conv);
+        debug_assert_eq!(self.head_dim, src.head_dim);
+        self.conv_history.copy_from_slice(&src.conv_history);
+        self.delta_state.copy_from_slice(&src.delta_state);
     }
 
     /// One timestep of causal depthwise conv1d: convolves `input`

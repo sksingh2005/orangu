@@ -20,6 +20,7 @@ pub mod chat_template;
 pub mod generate;
 pub mod kv_cache;
 pub mod loader;
+pub mod prefix_cache;
 pub mod quant;
 pub mod sampling;
 pub mod scheduler;

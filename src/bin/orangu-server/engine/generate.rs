@@ -28,6 +28,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use super::arch::{ForwardOutcome, GreedySampleParams, ModelForward};
 use super::batch::{BatchCoordinator, BatchDecodeRequest, OwnedGreedySample};
+use super::prefix_cache::PrefixCache;
 use super::sampling::{Sampler, SamplingParams};
 use super::scheduler::SlotPool;
 use super::tokenizer::Tokenizer;
@@ -122,6 +123,11 @@ pub struct Engine {
     /// attempted — this is left available behind the flag, correctness-
     /// verified, for future work rather than deleted.
     pub batch_coordinator: Option<Arc<BatchCoordinator>>,
+    /// Cross-request KV-cache prefix reuse (`engine::prefix_cache`) —
+    /// `None` disables it entirely (same as `Some(PrefixCache::new(0))`,
+    /// just without even the pool's own mutex/lookup cost). See that
+    /// module's own doc comment for what it does and doesn't cover.
+    pub prefix_cache: Option<Arc<PrefixCache>>,
     /// Which of `--all`/`--code`/`--review`/`--explorer`/`--embedding` this
     /// deployment was started with — read by the HTTP layer for default
     /// sampling parameters, generation-endpoint gating, and (`Review`
@@ -139,6 +145,7 @@ impl Engine {
         let tokenizer = self.tokenizer.clone();
         let slots = self.slots.clone();
         let batch_coordinator = self.batch_coordinator.clone();
+        let prefix_cache = self.prefix_cache.clone();
 
         tokio::spawn(async move {
             let guard = slots.acquire().await;
@@ -148,6 +155,7 @@ impl Engine {
                     model.as_ref(),
                     tokenizer.as_ref(),
                     batch_coordinator.as_deref(),
+                    prefix_cache.as_deref(),
                     &guard,
                     req,
                     task_tx,
@@ -172,6 +180,7 @@ fn run(
     model: &dyn ModelForward,
     tokenizer: &Tokenizer,
     batch_coordinator: Option<&BatchCoordinator>,
+    prefix_cache: Option<&PrefixCache>,
     guard: &super::scheduler::SlotGuard,
     req: GenerateRequest,
     tx: mpsc::UnboundedSender<StreamEvent>,
@@ -188,21 +197,43 @@ fn run(
     }
 
     guard.set_prompt_tokens(req.prompt_tokens.len());
+    // Reuse a previous request's already-computed KV cache for however
+    // much of this prompt matches one — see `engine::prefix_cache`'s own
+    // doc comment. Always allocate this request's own cache fresh, at its
+    // own `capacity` (never reused directly: two requests' capacities can
+    // differ), then copy the matched prefix into it — `reused_len` tokens'
+    // worth of the prompt never need a forward pass at all. Left at 1
+    // fewer than the full matched length whenever it would otherwise equal
+    // this prompt's own length, so there's always at least one real
+    // forward call to produce fresh logits for the first sampled token
+    // from (this only matters for the degenerate case of re-sending a
+    // prompt identical to one already fully cached).
+    let mut new_cache = model.new_kv_cache(capacity);
+    let mut reused_len = 0usize;
+    if let Some(pool) = prefix_cache
+        && let Some((matched, entry)) = pool.take_best_match(&req.prompt_tokens)
+    {
+        let matched = matched.min(req.prompt_tokens.len().saturating_sub(1));
+        if matched > 0 {
+            new_cache.copy_prefix_from(&entry.cache, matched);
+            reused_len = matched;
+        }
+    }
     // `Option` (not a plain `KvCache`) so the decode loop can *move* it
     // into a `BatchDecodeRequest` when a `batch_coordinator` is in use —
     // that call crosses to a different thread (whichever one ends up
     // leading this batch), which needs ownership, not a borrow. `.take()`/
     // reassignment stands in for a borrow everywhere else, at zero real
     // cost (this is never actually `None` except mid-swap).
-    let mut cache = Some(model.new_kv_cache(capacity));
+    let mut cache = Some(new_cache);
     let mut sampler = Sampler::new(req.sampling);
     let mut history = req.prompt_tokens.clone();
 
     let prompt_start = Instant::now();
     let logits = match model.forward(
         cache.as_mut().expect("cache is always Some here"),
-        &req.prompt_tokens,
-        0,
+        &req.prompt_tokens[reused_len..],
+        reused_len,
     ) {
         Ok(l) => l,
         Err(err) => {
@@ -324,6 +355,15 @@ fn run(
     }
     let generate_time = generate_start.elapsed();
 
+    // Offer this request's own final (full token sequence, resulting KV
+    // cache) to the pool for a later request to reuse — win or not this
+    // time, it's a candidate prefix for whatever comes next (most
+    // obviously the same conversation's following turn, whose prompt will
+    // be exactly `history` plus a short new suffix).
+    if let (Some(pool), Some(final_cache)) = (prefix_cache, cache.take()) {
+        pool.store(std::mem::take(&mut history), final_cache);
+    }
+
     let stats = GenerateStats {
         prompt_tokens: req.prompt_tokens.len(),
         prompt_time,
@@ -343,4 +383,247 @@ fn run(
         finish_reason,
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::kv_cache::KvCache;
+    use crate::engine::loader::{ModelConfig, PoolingType};
+    use crate::engine::scheduler::SlotPool;
+    use orangu::gguf::{GgufFile, GgufValue};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A deterministic, model-math-free `ModelForward`: each position's
+    /// key/value is a pure function of `(token, position)`, and the
+    /// returned logits are a pure function of every cached key so far —
+    /// so whether an earlier position's key was computed by *this* call or
+    /// copied in from a previous request's cache
+    /// (`KvCache::copy_prefix_from`) can't matter, exactly the property
+    /// `prefix_cache_reuse_matches_a_full_recompute` below needs to isolate
+    /// prefix reuse's own correctness from any real model's floating-point
+    /// non-associativity across different batch shapes (a separate,
+    /// already-present property of the real GPU backends, not something
+    /// this module's own plumbing introduces).
+    struct DeterministicModel {
+        config: ModelConfig,
+        /// Total tokens ever passed to `forward` — lets a test confirm
+        /// prefix reuse actually skipped work, not just that it didn't
+        /// change the result.
+        forwarded_tokens: AtomicUsize,
+    }
+
+    impl DeterministicModel {
+        fn new(n_vocab: usize) -> Self {
+            Self {
+                config: ModelConfig {
+                    architecture: "test".to_string(),
+                    n_vocab,
+                    n_embd: 1,
+                    n_layer: 1,
+                    n_head: 1,
+                    n_head_kv: 1,
+                    n_ctx_train: 1000,
+                    rope_dim: 1,
+                    rope_freq_base: 10000.0,
+                    rms_eps: 1e-6,
+                    pooling_type: PoolingType::Mean,
+                },
+                forwarded_tokens: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ModelForward for DeterministicModel {
+        fn config(&self) -> &ModelConfig {
+            &self.config
+        }
+
+        fn new_kv_cache(&self, capacity: usize) -> KvCache {
+            KvCache::new(1, capacity, 1)
+        }
+
+        fn forward(
+            &self,
+            cache: &mut KvCache,
+            tokens: &[u32],
+            start_pos: usize,
+        ) -> Result<Vec<f32>> {
+            self.forwarded_tokens
+                .fetch_add(tokens.len(), Ordering::Relaxed);
+            let layer = &mut cache.layers[0];
+            for (i, &t) in tokens.iter().enumerate() {
+                let val = t as f32 * 1000.0 + (start_pos + i) as f32;
+                layer.push(&[val], &[val]);
+            }
+            let len = layer.len;
+            let mut acc = 0f32;
+            for p in 0..len {
+                acc += layer.key_at(p, 0, 1)[0];
+            }
+            let winner = (acc.abs() as u64 as usize) % self.config.n_vocab;
+            let mut logits = vec![0f32; self.config.n_vocab];
+            logits[winner] = 10.0;
+            Ok(logits)
+        }
+
+        fn forward_hidden_states(&self, _tokens: &[u32]) -> Result<Vec<f32>> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
+    /// A minimal real `Tokenizer` (plain single-letter tokens, `"llama"`
+    /// vocab kind so `decode` needs no byte-mapping table) — only
+    /// `Tokenizer::decode` is exercised by `run`, to turn each sampled
+    /// token id back into the streamed text this test compares.
+    fn letter_tokenizer(n_vocab: usize) -> Tokenizer {
+        let tokens: Vec<GgufValue> = (0..n_vocab)
+            .map(|i| GgufValue::String(char::from_u32('a' as u32 + i as u32).unwrap().to_string()))
+            .collect();
+        let gguf = GgufFile {
+            version: 3,
+            metadata: vec![
+                (
+                    "tokenizer.ggml.tokens".to_string(),
+                    GgufValue::Array(tokens),
+                ),
+                (
+                    "tokenizer.ggml.model".to_string(),
+                    GgufValue::String("llama".to_string()),
+                ),
+            ],
+            tensors: vec![],
+            alignment: 32,
+            data_offset: 0,
+        };
+        Tokenizer::from_gguf(&gguf).unwrap()
+    }
+
+    fn greedy_params() -> SamplingParams {
+        SamplingParams {
+            temperature: 0.0,
+            repeat_penalty: 1.0,
+            repeat_last_n: 0,
+            ..SamplingParams::default()
+        }
+    }
+
+    /// Drains every event `run` already sent (it only returns after
+    /// sending `Done`, so nothing is still in flight) into the
+    /// concatenated streamed text plus whether it finished without error.
+    fn drain(mut rx: UnboundedReceiver<StreamEvent>) -> (String, bool) {
+        let mut text = String::new();
+        let mut ok = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                StreamEvent::Token(t) => text.push_str(&t),
+                StreamEvent::Done { .. } => ok = true,
+                StreamEvent::Error(e) => panic!("unexpected generation error: {e}"),
+            }
+        }
+        (text, ok)
+    }
+
+    fn run_request(
+        model: &DeterministicModel,
+        tokenizer: &Tokenizer,
+        prefix_cache: Option<&PrefixCache>,
+        prompt_tokens: Vec<u32>,
+        max_tokens: usize,
+    ) -> (String, bool) {
+        let slots = SlotPool::new(1);
+        let guard = pollster::block_on(slots.acquire());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let req = GenerateRequest {
+            prompt_tokens,
+            sampling: greedy_params(),
+            max_tokens,
+            stop_token_ids: vec![],
+        };
+        run(model, tokenizer, None, prefix_cache, &guard, req, tx).unwrap();
+        drain(rx)
+    }
+
+    /// The correctness property prefix reuse must never break: a second,
+    /// growing-conversation request (this exact model's own full first-
+    /// turn history, plus a short new suffix — the shape `engine::
+    /// prefix_cache`'s own doc comment calls the primary use case) must
+    /// stream back *exactly* the same text whether or not a `PrefixCache`
+    /// let it skip re-prefilling the shared part, and reuse must actually
+    /// have skipped real work when it's available.
+    #[test]
+    fn prefix_cache_reuse_matches_a_full_recompute() {
+        let n_vocab = 32;
+        let tokenizer = letter_tokenizer(n_vocab);
+        let turn1_prompt = vec![1u32, 2, 3, 4, 5];
+        let turn2_suffix = vec![6u32, 7];
+
+        // Baseline: no prefix cache at all, turn 2 is a full reprefill of
+        // its own complete prompt from position 0 — today's behavior.
+        let model = DeterministicModel::new(n_vocab);
+        let (turn1_text, ok1) = run_request(&model, &tokenizer, None, turn1_prompt.clone(), 3);
+        assert!(ok1);
+        let mut turn2_prompt_baseline = turn1_prompt.clone();
+        for ch in turn1_text.chars() {
+            turn2_prompt_baseline.push(ch as u32 - 'a' as u32);
+        }
+        turn2_prompt_baseline.extend(turn2_suffix.clone());
+        let (turn2_text_baseline, ok2) =
+            run_request(&model, &tokenizer, None, turn2_prompt_baseline.clone(), 3);
+        assert!(ok2);
+
+        // Same two turns, this time through a shared `PrefixCache` — turn
+        // 2's prompt is byte-for-byte `turn2_prompt_baseline` (same
+        // tokenizer, same deterministic turn-1 output), so it should find
+        // and reuse turn 1's entire cached history.
+        let model = DeterministicModel::new(n_vocab);
+        let pool = PrefixCache::new(4);
+        let (turn1_text_reuse, ok1) =
+            run_request(&model, &tokenizer, Some(&pool), turn1_prompt.clone(), 3);
+        assert!(ok1);
+        assert_eq!(
+            turn1_text_reuse, turn1_text,
+            "turn 1 has no prefix to reuse yet"
+        );
+        let mut turn2_prompt_reuse = turn1_prompt.clone();
+        for ch in turn1_text_reuse.chars() {
+            turn2_prompt_reuse.push(ch as u32 - 'a' as u32);
+        }
+        turn2_prompt_reuse.extend(turn2_suffix.clone());
+        assert_eq!(
+            turn2_prompt_reuse, turn2_prompt_baseline,
+            "both runs' turn-2 prompts must be identical for this comparison to mean anything"
+        );
+        let forwarded_before_turn2 = model.forwarded_tokens.load(Ordering::Relaxed);
+        let (turn2_text_reuse, ok2) =
+            run_request(&model, &tokenizer, Some(&pool), turn2_prompt_reuse, 3);
+        assert!(ok2);
+        let reuse_forwarded = model.forwarded_tokens.load(Ordering::Relaxed);
+
+        assert_eq!(
+            turn2_text_reuse, turn2_text_baseline,
+            "prefix reuse must produce byte-identical output to a full recompute"
+        );
+        // Turn 2's own forward-pass token count: reuse must have skipped
+        // all but the very last of turn 1's 8-token history. `run`'s
+        // decode loop stops as soon as `history.len()` reaches its target
+        // capacity (`prompt.len() + max_tokens`) — which happens right
+        // after the *last* generated token is appended to `history` but
+        // *before* the forward call that would have pushed its own
+        // key/value into the cache (`PrefixCache::take_best_match`'s own
+        // doc comment covers this). Both turns here use `max_tokens = 3`
+        // with no stop token ever reached, so this fires identically for
+        // both: turn 1 leaves only 7 of its own 8 tokens actually cached,
+        // and turn 2's own decode loop likewise only reaches 2 real
+        // forward calls (its 3rd generated token's own forward call is
+        // the one skipped this time). So turn 2 must forward: turn 1's
+        // uncached 8th token (1), the 2 brand-new suffix tokens, plus 2
+        // (not 3) decode-step forwards.
+        let turn2_forwarded_reuse = reuse_forwarded - forwarded_before_turn2;
+        assert_eq!(
+            turn2_forwarded_reuse,
+            1 + turn2_suffix.len() + 2,
+            "reuse must skip turn 1's first 7 cached positions, forwarding only its own uncached 8th token, the new suffix, and this turn's own 2 real decode steps"
+        );
+    }
 }
