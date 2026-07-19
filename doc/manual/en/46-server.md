@@ -206,7 +206,8 @@ sidecar file doesn't count as its own model — it's meant to be loaded
 *alongside* a base model, not to stand in as one.
 
 **`show`** prints a GGUF file's full metadata — every key/value pair in the
-file, not just the well-known keys:
+file, not just the well-known keys. Omit the argument entirely to pick one
+interactively (`list`'s own table, then an `NR` prompt):
 
 ```sh
 orangu-server show 3                                     # NR from `list`
@@ -215,6 +216,7 @@ orangu-server show Qwen3-Coder-30B-A3B-Instruct.gguf      # bare name under `mod
 orangu-server show ./relative/or/absolute/path.gguf
 orangu-server show 3 --tensors   # also list every tensor's shape/type/offset
 orangu-server show 3 --full      # print full arrays instead of a preview
+orangu-server show               # no argument: list, then pick an NR interactively
 ```
 
 Array-valued metadata (e.g. `tokenizer.ggml.tokens`, which routinely holds

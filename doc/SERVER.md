@@ -400,6 +400,13 @@ configured `models` directory; as an `NR` from `list`'s first column; as a
 `MODEL` name from its second. For a model split into shards, `show` reads the
 first shard — GGUF metadata for a multi-part model lives there in full.
 
+Omit the argument entirely to pick one interactively — `list`'s own table is
+printed, then `show` prompts for an `NR` (same as `delete` with no argument):
+
+```sh
+orangu-server show
+```
+
 Array-valued metadata (e.g. `tokenizer.ggml.tokens`, which routinely holds
 well over 100,000 entries) is truncated to a short preview by default —
 `--full` disables that. Tensor data itself is never read, only the header,

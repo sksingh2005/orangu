@@ -152,8 +152,9 @@ enum Command {
     Show {
         /// A path to a .gguf file, a bare name resolved against the
         /// configured models directory, an NR from `list`'s first column, or
-        /// a MODEL name from its second.
-        file: String,
+        /// a MODEL name from its second. Omit it to pick one interactively
+        /// from the same table `list` prints.
+        file: Option<String>,
         /// Print every array element instead of a truncated preview.
         #[arg(long)]
         full: bool,
@@ -666,7 +667,10 @@ fn run_command(config_arg: Option<PathBuf>, command: Command) -> Result<()> {
             tensors,
         } => {
             let conf = load_config(config_arg, None, false)?;
-            let path = orangu::model_spec::resolve_show_target(&conf.models, &file)?;
+            let path = match file {
+                Some(spec) => orangu::model_spec::resolve_show_target(&conf.models, &spec)?,
+                None => select_model_for_show(&conf.models)?,
+            };
             let gguf = GgufFile::open(&path)?;
             print!("{}", format_show(&gguf, full, tensors));
             Ok(())
@@ -708,6 +712,41 @@ fn run_command(config_arg: Option<PathBuf>, command: Command) -> Result<()> {
         }
         Command::Prune { identifier, yes } => prune::run(identifier, yes),
     }
+}
+
+/// Lists every `.gguf` model under `models_dir` (the same table `list`
+/// prints) and prompts for an `NR`, for `show` invoked with no file
+/// argument. Returns the chosen model's representative path — the same one
+/// `resolve_show_target`'s own NR resolution would give an explicit `NR`
+/// argument, so both paths into `show` end up looking at exactly the same
+/// file.
+fn select_model_for_show(models_dir: &Path) -> Result<PathBuf> {
+    let models = orangu::model_spec::scan_models_dir(models_dir)
+        .with_context(|| format!("scanning {}", models_dir.display()))?;
+    let groups = orangu::model_spec::group_models(&models);
+    if groups.is_empty() {
+        bail!("no .gguf models found under {}", models_dir.display());
+    }
+    print!(
+        "{}",
+        orangu::model_spec::format_groups(&groups, models_dir, &Default::default())
+    );
+
+    print!("\nSelect a model (NR): ");
+    std::io::stdout().flush().ok();
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("failed to read model selection")?;
+    let nr: usize = input
+        .trim()
+        .parse()
+        .with_context(|| format!("'{}' is not a number", input.trim()))?;
+    let count = groups.len();
+    nr.checked_sub(1)
+        .and_then(|index| groups.into_iter().nth(index))
+        .map(|group| group.representative_path)
+        .ok_or_else(|| anyhow!("no model with NR {nr} ({count} model(s) listed)"))
 }
 
 /// Lists every `.gguf` model under `models_dir` (the same table `list`
