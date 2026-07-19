@@ -159,6 +159,12 @@ const MAX_TOKENS: usize = 8192;
 pub struct WebState {
     pub engine: Arc<Engine>,
     pub model_label: String,
+    /// Echoed into `GET /api/system-report`'s debug report (`app.js`'s
+    /// error-bubble Save button) alongside `model_label`/`version` — the
+    /// same detail `serve`'s own startup banner prints, not otherwise
+    /// available to the web UI at all.
+    pub architecture: String,
+    pub backend_label: String,
     pub version: &'static str,
 }
 
@@ -171,6 +177,7 @@ pub fn build_router(state: Arc<WebState>) -> Router {
         .route("/static/katex/katex.min.js", get(katex_js))
         .route("/static/katex/fonts/{name}", get(katex_font))
         .route("/api/asset-version", get(asset_version_handler))
+        .route("/api/system-report", get(system_report))
         .route("/api/sessions", post(create_session).get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/messages", post(send_message))
@@ -209,6 +216,34 @@ async fn asset_version_handler() -> impl IntoResponse {
         StatusCode::OK,
         [("Cache-Control", "no-cache")],
         Json(json!({ "version": asset_version() })),
+    )
+}
+
+/// The model/backend identity plus a fresh hardware snapshot (`orangu-
+/// server system`'s own report, reused verbatim via `orangu::hardware::
+/// format_report` rather than duplicated) — the "what machine, what
+/// model" half of the web UI's error-bubble debug report (`app.js`'s Save
+/// button); the conversation and error-detail halves are assembled
+/// client-side, from data the browser already has. Detected fresh on
+/// every call (not cached at startup) since the parts that actually
+/// change over a long-running process's lifetime — VRAM/RAM currently in
+/// use — are exactly the parts most useful to know at the moment a
+/// request just failed, not at server startup.
+async fn system_report(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let cpu = orangu::hardware::detect_cpu();
+    let gpus = orangu::hardware::detect_gpus(cpu.total_memory_bytes);
+    let mut report = format!(
+        "orangu-server {}\nModel        {}\nArchitecture {}\nBackend      {}\n\n",
+        state.version, state.model_label, state.architecture, state.backend_label,
+    );
+    report.push_str(&orangu::hardware::format_report(&cpu, &gpus));
+    (
+        StatusCode::OK,
+        [
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Cache-Control", "no-store"),
+        ],
+        report,
     )
 }
 

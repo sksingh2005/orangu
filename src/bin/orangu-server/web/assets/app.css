@@ -294,6 +294,13 @@ button:disabled {
   line-height: 1;
 }
 
+/* `.gen-time`'s own `font-size: 0.72em` is relative to `.message.error`'s
+   own enlarged `1.6em`, not a normal message's `1em` — compensate so the
+   Save button ends up the same on-screen size either way. */
+.message.error .gen-time {
+  font-size: 0.45em;
+}
+
 .message p {
   margin: 0 0 0.6em;
 }

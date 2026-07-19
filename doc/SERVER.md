@@ -755,6 +755,20 @@ the API and (if enabled) the web UI listener stop together.
 | `POST /apply-template` | renders the chat template without generating |
 | `POST /v1/shutdown` | not a llama.cpp endpoint — orangu-server's own |
 
+The built-in **Web UI** (above) is served on its own `web` port, separate
+from the API's `port`, and exposes a small `/api/...` surface of its own —
+used only by that page's own JavaScript, not part of the llama.cpp-
+compatible API above, and only reachable at all when `web` is configured:
+
+| Endpoint | |
+| :-- | :-- |
+| `GET /api/asset-version` | the served page's own asset fingerprint — powers the Reload prompt shown when a newer build is running behind an already-open tab |
+| `GET /api/system-report` | plain-text hardware report (`system`'s own output) plus model/backend identity — what an error bubble's **Save** button bundles into its downloadable debug report, alongside the visible conversation |
+| `POST /api/sessions` | creates a new, empty chat session, returning its id |
+| `GET /api/sessions` | lists every non-empty session, newest-updated first |
+| `GET /api/sessions/{id}` | one session's full message history, each assistant reply already rendered to HTML |
+| `POST /api/sessions/{id}/messages` | sends one chat turn against that session; streaming (SSE) reply, the same shape `/v1/chat/completions`' own stream uses |
+
 ## Scope
 
 Text-in/text-out GGUF chat, completion, and embedding models, for four

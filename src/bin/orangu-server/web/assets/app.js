@@ -111,6 +111,108 @@
     URL.revokeObjectURL(url);
   }
 
+  // Same download mechanism as `downloadMarkdown`, plain text instead of
+  // markdown — used for the error-bubble debug report below.
+  function downloadTextFile(content, filenamePrefix) {
+    const blob = new Blob([content], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[:T]/g, "-")
+      .slice(0, 19);
+    a.href = url;
+    a.download = `${filenamePrefix}-${stamp}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // The whole visible transcript, read back out of the DOM rather than
+  // kept in a parallel JS structure — `state` deliberately holds nothing
+  // but `sessionId`/`busy`/`abortController` (see its own declaration), and
+  // the DOM is the one place a turn that *failed* (never persisted to the
+  // session file — `sessions::append_turn` only runs on success, see
+  // `web/mod.rs`) still exists at all, alongside every earlier, actually-
+  // persisted turn. Good enough for a debug report: plain rendered text,
+  // not the raw markdown/HTML.
+  function collectConversationText() {
+    const parts = [];
+    for (const child of transcript.children) {
+      const role = child.classList.contains("user")
+        ? "user"
+        : child.classList.contains("assistant")
+          ? "assistant"
+          : child.classList.contains("error")
+            ? "error"
+            : "unknown";
+      const text = (child.innerText ?? child.textContent ?? "").trim();
+      parts.push(`[${role}]\n${text}`);
+    }
+    return parts.length > 0 ? parts.join("\n\n") : "(empty)";
+  }
+
+  // Everything a bug report needs beyond "it broke": the server's own
+  // `orangu-server system` report plus model/backend identity (`/api/
+  // system-report`, fetched fresh so it reflects VRAM/RAM *right now*, not
+  // whatever it was at server startup), the full visible conversation, and
+  // the error's own detail — for a panic, `detail` is already the real
+  // message plus a captured backtrace (`panic_capture`, `engine::
+  // generate::Engine::generate`), not just the generic "task panicked"
+  // note `tokio::task::JoinError`'s own `Display` would otherwise give.
+  async function buildDebugReport(detail) {
+    let systemReport = "(failed to fetch: /api/system-report unreachable)";
+    try {
+      const res = await fetch("/api/system-report", { cache: "no-store" });
+      systemReport = res.ok
+        ? await res.text()
+        : `(failed to fetch: HTTP ${res.status})`;
+    } catch (err) {
+      systemReport = `(failed to fetch: ${err})`;
+    }
+    const detailText =
+      detail instanceof Error ? detail.stack || detail.message : String(detail ?? "");
+
+    return [
+      "orangu-server web UI debug report",
+      `Generated: ${new Date().toISOString()}`,
+      "",
+      "== System ==",
+      systemReport.trimEnd(),
+      "",
+      "== Conversation ==",
+      collectConversationText(),
+      "",
+      "== Error detail ==",
+      detailText,
+    ].join("\n");
+  }
+
+  // Mirrors `addTimingFooter`'s own shape (a `.gen-time` bar with a save
+  // button) but for an error bubble: no generation time to show, and the
+  // save button assembles/downloads the debug report above instead of a
+  // single answer's raw markdown.
+  function addErrorFooter(assistantEl, detail) {
+    const footer = document.createElement("div");
+    footer.className = "gen-time";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "save-md-btn";
+    saveBtn.innerHTML = SAVE_ICON;
+    saveBtn.setAttribute("aria-label", "Save debug report");
+    saveBtn.setAttribute("title", "Save debug report");
+    saveBtn.addEventListener("click", () => {
+      buildDebugReport(detail)
+        .then((report) => downloadTextFile(report, "orangu-debug-report"))
+        .catch((err) => console.error("failed to build debug report:", err));
+    });
+    footer.appendChild(saveBtn);
+
+    assistantEl.appendChild(footer);
+  }
+
   // Appended once generation finishes (streamed replies only know their
   // own time and raw text at the "done" event; history reloads know both
   // right away from the loaded session) — deliberately its own element
@@ -274,12 +376,15 @@
   // browser console (console.error) instead, for whoever's actually
   // debugging it; a chat bubble full of a stack trace or a template-
   // rendering error isn't useful to someone just trying to send a message.
-  const FAILURE_MESSAGE = "🦧⚙️";
+  // The footer's Save button (below) is where that detail actually goes
+  // for someone who *does* want it, bundled into a full debug report.
+  const FAILURE_MESSAGE = "🦧";
 
   function showFailure(assistantEl, consoleLabel, detail) {
     console.error(consoleLabel, detail);
     assistantEl.className = "message error";
     assistantEl.textContent = FAILURE_MESSAGE;
+    addErrorFooter(assistantEl, detail);
   }
 
   async function sendMessage(text) {

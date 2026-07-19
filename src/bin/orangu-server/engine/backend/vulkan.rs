@@ -926,6 +926,21 @@ struct CachedOpResources {
 /// cooperative path.
 const COOP_MIN_N_TOKENS: usize = 64;
 
+/// The most tokens `Backend::matmul_batch` will ever put in one GPU
+/// submission — a prefill call with more tokens than this gets split into
+/// consecutive stripes, each its own encoder/submit/poll cycle. A single
+/// very large multi-token matmul dispatch's own GPU execution time grows
+/// with `n_tokens`, and on some GPU/driver combinations under sustained
+/// load a long-running submission can be killed outright by the driver's
+/// own hang-detection/recovery mechanism well before it would ever finish
+/// correctly — a real crash, not just a slowdown, and independent of
+/// `tiled_prefill`'s own *per-workgroup* bound, since a driver's hang
+/// timeout is a property of one *submission's* total wall time, not of
+/// any one workgroup within it. Not swept against alternative values yet
+/// — chosen with a wide safety margin below where dispatches at this
+/// shape risk that timeout, not tuned for throughput.
+const MAX_MATMUL_TOKENS_PER_SUBMISSION: usize = 128;
+
 /// How many output rows every reduce/block-unroll kernel
 /// (`vulkan_shaders::shader_source_reduce`/`shader_source_reduce_wide_load`/
 /// `shader_source_reduce_wide_unroll`/`..._q4k_wide_unroll_packed_f16`, plus
@@ -1706,6 +1721,64 @@ impl Backend for VulkanBackend {
             .expect("matmul_batch returns exactly one result per input op")
     }
 
+    /// Splits a call whose ops share a token count above
+    /// `MAX_MATMUL_TOKENS_PER_SUBMISSION` into consecutive token-range
+    /// stripes, each its own [`Self::matmul_batch_dispatch`] call (own
+    /// encoder, own submit, own blocking readback), concatenating every
+    /// stripe's results back into the same `[n_tokens, out_dim]` shape a
+    /// caller would get from one unsplit call — see that constant's own
+    /// doc comment for why. Every real call site batches ops that all
+    /// share one `n_tokens` (independent projections of the *same*
+    /// prefill/decode step's input), so that's what this assumes; a call
+    /// mixing different `n_tokens` values would need its own per-op
+    /// stripe accounting this doesn't do, so it's asserted against rather
+    /// than silently mishandled. Below the threshold, this is a single
+    /// `matmul_batch_dispatch` call, identical to what this method used to
+    /// do outright.
+    fn matmul_batch(&self, ops: &[MatmulOp<'_>]) -> Vec<Vec<f32>> {
+        if ops.is_empty() {
+            return Vec::new();
+        }
+        let n_tokens = ops[0].n_tokens;
+        assert!(
+            ops.iter().all(|op| op.n_tokens == n_tokens),
+            "matmul_batch's token-range chunking assumes every op in one \
+             call shares the same n_tokens"
+        );
+        if n_tokens <= MAX_MATMUL_TOKENS_PER_SUBMISSION {
+            return self.matmul_batch_dispatch(ops);
+        }
+
+        let mut results: Vec<Vec<f32>> = vec![Vec::new(); ops.len()];
+        let mut start = 0;
+        while start < n_tokens {
+            let end = (start + MAX_MATMUL_TOKENS_PER_SUBMISSION).min(n_tokens);
+            let stripe_len = end - start;
+            let stripe_ops: Vec<MatmulOp<'_>> = ops
+                .iter()
+                .map(|op| MatmulOp {
+                    x: &op.x[start * op.w.in_dim..end * op.w.in_dim],
+                    n_tokens: stripe_len,
+                    w: op.w,
+                })
+                .collect();
+            for (acc, stripe_result) in results
+                .iter_mut()
+                .zip(self.matmul_batch_dispatch(&stripe_ops))
+            {
+                acc.extend(stripe_result);
+            }
+            start = end;
+        }
+        results
+    }
+
+    fn as_vulkan(&self) -> Option<&VulkanBackend> {
+        Some(self)
+    }
+}
+
+impl VulkanBackend {
     /// Records every op's dispatch into one command encoder and submits
     /// them together, then blocks once (not once per op) for the whole
     /// batch to finish before reading every result back, so `ops.len()` GPU
@@ -1715,7 +1788,12 @@ impl Backend for VulkanBackend {
     /// tensor's first `matmul`/`matmul_batch` call at a given `n_tokens`,
     /// every later call at that same shape skips buffer/bind-group
     /// creation and only uploads the new activations.
-    fn matmul_batch(&self, ops: &[MatmulOp<'_>]) -> Vec<Vec<f32>> {
+    ///
+    /// Not called directly by anything outside `Backend::matmul_batch`
+    /// (which may call this once per token-range stripe rather than once
+    /// for the whole op) — every op here must already be at most
+    /// `MAX_MATMUL_TOKENS_PER_SUBMISSION` tokens.
+    fn matmul_batch_dispatch(&self, ops: &[MatmulOp<'_>]) -> Vec<Vec<f32>> {
         if ops.is_empty() {
             return Vec::new();
         }
@@ -1815,12 +1893,6 @@ impl Backend for VulkanBackend {
             .collect()
     }
 
-    fn as_vulkan(&self) -> Option<&VulkanBackend> {
-        Some(self)
-    }
-}
-
-impl VulkanBackend {
     /// Whether `n_tokens` both takes the cooperative-path (prefill) shape
     /// *and* `ORANGU_NO_TILED_PREFILL=1` was not set — the single decision point
     /// `pipeline_for` (which pipeline map to read from) and
@@ -6695,6 +6767,83 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
                 assert!(
                     (a - b).abs() <= tol,
                     "{name}: mismatch at index {i}: cpu={a} gpu(batched)={b}"
+                );
+            }
+        }
+    }
+
+    /// `n_tokens = 300` deliberately spans three of `Backend::matmul_batch`'s
+    /// own token-range stripes (`MAX_MATMUL_TOKENS_PER_SUBMISSION = 128`:
+    /// 0..128, 128..256, 256..300 — the last only partially full), so this
+    /// exercises the chunking wrapper itself, not just the shapes it calls
+    /// into: results from several separate stripe submissions must
+    /// concatenate back into the exact same `[n_tokens, out_dim]` a single
+    /// unsplit call would have produced, for a batch of independent ops
+    /// (mirroring a real prefill layer's own Q/K/V projections) sharing one
+    /// `x` and one `n_tokens` — the shape this feature exists for.
+    #[test]
+    fn matmul_batch_matches_cpu_backend_across_multiple_token_stripes() {
+        let Some(vulkan) = shared_vulkan() else {
+            eprintln!("skipping: no Vulkan adapter available in this environment");
+            return;
+        };
+
+        let in_dim = 256;
+        let mut seed = 0x57121E5_u64;
+        let build = |ggml_type: u32, out_dim: usize, seed: &mut u64| {
+            let elems = block_elems(ggml_type);
+            let n_blocks_per_row = in_dim / elems;
+            let mut bytes = Vec::new();
+            for _ in 0..out_dim {
+                for _ in 0..n_blocks_per_row {
+                    bytes.extend(build_block(ggml_type, seed));
+                }
+            }
+            test_quant_matrix(&bytes, ggml_type, in_dim, out_dim)
+        };
+        let wq = build(GGML_TYPE_Q4_K, 11, &mut seed);
+        let wk = build(GGML_TYPE_F16, 7, &mut seed);
+
+        let n_tokens = 300;
+        let mut x = vec![0f32; n_tokens * in_dim];
+        for v in x.iter_mut() {
+            *v = (next_byte(&mut seed) as f32 - 128.0) / 64.0;
+        }
+
+        let expected_q = CpuBackend.matmul(&x, n_tokens, &wq);
+        let expected_k = CpuBackend.matmul(&x, n_tokens, &wk);
+
+        let mut batch = vulkan.matmul_batch(&[
+            MatmulOp {
+                x: &x,
+                n_tokens,
+                w: &wq,
+            },
+            MatmulOp {
+                x: &x,
+                n_tokens,
+                w: &wk,
+            },
+        ]);
+        assert_eq!(batch.len(), 2);
+        let got_k = batch.pop().unwrap();
+        let got_q = batch.pop().unwrap();
+
+        for (name, expected, got) in [("q", &expected_q, &got_q), ("k", &expected_k, &got_k)] {
+            assert_eq!(
+                expected.len(),
+                got.len(),
+                "{name}: length mismatch — stripes didn't concatenate to the full n_tokens"
+            );
+            let tol_factor = if name == "q" { 6e-2 } else { 1e-2 };
+            let out_dim = expected.len() / n_tokens;
+            for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+                let tol = tol_factor * a.abs().max(1.0);
+                assert!(
+                    (a - b).abs() <= tol,
+                    "{name}: mismatch at index {i} (token {}, dim {}): cpu={a} gpu={b}",
+                    i / out_dim,
+                    i % out_dim
                 );
             }
         }

@@ -48,6 +48,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::{BatchDecodeItem, ForwardOutcome, GreedySampleParams, ModelForward};
 use crate::engine::backend::vulkan::{
@@ -636,6 +637,19 @@ impl GemmaModel {
             None
         };
 
+        // CPU-side wall-clock around each GPU submission this
+        // (CPU-orchestrated) prefill path makes — unlike the fused decode
+        // path, there's no single encoder/timestamp-query-set to instrument
+        // here, but every `Backend::matmul`/`matmul_batch` call already
+        // blocks (`device.poll(wait_indefinitely)`) until its own GPU work
+        // finishes, so timing around the call is an accurate proxy for
+        // that submission's own GPU time. Opt in with
+        // `ORANGU_PREFILL_TRACE=1`; off by default (`eprintln!` per
+        // submission is real overhead at high layer/token counts).
+        static PREFILL_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let prefill_trace =
+            *PREFILL_TRACE.get_or_init(|| std::env::var_os("ORANGU_PREFILL_TRACE").is_some());
+
         for (il, layer) in self.layers.iter().enumerate() {
             let head_dim = layer.head_dim;
             let freq_factors = (!layer.is_swa)
@@ -675,7 +689,15 @@ impl GemmaModel {
                     w: layer.wv.as_ref().unwrap(),
                 });
             }
+            let t0 = Instant::now();
             let mut results = self.backend.matmul_batch(&ops).into_iter();
+            if prefill_trace {
+                eprintln!(
+                    "orangu-server: [prefill-trace] layer {il} qkv_matmul_batch \
+                     n_tokens={n_tokens}: {:.1}ms",
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
+            }
             let mut q = results.next().unwrap();
             tensor::rmsnorm_inplace(
                 &mut q,
@@ -740,6 +762,7 @@ impl GemmaModel {
             // model's attention window can freely include positions *after*
             // `pos`, not just up to it — see `Self::attention_window`.
             let mut attn_out = vec![0f32; n_tokens * self.n_head * head_dim];
+            let t0 = Instant::now();
             for t in 0..n_tokens {
                 let pos = start_pos + t;
                 let (window_start, window_end) = self.attention_window(layer.is_swa, pos, n_tokens);
@@ -766,14 +789,30 @@ impl GemmaModel {
                     }
                 }
             }
+            if prefill_trace {
+                eprintln!(
+                    "orangu-server: [prefill-trace] layer {il} cpu_attention \
+                     n_tokens={n_tokens}: {:.1}ms",
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
+            }
 
+            let t0 = Instant::now();
             let mut attn_proj = self.backend.matmul(&attn_out, n_tokens, &layer.wo);
+            if prefill_trace {
+                eprintln!(
+                    "orangu-server: [prefill-trace] layer {il} wo_matmul \
+                     n_tokens={n_tokens}: {:.1}ms",
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
+            }
             tensor::rmsnorm_inplace(&mut attn_proj, &layer.attn_post_norm, n_tokens, n_embd, eps);
             tensor::add_inplace(&mut x, &attn_proj);
             let attn_out_residual = x.clone();
 
             let mut ffn_normed = x.clone();
             tensor::rmsnorm_inplace(&mut ffn_normed, &layer.ffn_norm, n_tokens, n_embd, eps);
+            let t0 = Instant::now();
             let mut gate_up = self.backend.matmul_batch(&[
                 MatmulOp {
                     x: &ffn_normed,
@@ -786,13 +825,28 @@ impl GemmaModel {
                     w: &layer.ffn_up,
                 },
             ]);
+            if prefill_trace {
+                eprintln!(
+                    "orangu-server: [prefill-trace] layer {il} gate_up_matmul_batch \
+                     n_tokens={n_tokens}: {:.1}ms",
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
+            }
             let up = gate_up.pop().unwrap();
             let mut gate = gate_up.pop().unwrap();
             for g in gate.iter_mut() {
                 *g = tensor::gelu(*g);
             }
             tensor::mul_inplace(&mut gate, &up);
+            let t0 = Instant::now();
             let mut ffn_out = self.backend.matmul(&gate, n_tokens, &layer.ffn_down);
+            if prefill_trace {
+                eprintln!(
+                    "orangu-server: [prefill-trace] layer {il} ffn_down_matmul \
+                     n_tokens={n_tokens}: {:.1}ms",
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
+            }
             tensor::rmsnorm_inplace(&mut ffn_out, &layer.ffn_post_norm, n_tokens, n_embd, eps);
             x = attn_out_residual;
             tensor::add_inplace(&mut x, &ffn_out);
@@ -804,7 +858,15 @@ impl GemmaModel {
                 &layer.per_layer_post_norm,
             ) {
                 let pe_in = x.clone();
+                let t0 = Instant::now();
                 let mut g = self.backend.matmul(&x, n_tokens, gate_w);
+                if prefill_trace {
+                    eprintln!(
+                        "orangu-server: [prefill-trace] layer {il} ple_gate_matmul \
+                         n_tokens={n_tokens}: {:.1}ms",
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
                 for v in g.iter_mut() {
                     *v = tensor::gelu(*v);
                 }
@@ -813,7 +875,15 @@ impl GemmaModel {
                         ..(t * self.layers.len() + il + 1) * per_layer];
                     tensor::mul_inplace(&mut g[t * per_layer..(t + 1) * per_layer], slice);
                 }
+                let t0 = Instant::now();
                 let mut proj = self.backend.matmul(&g, n_tokens, proj_w);
+                if prefill_trace {
+                    eprintln!(
+                        "orangu-server: [prefill-trace] layer {il} ple_proj_matmul \
+                         n_tokens={n_tokens}: {:.1}ms",
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
                 tensor::rmsnorm_inplace(&mut proj, post_norm, n_tokens, n_embd, eps);
                 x = pe_in;
                 tensor::add_inplace(&mut x, &proj);

@@ -151,21 +151,42 @@ impl Engine {
             let guard = slots.acquire().await;
             let task_tx = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
-                run(
-                    model.as_ref(),
-                    tokenizer.as_ref(),
-                    batch_coordinator.as_deref(),
-                    prefix_cache.as_deref(),
-                    &guard,
-                    req,
-                    task_tx,
-                )
+                // `catch_unwind` here (not left to `spawn_blocking`'s own
+                // panic-to-`JoinError` conversion below) so a panic's real
+                // detail can be recovered at all: this closure runs to
+                // completion on the *same* blocking-pool thread the panic
+                // hook (`crate::panic_capture`) just stashed its message/
+                // backtrace on, so `take_last_panic_detail` can only read
+                // it back correctly from right here — by the time this
+                // propagated out as a `JoinError` on a different
+                // (async-runtime) thread, there would be no way to
+                // associate that stash with this specific panic at all.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run(
+                        model.as_ref(),
+                        tokenizer.as_ref(),
+                        batch_coordinator.as_deref(),
+                        prefix_cache.as_deref(),
+                        &guard,
+                        req,
+                        task_tx.clone(),
+                    )
+                }));
+                if let Err(_panic) = result {
+                    let detail =
+                        crate::panic_capture::take_last_panic_detail().unwrap_or_else(|| {
+                            "generation task panicked (no detail captured)".to_string()
+                        });
+                    let _ = task_tx.send(StreamEvent::Error(detail));
+                }
             })
             .await;
             if let Err(join_err) = result {
-                // The blocking task panicked (e.g. an internal invariant
-                // violation) — surface it instead of leaving the client
-                // hanging with no terminal event.
+                // `spawn_blocking` itself failed *without* the closure
+                // above panicking (e.g. the task was cancelled) — the
+                // panic case is already handled and reported from inside
+                // the closure, so this is only ever the non-panic
+                // fallback now.
                 let _ = tx.send(StreamEvent::Error(format!(
                     "generation task failed: {join_err}"
                 )));
@@ -237,7 +258,13 @@ fn run(
     ) {
         Ok(l) => l,
         Err(err) => {
-            let _ = tx.send(StreamEvent::Error(err.to_string()));
+            // `{err:?}` (anyhow's chain-plus-backtrace Debug format, not
+            // `{err}`'s bare top-level message) — `main`'s own unconditional
+            // `RUST_BACKTRACE=1` means this always includes a captured
+            // backtrace, not just whatever `.context()` calls happened to
+            // add, matching the detail a panic's own captured backtrace
+            // (`panic_capture`) gives for a debug report worth saving.
+            let _ = tx.send(StreamEvent::Error(format!("{err:?}")));
             return Ok(());
         }
     };
@@ -347,7 +374,7 @@ fn run(
                 Ok(ForwardOutcome::Token(t)) => t,
                 Ok(ForwardOutcome::Logits(l)) => sampler.sample(&l, &history),
                 Err(err) => {
-                    let _ = tx.send(StreamEvent::Error(err.to_string()));
+                    let _ = tx.send(StreamEvent::Error(format!("{err:?}")));
                     return Ok(());
                 }
             }
@@ -624,6 +651,117 @@ mod tests {
             turn2_forwarded_reuse,
             1 + turn2_suffix.len() + 2,
             "reuse must skip turn 1's first 7 cached positions, forwarding only its own uncached 8th token, the new suffix, and this turn's own 2 real decode steps"
+        );
+    }
+
+    /// A `ModelForward` whose `forward` always panics — the deliberately
+    /// broken model this module's own panic-recovery path
+    /// (`Engine::generate`'s `catch_unwind` around `run`, `crate::
+    /// panic_capture`) needs a real panic to exercise end to end, not
+    /// just unit-test in isolation.
+    struct PanickingModel {
+        config: ModelConfig,
+    }
+
+    impl PanickingModel {
+        fn new() -> Self {
+            Self {
+                config: ModelConfig {
+                    architecture: "test".to_string(),
+                    n_vocab: 8,
+                    n_embd: 1,
+                    n_layer: 1,
+                    n_head: 1,
+                    n_head_kv: 1,
+                    n_ctx_train: 1000,
+                    rope_dim: 1,
+                    rope_freq_base: 10000.0,
+                    rms_eps: 1e-6,
+                    pooling_type: PoolingType::Mean,
+                },
+            }
+        }
+    }
+
+    impl ModelForward for PanickingModel {
+        fn config(&self) -> &ModelConfig {
+            &self.config
+        }
+
+        fn new_kv_cache(&self, capacity: usize) -> KvCache {
+            KvCache::new(1, capacity, 1)
+        }
+
+        fn forward(
+            &self,
+            _cache: &mut KvCache,
+            _tokens: &[u32],
+            _start_pos: usize,
+        ) -> Result<Vec<f32>> {
+            panic!("PANICKING_MODEL_DELIBERATE_TEST_PANIC");
+        }
+
+        fn forward_hidden_states(&self, _tokens: &[u32]) -> Result<Vec<f32>> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
+    /// A panic during generation must reach the client as a real,
+    /// detailed `StreamEvent::Error` — the panic's own message plus a
+    /// captured backtrace (`panic_capture`) — not the generic "task
+    /// panicked" note `tokio::task::JoinError`'s own `Display` would give
+    /// on its own, and the generation channel must still terminate
+    /// cleanly (one `Error` event, not a hang or a second event).
+    #[tokio::test]
+    async fn a_panic_during_generation_reaches_the_client_with_a_captured_backtrace() {
+        // Prints the panic to stderr too (`panic_capture::install`'s hook
+        // chains to, not replaces, the default one) — expected noise for a
+        // test that deliberately panics, left alone rather than swapped
+        // out for a silencing hook: `std::panic::set_hook` is a process-
+        // global slot, and a hook that panics itself (or races another
+        // concurrently-running test's own hook swap) aborts the whole
+        // process outright, which a first attempt at silencing this
+        // actually hit.
+        crate::panic_capture::install();
+
+        let engine = Engine {
+            model: Arc::new(PanickingModel::new()),
+            tokenizer: Arc::new(letter_tokenizer(8)),
+            chat_template_source: None,
+            slots: SlotPool::new(1),
+            batch_coordinator: None,
+            prefix_cache: None,
+            role: crate::config::Role::default(),
+        };
+
+        let mut rx = engine
+            .generate(GenerateRequest {
+                prompt_tokens: vec![1, 2, 3],
+                sampling: greedy_params(),
+                max_tokens: 4,
+                stop_token_ids: vec![],
+            })
+            .await;
+
+        let event = rx
+            .recv()
+            .await
+            .expect("generate() must send exactly one event before closing the channel on a panic");
+        let StreamEvent::Error(detail) = event else {
+            panic!("expected a StreamEvent::Error, got something else");
+        };
+        assert!(
+            detail.contains("PANICKING_MODEL_DELIBERATE_TEST_PANIC"),
+            "error detail must include the panic's own message, got: {detail}"
+        );
+        assert!(
+            detail.contains("backtrace:"),
+            "error detail must include a captured backtrace, got: {detail}"
+        );
+
+        assert!(
+            rx.recv().await.is_none(),
+            "the channel must close after the one error event, not send anything further"
         );
     }
 }

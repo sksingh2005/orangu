@@ -25,6 +25,7 @@ mod config;
 mod engine;
 mod http;
 mod init;
+mod panic_capture;
 mod prune;
 mod shell;
 mod suggest;
@@ -242,6 +243,20 @@ fn print_shell_completions() -> Result<()> {
 }
 
 fn main() -> ExitCode {
+    panic_capture::install();
+    // Backtraces normally need `RUST_BACKTRACE=1` from whoever launched
+    // the process — set unconditionally instead, so both a captured panic
+    // (`panic_capture`) and every `anyhow::Error` created from here on
+    // (`?`/`anyhow!`/`bail!`, which capture a backtrace themselves when
+    // this is set) carry one regardless of how the server was started.
+    // Safe here specifically: this is the very first statement in `main`,
+    // on the only thread that exists yet, before any other code — this
+    // process's own or a dependency's — could read the environment
+    // concurrently.
+    unsafe {
+        std::env::set_var("RUST_BACKTRACE", "1");
+    }
+
     let mut args = Args::parse();
 
     if args.shell_completions {
@@ -537,6 +552,8 @@ async fn serve(prepared: Prepared) -> Result<()> {
         let web_state = Arc::new(web::WebState {
             engine,
             model_label,
+            architecture,
+            backend_label,
             version: VERSION,
         });
         let web_app = web::build_router(web_state);
