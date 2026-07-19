@@ -13,15 +13,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! Owns the single llama.cpp child process orangu-coordinator manages: which
-//! configured entry (if any) is currently running, and the start/stop/health
-//! machinery to swap it for a different one on demand.
+//! Owns the single `orangu-server` child process orangu-coordinator manages:
+//! which configured entry (if any) is currently running, and the
+//! start/stop/health machinery to swap it for a different one on demand.
 
-use crate::config::{CoordinatorConfiguration, CoordinatorLlmEntry};
+use crate::config::{CoordinatorConfiguration, CoordinatorLlmEntry, role_server_flag};
 use anyhow::{Context, Result, anyhow};
 use std::{
-    collections::HashMap,
     collections::VecDeque,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
     sync::Mutex as StdMutex,
@@ -35,13 +35,14 @@ use tokio::{
     time::Instant,
 };
 
-/// A running llama.cpp process for one configured entry.
+/// A running `orangu-server` process for one configured entry.
 struct ActiveProcess {
     entry_name: String,
     child: tokio::process::Child,
-    /// The `llamacpp` command that was used to start this process, so
-    /// hot-reload can detect when a profile's command changed.
-    llamacpp_at_start: String,
+    /// The whole entry that was used to start this process, so hot-reload
+    /// can detect when a profile's settings changed (any field, not just
+    /// its model — a `port`/`backend`/`slots` change matters just as much).
+    entry_at_start: CoordinatorLlmEntry,
     /// Kept for the process's whole lifetime (not just while starting) so a
     /// crash discovered later — e.g. while it was actively serving a
     /// request — can still be reported with its own diagnostic output
@@ -51,8 +52,8 @@ struct ActiveProcess {
 
 /// Number of most-recent stdout/stderr lines kept per starting/active
 /// process, so a crash or a stuck health check can be reported with
-/// llama.cpp's own diagnostic output attached instead of just a bare exit
-/// signal or "timed out".
+/// `orangu-server`'s own diagnostic output attached instead of just a bare
+/// exit signal or "timed out".
 const OUTPUT_TAIL_LINES: usize = 20;
 
 /// Rolling tail of a process's combined stdout/stderr output.
@@ -63,14 +64,14 @@ pub struct Coordinator {
     config: std::sync::RwLock<CoordinatorConfiguration>,
     http_client: reqwest::Client,
     active: Mutex<Option<ActiveProcess>>,
-    /// PID of whatever llama.cpp process is currently starting or active, if
-    /// any. Set the instant a process is spawned — before its (possibly
-    /// slow) health check even begins — and cleared once it's known to have
-    /// stopped. `active` is held locked for an entire start sequence to
-    /// serialize concurrent swaps, which can take up to `startup_timeout`;
-    /// `shutdown` must not have to wait on that same lock just to kill a
-    /// still-starting process, so this is tracked separately and only ever
-    /// locked briefly.
+    /// PID of whatever `orangu-server` process is currently starting or
+    /// active, if any. Set the instant a process is spawned — before its
+    /// (possibly slow) health check even begins — and cleared once it's
+    /// known to have stopped. `active` is held locked for an entire start
+    /// sequence to serialize concurrent swaps, which can take up to
+    /// `startup_timeout`; `shutdown` must not have to wait on that same
+    /// lock just to kill a still-starting process, so this is tracked
+    /// separately and only ever locked briefly.
     current_pid: AtomicU32,
     /// Suppresses echoing a starting/active process's stdout/stderr to the
     /// coordinator's own output, mirroring `--quiet`. The lines are still
@@ -78,6 +79,15 @@ pub struct Coordinator {
     quiet: bool,
     /// When the coordinator was last accessed by a request (for idle timeout).
     last_accessed: StdMutex<Instant>,
+    /// Explicit override for which `orangu-server` executable to spawn,
+    /// read once from `ORANGU_COORDINATOR_SERVER_BIN` by `main` at startup
+    /// (never re-read per spawn, and never a bare global env lookup inside
+    /// `start` itself — this is also what lets tests point at a stand-in
+    /// executable deterministically, without racing real parallel test
+    /// threads over a shared process-wide environment variable). `None`
+    /// (the common case) falls back to [`Coordinator::resolve_server_binary`]'s
+    /// sibling-binary/`PATH` search.
+    server_binary_override: Option<PathBuf>,
 }
 
 /// Per-attempt timeout for the `/v1/models` health-check probe only — kept
@@ -89,15 +99,19 @@ pub struct Coordinator {
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Coordinator {
-    pub fn new(config: CoordinatorConfiguration, quiet: bool) -> Result<Self> {
+    pub fn new(
+        config: CoordinatorConfiguration,
+        quiet: bool,
+        server_binary_override: Option<PathBuf>,
+    ) -> Result<Self> {
         // No default timeout: this client also proxies real requests to
         // whichever backend is active, and those must be allowed to run for
         // as long as generation actually takes. A fixed default here would
         // silently cut off any response slower than it, tearing down the
-        // connection to llama.cpp mid-stream — which surfaces to the client
-        // as a bare "unexpected EOF", not a clear timeout error. The health
-        // check applies its own short, explicit per-request timeout instead
-        // (see `HEALTH_CHECK_TIMEOUT`).
+        // connection to `orangu-server` mid-stream — which surfaces to the
+        // client as a bare "unexpected EOF", not a clear timeout error. The
+        // health check applies its own short, explicit per-request timeout
+        // instead (see `HEALTH_CHECK_TIMEOUT`).
         let http_client = reqwest::Client::builder()
             .build()
             .context("failed to build HTTP client")?;
@@ -108,11 +122,12 @@ impl Coordinator {
             current_pid: AtomicU32::new(0),
             quiet,
             last_accessed: StdMutex::new(Instant::now()),
+            server_binary_override,
         })
     }
 
     /// The shared HTTP client used both for readiness probes and, by the
-    /// proxy handler, for forwarding requests to the active llama.cpp.
+    /// proxy handler, for forwarding requests to the active `orangu-server`.
     pub fn http_client(&self) -> &reqwest::Client {
         &self.http_client
     }
@@ -156,24 +171,24 @@ impl Coordinator {
     }
 
     /// After a config reload, stop the active process if its profile was
-    /// removed or its `llamacpp` command changed — otherwise it would keep
+    /// removed or any of its settings changed — otherwise it would keep
     /// running with stale settings indefinitely.
     pub async fn stop_if_stale(&self) {
         // Snapshot the active identity without holding the async mutex while
         // reading the (blocking) config lock.
-        let (entry_name, llamacpp_at_start) = {
+        let (entry_name, entry_at_start) = {
             let guard = self.active.lock().await;
             let Some(active) = guard.as_ref() else {
                 return;
             };
-            (active.entry_name.clone(), active.llamacpp_at_start.clone())
+            (active.entry_name.clone(), active.entry_at_start.clone())
         };
 
         let should_stop = {
             let config = self.config.read().unwrap();
             match config.llms.get(&entry_name) {
                 None => true, // profile was removed
-                Some(entry) => entry.llamacpp != llamacpp_at_start,
+                Some(entry) => *entry != entry_at_start,
             }
         };
 
@@ -186,7 +201,7 @@ impl Coordinator {
         let mut guard = self.active.lock().await;
         if let Some(active) = guard.as_ref()
             && active.entry_name == entry_name
-            && active.llamacpp_at_start == llamacpp_at_start
+            && active.entry_at_start == entry_at_start
         {
             let active = guard.take().expect("checked above");
             if !self.quiet {
@@ -217,12 +232,12 @@ impl Coordinator {
     ///    active" on purpose: a stale or absent `model` field must not send
     ///    an embeddings request to whatever chat model happens to be loaded.
     /// 4. Whichever entry is currently active, if any — this is what makes
-    ///    the llama.cpp-native endpoints (`/v1/models`, `/health`, `/props`,
-    ///    `/slots`, `/metrics`), which carry no `model` field to route on,
-    ///    report on whatever is actually running instead of silently forcing
-    ///    a swap back to `all` — e.g. `/information` probing a server's
-    ///    `/health` would otherwise itself knock out whatever role a real
-    ///    request had just switched to.
+    ///    the `orangu-server`-native endpoints (`/v1/models`, `/health`,
+    ///    `/props`, `/slots`, `/metrics`), which carry no `model` field to
+    ///    route on, report on whatever is actually running instead of
+    ///    silently forcing a swap back to `all` — e.g. `/information`
+    ///    probing a server's `/health` would otherwise itself knock out
+    ///    whatever role a real request had just switched to.
     /// 5. The `all`-role default entry.
     pub async fn resolve_entry(
         &self,
@@ -247,9 +262,20 @@ impl Coordinator {
         .clone()
     }
 
-    /// Ensures `entry`'s llama.cpp is the active process, starting it (and
-    /// stopping whatever else was active) if it isn't already, then returns
-    /// the origin requests should be proxied to.
+    /// Ensures `entry`'s `orangu-server` is the active process, starting it
+    /// (and stopping whatever else was active) if it isn't already, then
+    /// returns the origin requests should be proxied to.
+    ///
+    /// Swapping to a *different* profile always fully stops (`Self::stop`,
+    /// which awaits the child's actual exit, not just signals it) whatever
+    /// was running **before** starting the new one — never the other way
+    /// around, and never concurrently. This is what makes it safe for
+    /// multiple profiles to share the same `host`/`port` (the default for
+    /// every role, since `CoordinatorLlmEntry::host`/`port` both fall back
+    /// to `127.0.0.1`/`8100` when a profile's own config omits them): by
+    /// the time the new `orangu-server` tries to bind that address, the old
+    /// one's listening socket has already been released, not merely asked
+    /// to release it.
     pub async fn ensure_active(&self, entry: &CoordinatorLlmEntry) -> Result<String> {
         let mut guard = self.active.lock().await;
 
@@ -280,19 +306,19 @@ impl Coordinator {
         let (child, tail) = self.start(entry).await?;
         *guard = Some(ActiveProcess {
             entry_name: entry.name.clone(),
-            llamacpp_at_start: entry.llamacpp.clone(),
+            entry_at_start: entry.clone(),
             child,
             tail,
         });
         Ok(entry.origin())
     }
 
-    /// Stops whatever llama.cpp process is currently starting or active, if
-    /// any. Called on coordinator shutdown so no orphaned process is left
-    /// running — including one still mid-startup (spawned, but not yet
-    /// confirmed healthy), which `current_pid` catches and `active` alone
-    /// would miss, since `active` isn't populated until the health check
-    /// succeeds.
+    /// Stops whatever `orangu-server` process is currently starting or
+    /// active, if any. Called on coordinator shutdown so no orphaned
+    /// process is left running — including one still mid-startup (spawned,
+    /// but not yet confirmed healthy), which `current_pid` catches and
+    /// `active` alone would miss, since `active` isn't populated until the
+    /// health check succeeds.
     pub async fn shutdown(&self) {
         self.current_pid.store(0, Ordering::Relaxed);
         let mut guard = self.active.lock().await;
@@ -353,30 +379,59 @@ impl Coordinator {
         }
     }
 
+    /// Which `orangu-server` executable to spawn: `server_binary_override`
+    /// if one was given (see its own doc comment), otherwise a sibling
+    /// `orangu-server` next to this coordinator's own executable (the
+    /// common case — both binaries come from the same build/install), then
+    /// falling back to a bare `orangu-server` resolved via `PATH`.
+    fn resolve_server_binary(&self) -> PathBuf {
+        if let Some(path) = &self.server_binary_override {
+            return path.clone();
+        }
+        let binary_name = if cfg!(windows) {
+            "orangu-server.exe"
+        } else {
+            "orangu-server"
+        };
+        if let Ok(mut path) = std::env::current_exe() {
+            path.set_file_name(binary_name);
+            if path.is_file() {
+                return path;
+            }
+        }
+        PathBuf::from(binary_name)
+    }
+
     async fn start(
         &self,
         entry: &CoordinatorLlmEntry,
     ) -> Result<(tokio::process::Child, OutputTail)> {
-        let argv = shell_words::split(&entry.llamacpp)
-            .with_context(|| format!("invalid llamacpp command for '{}'", entry.name))?;
-        let (env_vars, argv) = split_leading_env_assignments(argv);
-        let argv: Vec<String> = argv.iter().map(|token| expand_tilde(token)).collect();
-        let (program, args) = argv
-            .split_first()
-            .ok_or_else(|| anyhow!("llamacpp command for '{}' is empty", entry.name))?;
+        let models_dir = self.config.read().unwrap().models.clone();
+        let server_config_path = write_server_config(entry, &models_dir).with_context(|| {
+            format!("failed to write orangu-server config for '{}'", entry.name)
+        })?;
+        let program = self.resolve_server_binary();
+        // Already validated at config-load time (`config::parse_llm_profiles`
+        // rejects any role `role_server_flag` doesn't recognize), so this can
+        // only fail if a config was somehow constructed bypassing that check.
+        let role_flag = role_server_flag(&entry.role)
+            .ok_or_else(|| anyhow!("[{}] has an unknown role '{}'", entry.name, entry.role))?;
 
-        let mut child = Command::new(program)
-            .args(args)
-            .envs(env_vars)
-            .stdin(std::process::Stdio::null())
+        let mut child = Command::new(&program)
+            .arg("--config")
+            .arg(&server_config_path)
+            .arg(role_flag)
+            .arg(&entry.model)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .with_context(|| {
                 format!(
-                    "failed to start llama.cpp for '{}' ({})",
-                    entry.name, entry.llamacpp
+                    "failed to start orangu-server for '{}' ({})",
+                    entry.name,
+                    program.display()
                 )
             })?;
 
@@ -417,19 +472,16 @@ impl Coordinator {
         loop {
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(anyhow!(
-                    "llama.cpp for '{}' exited before becoming ready (status: {status}){}",
+                    "orangu-server for '{}' exited before becoming ready (status: {status}){}",
                     entry.name,
                     format_output_tail(tail).await
                 ));
             }
 
-            let mut request = self
+            let request = self
                 .http_client
                 .get(&probe_url)
                 .timeout(HEALTH_CHECK_TIMEOUT);
-            if let Some(api_key) = &entry.api_key {
-                request = request.bearer_auth(api_key);
-            }
             if let Ok(response) = request.send().await
                 && response.status().is_success()
             {
@@ -438,7 +490,7 @@ impl Coordinator {
 
             if Instant::now() >= deadline {
                 return Err(anyhow!(
-                    "timed out after {}s waiting for llama.cpp ('{}') to become ready at {}{}",
+                    "timed out after {}s waiting for orangu-server ('{}') to become ready at {}{}",
                     startup_timeout,
                     entry.name,
                     probe_url,
@@ -453,7 +505,7 @@ impl Coordinator {
 /// Reads `stream` line by line for as long as the process keeps it open,
 /// keeping the last [`OUTPUT_TAIL_LINES`] in `tail` and, unless `quiet`,
 /// echoing each line to the coordinator's own stdout as it arrives —
-/// preserving today's visible behavior (e.g. `-hf` download progress) for
+/// preserving today's visible behavior (e.g. model-download progress) for
 /// anyone watching the coordinator's console, while still letting a later
 /// crash or stuck health check report the same output inline.
 fn spawn_output_capture(
@@ -492,67 +544,40 @@ async fn format_output_tail(tail: &OutputTail) -> String {
     format!("\nlast output:\n{lines}")
 }
 
-/// Splits a `llamacpp` argv into leading `KEY=VALUE` environment assignments
-/// — the shell convention for setting one-off variables before a command,
-/// e.g. `LLAMA_CACHE=/models llama-server ...` — and the command that
-/// follows them. `llamacpp` is never run through a real shell (see the
-/// module docs: that's what lets `shutdown` kill the exact process it
-/// spawned), so this convention has to be recognized explicitly instead;
-/// otherwise `LLAMA_CACHE=/models` would be tried as the program itself and
-/// fail with "No such file or directory".
-fn split_leading_env_assignments(mut argv: Vec<String>) -> (Vec<(String, String)>, Vec<String>) {
-    let split_at = argv
-        .iter()
-        .position(|token| !is_env_assignment(token))
-        .unwrap_or(argv.len());
-    let command_argv = argv.split_off(split_at);
-    let env_vars = argv
-        .into_iter()
-        .map(|token| {
-            let (key, value) = token
-                .split_once('=')
-                .expect("is_env_assignment guarantees a '='");
-            (key.to_string(), expand_tilde(value))
-        })
-        .collect();
-    (env_vars, command_argv)
-}
+/// Writes `entry`'s own `orangu-server.conf` (just the `[orangu-server]`
+/// section: `models`, `host`, `port`, and whichever of `backend`/`slots`/
+/// `web` were set) to `~/.orangu/coordinator/servers/<name>.conf`,
+/// overwriting any previous contents — `orangu-server` itself reads this
+/// file once at its own startup, so a stale file from a previous run is
+/// never an issue, and this path doubles as a debugging aid: exactly what a
+/// profile was last started with is always inspectable on disk.
+fn write_server_config(entry: &CoordinatorLlmEntry, models_dir: &Path) -> Result<PathBuf> {
+    let dir = home::home_dir()
+        .context("failed to resolve home directory")?
+        .join(".orangu/coordinator/servers");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create directory {}", dir.display()))?;
+    let path = dir.join(format!("{}.conf", entry.name));
 
-/// Expands a leading `~` or `~/...` to the user's home directory — a
-/// convenience a real shell provides that `llamacpp` would otherwise lose,
-/// since it's run directly and never through one (see
-/// `split_leading_env_assignments`'s doc comment for why). `~otheruser`
-/// forms are left untouched (rare, and not worth a passwd lookup). Falls
-/// back to the token unchanged if the home directory can't be resolved.
-fn expand_tilde(token: &str) -> String {
-    let Some(home) = home::home_dir() else {
-        return token.to_string();
-    };
-    if token == "~" {
-        home.display().to_string()
-    } else if let Some(rest) = token.strip_prefix("~/") {
-        home.join(rest).display().to_string()
-    } else {
-        token.to_string()
+    let mut contents = format!(
+        "[orangu-server]\nmodels = {}\nhost = {}\nport = {}\n",
+        models_dir.display(),
+        entry.host,
+        entry.port
+    );
+    if let Some(backend) = &entry.backend {
+        contents.push_str(&format!("backend = {backend}\n"));
     }
-}
+    if let Some(slots) = entry.slots {
+        contents.push_str(&format!("slots = {slots}\n"));
+    }
+    if let Some(web) = entry.web {
+        contents.push_str(&format!("web = {web}\n"));
+    }
 
-/// Whether `token` looks like a shell-style `KEY=VALUE` environment
-/// assignment: text before the first `=` is a valid identifier (starts with
-/// a letter or underscore, followed only by letters, digits, or
-/// underscores). A flag like `--foo=bar` never matches, since `-` isn't a
-/// valid identifier start, so it's safe to check every leading token this
-/// way without risk of misreading a real argument as an assignment.
-fn is_env_assignment(token: &str) -> bool {
-    let Some((key, _)) = token.split_once('=') else {
-        return false;
-    };
-    let mut chars = key.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    std::fs::write(&path, contents)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
 }
 
 /// Pure entry-selection logic behind [`Coordinator::resolve_entry`]: prefers
@@ -564,7 +589,7 @@ fn is_env_assignment(token: &str) -> bool {
 /// lexicographically smallest name wins, so the choice is stable across runs
 /// rather than depending on hash map iteration order.
 fn select_entry<'a>(
-    llms: &'a HashMap<String, CoordinatorLlmEntry>,
+    llms: &'a std::collections::HashMap<String, CoordinatorLlmEntry>,
     default_entry: &str,
     model_hint: Option<&str>,
     implied_role: Option<&str>,
@@ -610,7 +635,7 @@ fn select_entry<'a>(
 /// so ties (more than one profile sharing a model, or a role) resolve the
 /// same stable way regardless of hash map iteration order.
 fn best_match(
-    llms: &HashMap<String, CoordinatorLlmEntry>,
+    llms: &std::collections::HashMap<String, CoordinatorLlmEntry>,
     predicate: impl Fn(&CoordinatorLlmEntry) -> bool,
 ) -> Option<&CoordinatorLlmEntry> {
     let mut matches: Vec<&CoordinatorLlmEntry> =
@@ -624,7 +649,7 @@ fn best_match(
 /// = explorer` (the role) instead of duplicating the real backend model id;
 /// the coordinator alone owns which actual model that role maps to.
 fn match_hint<'a>(
-    llms: &'a HashMap<String, CoordinatorLlmEntry>,
+    llms: &'a std::collections::HashMap<String, CoordinatorLlmEntry>,
     hint: &str,
 ) -> Option<&'a CoordinatorLlmEntry> {
     best_match(llms, |entry| entry.model == hint)
@@ -632,8 +657,8 @@ fn match_hint<'a>(
 }
 
 /// Sends an immediate, unconditional kill to a bare PID — used by
-/// [`Coordinator::shutdown`] to terminate a still-starting llama.cpp process
-/// that has no live `tokio::process::Child` handle left to call
+/// [`Coordinator::shutdown`] to terminate a still-starting `orangu-server`
+/// process that has no live `tokio::process::Child` handle left to call
 /// `start_kill()` on (see `current_pid`'s doc comment). Best-effort: an
 /// already-gone PID is simply a no-op.
 #[cfg(unix)]
@@ -650,8 +675,40 @@ fn kill_pid(_pid: u32) {}
 mod tests {
     use super::*;
     use crate::config::load_coordinator_configuration;
+    use std::collections::HashMap;
     use std::io::Write;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Writes a `#!/bin/sh` script with `body` as its content to a fresh
+    /// temp file, makes it executable, and leaks it (never auto-deleted) so
+    /// the returned path stays valid for as long as a test needs to exec
+    /// it — standing in for "a real `orangu-server`-shaped executable"
+    /// wherever a test needs `orangu-coordinator` to spawn specific,
+    /// controlled behavior (hang, crash with a specific stderr, echo an
+    /// argument back, etc.) without needing a real `orangu-server` binary
+    /// or model. Pointed at via `Coordinator::new`'s
+    /// `server_binary_override`, never a shared environment variable — see
+    /// that field's own doc comment for why (parallel test threads would
+    /// otherwise race on a process-wide env var).
+    #[cfg(unix)]
+    fn fake_server_script(body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(file, "#!/bin/sh\n{body}").unwrap();
+        let path = file.into_temp_path().keep().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn minimal_config(extra_client: &str, profiles: &str) -> CoordinatorConfiguration {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu-coordinator]\nmodels = /srv/models\n{extra_client}\n{profiles}"
+        )
+        .unwrap();
+        load_coordinator_configuration(file.path()).unwrap()
+    }
 
     #[tokio::test]
     async fn http_client_has_no_default_timeout_for_proxied_requests() {
@@ -680,14 +737,8 @@ mod tests {
             let _ = stream.shutdown().await;
         });
 
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            "[orangu-coordinator]\n\n[main]\nrole = all\nllamacpp = llama-server -hf org/gemma --port 8100\n"
-        )
-        .unwrap();
-        let config = load_coordinator_configuration(file.path()).unwrap();
-        let coordinator = Coordinator::new(config, false).unwrap();
+        let config = minimal_config("", "[main]\nrole = all\nmodel = org/gemma\nport = 8100\n");
+        let coordinator = Coordinator::new(config, false, None).unwrap();
 
         let result = coordinator
             .http_client()
@@ -700,99 +751,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn is_env_assignment_recognizes_key_value_pairs_but_not_flags() {
-        assert!(is_env_assignment("LLAMA_CACHE=/models"));
-        assert!(is_env_assignment("_foo=bar"));
-        assert!(is_env_assignment("FOO_2=bar"));
-        // A flag's `--name=value` form must never be mistaken for an
-        // assignment: `-` isn't a valid identifier start.
-        assert!(!is_env_assignment("--hf-repo=org/gemma"));
-        assert!(!is_env_assignment("-hf=org/gemma"));
-        assert!(!is_env_assignment("llama-server"));
-        assert!(!is_env_assignment("2FOO=bar")); // identifiers can't start with a digit
-        assert!(!is_env_assignment(""));
-    }
-
-    #[test]
-    fn split_leading_env_assignments_separates_them_from_the_command() {
-        let argv = shell_words::split(
-            "LLAMA_CACHE=/models LLAMA_ARG_N_GPU_LAYERS=999 llama-server -hf org/gemma --port 8100",
-        )
-        .unwrap();
-        let (env_vars, command_argv) = split_leading_env_assignments(argv);
-        assert_eq!(
-            env_vars,
-            vec![
-                ("LLAMA_CACHE".to_string(), "/models".to_string()),
-                ("LLAMA_ARG_N_GPU_LAYERS".to_string(), "999".to_string()),
-            ]
-        );
-        assert_eq!(
-            command_argv,
-            vec!["llama-server", "-hf", "org/gemma", "--port", "8100"]
-        );
-    }
-
-    #[test]
-    fn split_leading_env_assignments_is_a_no_op_without_any() {
-        let argv = shell_words::split("llama-server -hf org/gemma --port 8100").unwrap();
-        let (env_vars, command_argv) = split_leading_env_assignments(argv.clone());
-        assert!(env_vars.is_empty());
-        assert_eq!(command_argv, argv);
-    }
-
-    #[test]
-    fn expand_tilde_replaces_a_leading_tilde_with_the_home_directory() {
-        // Regression test: `llamacpp` is never run through a real shell (see
-        // `split_leading_env_assignments`'s doc comment), so `~` in an
-        // argument like `--slot-save-path ~/.orangu/llama-slots` was passed
-        // to llama-server literally, which doesn't do tilde expansion
-        // itself and failed with "not a directory: ~/.orangu/llama-slots".
-        let home = home::home_dir().expect("test environment has a home directory");
-        assert_eq!(expand_tilde("~"), home.display().to_string());
-        assert_eq!(
-            expand_tilde("~/.orangu/llama-slots"),
-            home.join(".orangu/llama-slots").display().to_string()
-        );
-    }
-
-    #[test]
-    fn expand_tilde_leaves_other_tokens_untouched() {
-        assert_eq!(expand_tilde("--port"), "--port");
-        assert_eq!(expand_tilde("/models"), "/models");
-        // `~otheruser` forms are intentionally left alone (rare, and would
-        // need a passwd lookup to resolve correctly).
-        assert_eq!(expand_tilde("~otheruser/models"), "~otheruser/models");
-    }
-
-    #[test]
-    fn split_leading_env_assignments_expands_a_tilde_in_the_value() {
-        let argv = shell_words::split(
-            "LLAMA_CACHE=~/.cache/llama.cpp llama-server -hf org/gemma --port 8100",
-        )
-        .unwrap();
-        let (env_vars, _) = split_leading_env_assignments(argv);
-        let home = home::home_dir().expect("test environment has a home directory");
-        assert_eq!(
-            env_vars,
-            vec![(
-                "LLAMA_CACHE".to_string(),
-                home.join(".cache/llama.cpp").display().to_string()
-            )]
-        );
-    }
-
     #[tokio::test]
     async fn resolve_entry_falls_back_to_default_when_model_hint_is_absent_or_unknown() {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            "[orangu-coordinator]\n\n[main]\nrole = all\nllamacpp = llama-server -hf org/gemma --port 8100\n"
-        )
-        .unwrap();
-        let config = load_coordinator_configuration(file.path()).unwrap();
-        let coordinator = Coordinator::new(config, false).unwrap();
+        let config = minimal_config("", "[main]\nrole = all\nmodel = org/gemma\nport = 8100\n");
+        let coordinator = Coordinator::new(config, false, None).unwrap();
 
         assert_eq!(coordinator.resolve_entry(None, None).await.name, "main");
         assert_eq!(
@@ -812,14 +774,11 @@ mod tests {
     async fn resolve_entry_breaks_ties_between_profiles_sharing_a_model_by_name() {
         // Profiles may share a model (not an error, see config.rs); the match
         // must still be deterministic rather than depend on hash map order.
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            "[orangu-coordinator]\n\n[zeta]\nrole = explorer\nllamacpp = llama-server -hf org/gemma --port 8200\n\n[alpha]\nrole = all\nllamacpp = llama-server -hf org/gemma --port 8100\n"
-        )
-        .unwrap();
-        let config = load_coordinator_configuration(file.path()).unwrap();
-        let coordinator = Coordinator::new(config, false).unwrap();
+        let config = minimal_config(
+            "",
+            "[zeta]\nrole = explorer\nmodel = org/gemma\nport = 8200\n\n[alpha]\nrole = all\nmodel = org/gemma\nport = 8100\n",
+        );
+        let coordinator = Coordinator::new(config, false, None).unwrap();
 
         assert_eq!(
             coordinator
@@ -840,8 +799,9 @@ mod tests {
                 model: "org/gemma".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: 8100,
-                llamacpp: "llama-server -hf org/gemma --port 8100".to_string(),
-                api_key: None,
+                backend: None,
+                slots: None,
+                web: None,
             },
         );
         llms.insert(
@@ -852,8 +812,9 @@ mod tests {
                 model: "org/qwen".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: 8200,
-                llamacpp: "llama-server -hf org/qwen --port 8200".to_string(),
-                api_key: None,
+                backend: None,
+                slots: None,
+                web: None,
             },
         );
         llms
@@ -929,8 +890,9 @@ mod tests {
                 model: "explorer".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: 8300,
-                llamacpp: "llama-server -hf org/explorer --port 8300".to_string(),
-                api_key: None,
+                backend: None,
+                slots: None,
+                web: None,
             },
         );
         let entry = select_entry(&llms, "all", Some("explorer"), None, None);
@@ -952,8 +914,9 @@ mod tests {
                 model: "org/embed".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: 8400,
-                llamacpp: "llama-server -hf org/embed --port 8400".to_string(),
-                api_key: None,
+                backend: None,
+                slots: None,
+                web: None,
             },
         );
         let entry = select_entry(&llms, "all", None, Some("embeddings"), Some("explorer"));
@@ -988,18 +951,64 @@ mod tests {
     async fn coordinator_match_hint_returns_none_for_an_activation_hint_matching_nothing() {
         // Unlike ordinary routing, an explicit activation request has no
         // "currently active"/`all` fallback to paper over an unmatched hint.
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            "[orangu-coordinator]\n\n[main]\nrole = all\nllamacpp = llama-server -hf org/gemma --port 8100\n"
-        )
-        .unwrap();
-        let config = load_coordinator_configuration(file.path()).unwrap();
-        let coordinator = Coordinator::new(config, false).unwrap();
+        let config = minimal_config("", "[main]\nrole = all\nmodel = org/gemma\nport = 8100\n");
+        let coordinator = Coordinator::new(config, false, None).unwrap();
 
         assert_eq!(coordinator.match_hint("org/gemma").unwrap().name, "main");
         assert_eq!(coordinator.match_hint("all").unwrap().name, "main");
         assert!(coordinator.match_hint("nonexistent-role").is_none());
+    }
+
+    #[test]
+    fn resolve_server_binary_uses_the_override_when_given() {
+        let config = minimal_config("", "[main]\nrole = all\nmodel = org/gemma\nport = 8100\n");
+        let coordinator = Coordinator::new(
+            config,
+            false,
+            Some(PathBuf::from("/opt/fake/orangu-server")),
+        )
+        .unwrap();
+        assert_eq!(
+            coordinator.resolve_server_binary(),
+            PathBuf::from("/opt/fake/orangu-server")
+        );
+    }
+
+    #[test]
+    fn write_server_config_includes_optional_overrides_only_when_set() {
+        let entry = CoordinatorLlmEntry {
+            name: "test-profile".to_string(),
+            role: "all".to_string(),
+            model: "org/gemma".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 8100,
+            backend: Some("vulkan".to_string()),
+            slots: Some(4),
+            web: Some(8181),
+        };
+        let path = write_server_config(&entry, Path::new("/srv/models")).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("[orangu-server]"));
+        assert!(contents.contains("models = /srv/models"));
+        assert!(contents.contains("host = 127.0.0.1"));
+        assert!(contents.contains("port = 8100"));
+        assert!(contents.contains("backend = vulkan"));
+        assert!(contents.contains("slots = 4"));
+        assert!(contents.contains("web = 8181"));
+        std::fs::remove_file(&path).ok();
+
+        let minimal_entry = CoordinatorLlmEntry {
+            backend: None,
+            slots: None,
+            web: None,
+            ..entry
+        };
+        let path = write_server_config(&minimal_entry, Path::new("/srv/models")).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(!contents.contains("backend"));
+        assert!(!contents.contains("slots"));
+        assert!(!contents.contains("web ="));
+        std::fs::remove_file(&path).ok();
     }
 
     /// Whether a PID still refers to a live process, via signal 0 (sends no
@@ -1012,7 +1021,7 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn shutdown_kills_a_process_still_waiting_on_its_health_check() {
-        // Regression test: a real llama.cpp process that takes a long time to
+        // Regression test: a real `orangu-server` that takes a long time to
         // load was leaked (orphaned, still running) if the coordinator was
         // shut down while `ensure_active` was still awaiting its health
         // check — `active` isn't populated until that check succeeds, so
@@ -1020,14 +1029,13 @@ mod tests {
         // `sleep 30` here stands in for a slow model load: nothing ever
         // listens on the configured port, so the health check keeps
         // failing (not timing out) until `shutdown` intervenes.
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            "[orangu-coordinator]\nstartup_timeout = 30\n\n[main]\nrole = all\nllamacpp = sh -c \"sleep 30\" -hf org/gemma --port 65535\n"
-        )
-        .unwrap();
-        let config = load_coordinator_configuration(file.path()).unwrap();
-        let coordinator = std::sync::Arc::new(Coordinator::new(config, false).unwrap());
+        let config = minimal_config(
+            "startup_timeout = 30",
+            "[main]\nrole = all\nmodel = org/gemma\nport = 65535\n",
+        );
+        let fake_bin = fake_server_script("sleep 30");
+        let coordinator =
+            std::sync::Arc::new(Coordinator::new(config, false, Some(fake_bin.clone())).unwrap());
 
         let entry = coordinator.resolve_entry(None, None).await.clone();
         let ensure_active_coordinator = coordinator.clone();
@@ -1059,24 +1067,22 @@ mod tests {
             !process_is_alive(pid),
             "process {pid} leaked: still alive after shutdown"
         );
+        std::fs::remove_file(&fake_bin).ok();
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn start_error_includes_captured_output_when_the_process_crashes() {
-        // Regression coverage for a real report: llama.cpp aborting (e.g.
-        // SIGABRT on an assertion failure) used to surface only a bare
-        // "status: signal: 6 (SIGABRT)" with no way to tell why. The
-        // process's own stderr/stdout is now captured and appended, so the
-        // actual diagnostic (here standing in for e.g. a GGML assertion
-        // message) ends up in the same error.
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            "[orangu-coordinator]\nstartup_timeout = 5\n\n[main]\nrole = all\nllamacpp = sh -c \"echo GGML_ASSERT failed >&2; exit 1\" -hf org/gemma --port 65534\n"
-        )
-        .unwrap();
-        let config = load_coordinator_configuration(file.path()).unwrap();
-        let coordinator = Coordinator::new(config, true).unwrap();
+        // Regression coverage for a real report: a backend aborting used to
+        // surface only a bare "status: signal: 6 (SIGABRT)" with no way to
+        // tell why. The process's own stderr/stdout is now captured and
+        // appended, so the actual diagnostic ends up in the same error.
+        let config = minimal_config(
+            "startup_timeout = 5",
+            "[main]\nrole = all\nmodel = org/gemma\nport = 65534\n",
+        );
+        let fake_bin = fake_server_script("echo GGML_ASSERT failed >&2; exit 1");
+        let coordinator = Coordinator::new(config, true, Some(fake_bin.clone())).unwrap();
         let entry = coordinator.resolve_entry(None, None).await.clone();
 
         let err = coordinator.ensure_active(&entry).await.unwrap_err();
@@ -1086,37 +1092,32 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("GGML_ASSERT failed"), "{message}");
+        std::fs::remove_file(&fake_bin).ok();
     }
 
     #[tokio::test]
-    async fn start_expands_a_tilde_in_llamacpp_arguments() {
-        // Regression test for a real report: `--slot-save-path
-        // ~/.orangu/llama-slots` failed with "not a directory:
-        // ~/.orangu/llama-slots" because llama.cpp itself doesn't expand
-        // `~` — only a real shell does, and `llamacpp` is never run through
-        // one. `$1` here echoes back exactly what the spawned process
-        // received, proving the expansion happened on our side before the
-        // process ever saw the argument.
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            "[orangu-coordinator]\nstartup_timeout = 5\n\n[main]\nrole = all\nllamacpp = sh -c 'echo \"marker=$1\" >&2; exit 1' _ ~/orangu-tilde-test-marker -hf org/gemma --port 65533\n"
-        )
-        .unwrap();
-        let config = load_coordinator_configuration(file.path()).unwrap();
-        let coordinator = Coordinator::new(config, true).unwrap();
-        let entry = coordinator.resolve_entry(None, None).await.clone();
+    #[cfg(unix)]
+    async fn start_passes_the_config_path_role_flag_and_model_to_the_spawned_process() {
+        // Confirms the argv shape `start` builds: `--config <generated
+        // path> <role flag> <model>` — the marker script here echoes its
+        // own argv back via stderr so the test can inspect exactly what
+        // orangu-coordinator invoked it with.
+        let config = minimal_config(
+            "startup_timeout = 5",
+            "[main]\nrole = all\nmodel = org/all-model\nport = 65531\n\n[marker]\nrole = explorer\nmodel = org/marker-model\nport = 65532\n",
+        );
+        let fake_bin = fake_server_script("echo \"argv=$*\" >&2; exit 1");
+        let coordinator = Coordinator::new(config, true, Some(fake_bin.clone())).unwrap();
+        let entry = coordinator
+            .resolve_entry(Some("org/marker-model"), None)
+            .await
+            .clone();
 
         let err = coordinator.ensure_active(&entry).await.unwrap_err();
         let message = format!("{err:#}");
-        let home = home::home_dir().expect("test environment has a home directory");
-        assert!(
-            message.contains(&format!(
-                "marker={}/orangu-tilde-test-marker",
-                home.display()
-            )),
-            "{message}"
-        );
-        assert!(!message.contains("marker=~"), "{message}");
+        assert!(message.contains("--config"), "{message}");
+        assert!(message.contains("--explorer"), "{message}");
+        assert!(message.contains("org/marker-model"), "{message}");
+        std::fs::remove_file(&fake_bin).ok();
     }
 }

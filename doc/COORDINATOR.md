@@ -1,20 +1,20 @@
 # orangu-coordinator
 
 `orangu-coordinator` is a small HTTP proxy for people who run local models but
-only have the resources to keep **one** llama.cpp process resident at a time.
-Instead of hand-starting `llama-server` yourself before every `orangu`
+only have the resources to keep **one** `orangu-server` process resident at a
+time. Instead of hand-starting `orangu-server` yourself before every `orangu`
 session, point `orangu.conf` at the coordinator; it starts and stops
-`llama-server` on demand, swapping to whichever model a request actually
+`orangu-server` on demand, swapping to whichever model a request actually
 needs.
 
 ## How it works
 
 `orangu.conf` can already tag each server section with a `role` (`all`,
 `code`, `review`, `explorer`, `embeddings`) so different subsystems use a
-different model. Normally that means running one llama.cpp process per role,
-each on its own port. `orangu-coordinator` collapses those into a single
-proxy address, and once orangu confirms it's talking to one, it stops relying
-on `orangu.conf`'s own `role`/`model` tags for this at all: `/review`,
+different model. Normally that means running one `orangu-server` process per
+role, each on its own port. `orangu-coordinator` collapses those into a
+single proxy address, and once orangu confirms it's talking to one, it stops
+relying on `orangu.conf`'s own `role`/`model` tags for this at all: `/review`,
 `/auto_review`, the explorer subagent, and embeddings detection each just
 send the conventional role name (`review`, `explorer`, `embeddings`) as the
 request's `model` field, and plain chat sends `code` (falling back to `all`
@@ -23,11 +23,10 @@ it](#pointing-oranguconf-at-it) below. Every request's JSON `model` field
 tells the coordinator which model is wanted; it:
 
 1. Looks at the incoming request's `model` field, if it has one, and
-   matches it against a profile — first against the real model id in that
-   profile's `llamacpp` command line (its `-hf`/`--hf-repo` or `-m`/`--model`
-   argument; there's no separate `model` key to keep in sync), then against
-   the profile's `role` name directly (so `orangu.conf` can just set `model
-   = explorer` and never need to know the real backend model id at all).
+   matches it against a profile — first against that profile's own `model`
+   key, then against the profile's `role` name directly (so `orangu.conf`
+   can just set `model = explorer` and never need to know the real backend
+   model id at all).
 2. If a `model` field was given but matched nothing configured, looks at
    what *kind* of request it is: `/v1/embeddings` implies the `embeddings`
    role regardless of what `model` named — a stale or unconfigured `model`
@@ -40,14 +39,17 @@ tells the coordinator which model is wanted; it:
    active* — this is what makes those report on what's actually running
    rather than forcing a swap — and only falls back further to the
    `all`-role profile when nothing is active yet.
-4. If a *different* profile's llama.cpp is currently running, stops it.
-5. Starts the requested profile's llama.cpp (via its `llamacpp` command) if
-   it isn't already running, and waits for `/v1/models` to answer.
+4. If a *different* profile's `orangu-server` is currently running, stops it.
+5. Starts the requested profile's `orangu-server` (with that profile's own
+   role flag — `--all`/`--code`/`--review`/`--explorer`/`--embedding` — and
+   model) if it isn't already running, and waits for `GET /v1/models` to
+   answer.
 6. Forwards the original request unchanged and streams the response back.
 
-Only one `llama-server` process is ever alive under the coordinator. Swapping
-pays the cost of a fresh model load, so this suits a single-GPU/single-model
-machine, not a setup where every role should stay warm simultaneously.
+Only one `orangu-server` process is ever alive under the coordinator.
+Swapping pays the cost of a fresh model load, so this suits a
+single-GPU/single-model machine, not a setup where every role should stay
+warm simultaneously.
 
 On startup, the coordinator eagerly activates the `all`-role profile in the
 background — it doesn't wait for a first request to start loading the
@@ -58,15 +60,16 @@ behind the same startup sequence.
 
 ### Supported endpoints
 
-Every OpenAI-compatible path orangu talks to, and every llama.cpp-native one,
-is supported: `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`,
-`/health`, `/props`, `/slots`, `/metrics`, plus the coordinator's own
-`/v1/coordinator`. All but the last are **pass-through**: the coordinator
-picks a target profile, then forwards the request's method, path+query,
-headers (minus hop-by-hop ones like `Connection`/`Host`/`Content-Length`),
-and body to that profile's llama.cpp origin *exactly as received*, and
-streams the response back byte-for-byte — it never inspects or rewrites the
-actual request/response content, only decides which backend gets it.
+Every OpenAI-compatible path orangu talks to, and every one of
+`orangu-server`'s own native endpoints, is supported: `/v1/models`,
+`/v1/chat/completions`, `/v1/embeddings`, `/health`, `/props`, `/slots`,
+`/metrics`, plus the coordinator's own `/v1/coordinator`. All but the last
+are **pass-through**: the coordinator picks a target profile, then forwards
+the request's method, path+query, headers (minus hop-by-hop ones like
+`Connection`/`Host`/`Content-Length`), and body to that profile's
+`orangu-server` origin *exactly as received*, and streams the response back
+byte-for-byte — it never inspects or rewrites the actual request/response
+content, only decides which backend gets it.
 
 Only one endpoint has a fixed role baked in; the rest are resolved
 dynamically per the routing order in [How it works](#how-it-works):
@@ -91,8 +94,8 @@ just switched to.
 
 ### Self-identification: `GET /v1/coordinator`
 
-Neither llama.cpp nor a generic OpenAI-compatible server exposes this path, so
-orangu (or any other client) can probe it to tell the three apart:
+Neither `orangu-server` nor a generic OpenAI-compatible server exposes this
+path, so orangu (or any other client) can probe it to tell the three apart:
 
 ```sh
 curl http://localhost:9000/v1/coordinator
@@ -101,7 +104,7 @@ curl http://localhost:9000/v1/coordinator
 ```json
 {
   "orangu_coordinator": true,
-  "version": "0.11.0",
+  "version": "0.12.0",
   "models": {
     "all": "bartowski/gemma-4-12B-it-GGUF",
     "code": "bartowski/gemma-4-12B-it-GGUF",
@@ -119,9 +122,9 @@ This lets a caller see what `model` to put in `orangu.conf` for a given role
 without needing its own copy of `orangu-coordinator.conf`.
 
 It is answered directly by the coordinator itself — never proxied, and never
-triggers starting a profile's llama.cpp — so it works even before any model
-has been requested. orangu's `/information` command probes it as part of its
-usual capability report.
+triggers starting a profile's `orangu-server` — so it works even before any
+model has been requested. orangu's `/information` command probes it as part
+of its usual capability report.
 
 ### Pre-warming: `POST /v1/coordinator/activate`
 
@@ -162,29 +165,55 @@ auto-review prestart screen instead of stalling the first review request.
 [orangu-coordinator]
 host = 127.0.0.1
 port = 9000
+models = /srv/models
 startup_timeout = 180
 
 [main]
 role = all
-llamacpp = llama-server -hf ggml-org/gemma-4-E4B-it-GGUF --host localhost --port 8100 --ctx-size 32768 -fa on --jinja
+model = ggml-org/gemma-4-E4B-it-GGUF
 
 [explorer]
 role = explorer
-llamacpp = llama-server -hf unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF --host localhost --port 8200 --ctx-size 65536
+model = unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF
+backend = vulkan
+slots = 4
 ```
+
+Neither profile above sets `host`/`port` — both fall back to
+`127.0.0.1:8100`, which is fine (see below); set them explicitly only if a
+profile needs something different.
 
 | Key | Section | Required | Description |
 | :-- | :-- | :-- | :-- |
 | `host` | `[orangu-coordinator]` | No | Host the proxy listens on. Defaults to `127.0.0.1` |
 | `port` | `[orangu-coordinator]` | No | Port the proxy listens on. Defaults to `9000` |
-| `startup_timeout` | `[orangu-coordinator]` | No | Seconds to wait for a newly started llama.cpp to answer `/v1/models` before giving up. Defaults to `180` |
+| `models` | `[orangu-coordinator]` | Yes | Models directory forwarded to every profile's own `orangu-server` (its `[orangu-server].models` key) — one shared directory across every profile, same as pointing plain `orangu-server` at one `models` directory. Supports a leading `~`/`~/...` |
+| `startup_timeout` | `[orangu-coordinator]` | No | Seconds to wait for a newly started `orangu-server` to answer `GET /v1/models` before giving up. Defaults to `180` |
 | `max_body_bytes` | `[orangu-coordinator]` | No | Request/response body size cap in bytes. Defaults to `67108864` (64 MiB) |
 | `idle_timeout` | `[orangu-coordinator]` | No | Seconds of inactivity before automatically unloading the active model to free system resources (RAM/VRAM). Disabled by default. |
-| `semantic_budget_tokens` | `[orangu-coordinator]` | No | The maximum number of tokens to budget for semantic search chunks in prompt construction. This occupancy-aware filter prevents hit-rate degradation when exploring large codebases. Defaults to `16384`. |
 | `shutdown_token` | `[orangu-coordinator]` | No | Shared secret that enables the `GET /v1/coordinator/shutdown` endpoint. The caller must pass `?token=<value>` and connect from localhost. Disabled by default when absent. |
-| `role` | profile | No | Same roles as `orangu.conf`: `all` (default), `code`, `review`, `explorer`, `embeddings`. At least one profile must resolve to `all` — it's the fallback profile |
-| `llamacpp` | profile | Yes | Full shell-style command line used to start llama.cpp for this profile, e.g. `llama-server -hf org/Model-GGUF --host localhost --port 8100 --ctx-size 32768`. Parsed like a shell command line (quoting works, e.g. `--chat-template-kwargs '{"enable_thinking": false}'`), but run directly — no shell is invoked, so stopping the profile always stops the real `llama-server` process, not just a wrapper. Leading `KEY=VALUE` tokens (the shell convention for setting one-off variables before a command, e.g. `LLAMA_CACHE=/models llama-server ...`) are recognized explicitly and set as environment variables on the spawned process, since there's no real shell to interpret them. A leading `~` or `~/...` in any argument or `KEY=VALUE` value (e.g. `--slot-save-path ~/.orangu/llama-slots`) is expanded to the home directory for the same reason — a real shell would otherwise have done this automatically (`~otheruser` forms are not supported). There is no separate `model`, `host`, or `port` key: they're all read straight off this command line, so there's exactly one place each is named — `-hf`/`--hf-repo` or `-m`/`--model` for the model (required — profiles *may* share a model, e.g. the same model configured once per role; `resolve_entry` breaks any resulting tie by profile name), `--host`/`--port` for where the coordinator proxies to (default to `127.0.0.1:8080`, same as llama.cpp itself, when omitted) |
-| `api_key` | profile | No | Sent as `Authorization: Bearer <key>` on the coordinator's own requests to this profile's llama.cpp, if `llamacpp` starts it with `--api-key` |
+| `role` | profile | No | Same roles as `orangu.conf`: `all` (default), `code`, `review`, `explorer`, `embeddings`. At least one profile must resolve to `all` — it's the fallback profile. Maps to `orangu-server`'s own `--all`/`--code`/`--review`/`--explorer`/`--embedding` flag; anything else is rejected at load time |
+| `model` | profile | Yes | A model spec in the same shape `orangu-server`'s own positional `MODEL` argument accepts: a local `.gguf` path, an `NR`/`MODEL` label already under the shared `models` directory, or a `<user>/<model>[:quant]` Hugging Face repo (fetched on first start if not already cached). This is the model id a client request's `model` field matches against — profiles *may* share one, e.g. the same model configured once per role; `resolve_entry` breaks any resulting tie by profile name |
+| `host` | profile | No | Host this profile's `orangu-server` listens on. Defaults to `127.0.0.1` |
+| `port` | profile | No | Port this profile's `orangu-server` listens on. Defaults to `8100` — the same default `orangu-server` itself uses |
+| `backend` | profile | No | Forwarded to this profile's `orangu-server` as `[orangu-server].backend` (`auto`/`cpu`/`vulkan`/`cuda`/`opencl`/`rocm`) when set. Defaults to `orangu-server`'s own default (`auto`) |
+| `slots` | profile | No | Forwarded to this profile's `orangu-server` as `[orangu-server].slots` when set. Defaults to `orangu-server`'s own role-based default |
+| `web` | profile | No | Forwarded to this profile's `orangu-server` as `[orangu-server].web` when set, exposing that profile's own web UI on the given port while it's active. Off by default |
+
+Each profile's own `orangu-server` is started with a small, coordinator-
+generated config file (`~/.orangu/coordinator/servers/<profile-name>.conf`,
+overwritten on every start) carrying its `models`/`host`/`port` and whichever
+of `backend`/`slots`/`web` were set — inspect that file directly to see
+exactly what a given profile's `orangu-server` last ran with.
+
+Every profile defaulting to `127.0.0.1:8100` — the same address, not a
+distinct one per role — is intentional and safe: at most one profile's
+`orangu-server` is ever alive under the coordinator (its whole invariant),
+and swapping to a different profile always fully stops whichever one is
+currently running before starting the new one, so the new process never
+races the old one for the same port. Give a profile its own explicit
+`host`/`port` only if you actually want its `orangu-server` reachable
+directly, bypassing the coordinator.
 
 Default lookup order for the config file, same as `orangu.conf`:
 
@@ -196,6 +225,12 @@ Run it with:
 ```sh
 orangu-coordinator --config ./orangu-coordinator.conf
 ```
+
+`orangu-coordinator` spawns a sibling `orangu-server` next to its own
+executable by default (the common case: both binaries come from the same
+build), falling back to `orangu-server` resolved via `PATH` if no sibling
+exists. Set `ORANGU_COORDINATOR_SERVER_BIN` to point it at a specific
+`orangu-server` executable instead.
 
 Running in the foreground (not `--daemon`) sets the terminal window/tab
 title to `orangu-coordinator` for the life of the process, restoring it on
@@ -222,15 +257,31 @@ silently in the background. There is no PID file: find the process with
 orangu-coordinator --init
 ```
 
-Mirrors `orangu --init`: it walks every `[orangu-coordinator]` key showing its
-default, then asks for a `llamacpp` command role by role — `all` is
-mandatory, `code`/`review`/`explorer`/`embeddings` are skipped by leaving the
-prompt blank. Each `llamacpp` command is validated the same way the loader
-would (a parseable command line naming a model via `-hf`/`--hf-repo` or
-`-m`/`--model`) before it's accepted, so the wizard can't write a config that
-fails to load. It shows the resulting file and asks for confirmation before
-writing `~/.orangu/orangu-coordinator.conf` (creating the directory if
-needed, and overwriting any existing file).
+Mirrors `orangu --init`: it walks every `[orangu-coordinator]` key showing
+its default (including the required `models` directory), then asks for a
+model and a port role by role — `all` is mandatory, `code`/`review`/
+`explorer`/`embeddings` are skipped by leaving the model prompt blank. It
+shows the resulting file and asks for confirmation before writing
+`~/.orangu/orangu-coordinator.conf` (creating the directory if needed, and
+overwriting any existing file).
+
+The written file is kept terse: only `host`/`port` (in
+`[orangu-coordinator]`) and each profile's `model` are always present —
+every other answer left at its default is simply omitted, since the loader
+already falls back to the exact same value on its own.
+
+Both the `models` directory prompt and every role's `model` prompt offer
+inline ghost-text suggestions and TAB completion as you type: `models`
+completes real filesystem paths, and once it's set, each `model` prompt
+completes over every installed model's user-facing Hugging Face-style label
+— the same label `orangu-server list`'s `MODEL` column prints (e.g.
+`unsloth/gemma-4-E2B-it-GGUF:Q4_K_M`), not the raw on-disk filename, and
+deliberately *not* its `NR` shorthand either: unlike `orangu-server`'s own
+`--init`, a coordinator profile's `model` is written once and read back
+indefinitely (and is also the literal string clients match against), so
+only a stable identifier is ever offered. Neither prompt requires typing an
+offered value — a local path or a not-yet-downloaded
+`<user>/<model>[:quant]` spec is equally valid.
 
 ## Pointing orangu.conf at it
 
@@ -276,9 +327,10 @@ coordinator. Behind a confirmed coordinator, those sections' own `role` and
 
 ## Notes
 
-- The coordinator does not manage remote/already-running llama.cpp instances;
-  `llamacpp` is always a command it spawns and owns the lifecycle of.
-- **Dynamic Hot-Reloading**: The coordinator watches `orangu-coordinator.conf` and hot-reloads changes automatically (polled every ~5 seconds) without needing a restart.
+- The coordinator does not manage remote/already-running `orangu-server`
+  instances; each profile's `orangu-server` is always a process it spawns
+  and owns the lifecycle of itself.
+- **Dynamic Hot-Reloading**: The coordinator watches `orangu-coordinator.conf` and hot-reloads changes automatically (polled every ~5 seconds) without needing a restart. Any change to the active profile's settings — not just its model — restarts its `orangu-server`.
 - **Fallback Routing**: If a requested profile fails to load (e.g. out of memory), the coordinator automatically falls back to starting the `all`-role profile rather than failing the request entirely.
 - The first request after a swap waits for the new model to finish loading;
   size `startup_timeout` generously for large models.
@@ -292,10 +344,10 @@ coordinator. Behind a confirmed coordinator, those sections' own `role` and
   to Y") is skipped entirely behind a confirmed coordinator.
 - Forwarded requests have no fixed timeout of their own — generation can
   legitimately take as long as it takes, and the coordinator never cuts a
-  response off partway through. Only the internal `/v1/models` health-check
-  probe used while starting a profile has a short (5s) timeout, so a
-  genuinely stuck/unreachable process is still detected and retried quickly
-  without affecting real requests.
+  response off partway through. Only the internal `GET /v1/models`
+  health-check probe used while starting a profile has a short (5s)
+  timeout, so a genuinely stuck/unreachable process is still detected and
+  retried quickly without affecting real requests.
 - Behind a confirmed coordinator, embeddings detection sends a real `POST
   /v1/embeddings` naming the `embeddings` role on the active connection,
   which — if a different role is currently active — makes the coordinator
@@ -307,17 +359,17 @@ coordinator. Behind a confirmed coordinator, those sections' own `role` and
   `/reload` selects a new connection, so switching to (or away from) a
   coordinator mid-session re-evaluates search availability rather than
   leaving it fixed at whatever was true at launch.
-- If a profile's llama.cpp crashes or exits before answering `/v1/models`
-  (a bad flag, an out-of-memory kill, a GGML assertion, ...), the error
-  includes the last 20 lines of its stdout/stderr, so the actual reason is
-  visible alongside the exit status instead of just a bare signal number.
-  Unless `--quiet`, that same output is also echoed live to the
+- If a profile's `orangu-server` crashes or exits before answering
+  `GET /v1/models` (a bad model spec, an out-of-memory kill, ...), the
+  error includes the last 20 lines of its stdout/stderr, so the actual
+  reason is visible alongside the exit status instead of just a bare signal
+  number. Unless `--quiet`, that same output is also echoed live to the
   coordinator's own console as it's produced. The same diagnostic is printed
   (unless `--quiet`) if a profile crashes *after* becoming active — including
   mid-request, which a client only sees as a broken connection — the next
   time anything asks for it: the coordinator notices the process has died,
   logs its last captured output and exit status to its own console, and
   restarts it before serving that request.
-- On shutdown (Ctrl+C), the coordinator stops whatever llama.cpp process is
-  currently active — or still starting up, mid health-check — so nothing is
-  left running in the background.
+- On shutdown (Ctrl+C), the coordinator stops whatever `orangu-server`
+  process is currently active — or still starting up, mid health-check —
+  so nothing is left running in the background.

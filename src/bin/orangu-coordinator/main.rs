@@ -14,12 +14,18 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! `orangu-coordinator` is a small HTTP proxy that sits in front of a single
-//! local llama.cpp process. Rather than requiring one already-running
-//! `llama-server` per role (as plain `orangu.conf` does), it starts and stops
-//! `llama-server` on demand: every incoming request's JSON `model` field
-//! picks which configured entry should be active, and the coordinator swaps
-//! the running process if a different one is needed before forwarding the
-//! request unchanged.
+//! local `orangu-server` process. Rather than requiring one already-running
+//! `orangu-server` per role (as plain `orangu.conf` does), it starts and
+//! stops `orangu-server` on demand: every incoming request's JSON `model`
+//! field picks which configured entry should be active, and the coordinator
+//! swaps the running process (via that entry's own role flag — `--all`/
+//! `--code`/`--review`/`--explorer`/`--embedding` — and model) if a
+//! different one is needed before forwarding the request unchanged.
+//!
+//! `ORANGU_COORDINATOR_SERVER_BIN`, if set, overrides which `orangu-server`
+//! executable is spawned (see `process::Coordinator::resolve_server_binary`)
+//! — otherwise a sibling `orangu-server` next to this binary's own
+//! executable is used, falling back to `PATH`.
 
 mod config;
 mod init;
@@ -189,7 +195,13 @@ async fn run(
     profile_summary.sort();
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
-    let coordinator = Arc::new(Coordinator::new(config, args.quiet)?);
+    let server_binary_override =
+        std::env::var_os("ORANGU_COORDINATOR_SERVER_BIN").map(PathBuf::from);
+    let coordinator = Arc::new(Coordinator::new(
+        config,
+        args.quiet,
+        server_binary_override,
+    )?);
 
     // Eagerly activate the `all`-role profile so the default model is
     // already loaded (or loading) by the time the first request arrives,

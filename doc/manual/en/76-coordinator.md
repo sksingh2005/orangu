@@ -4,7 +4,7 @@
 
 `orangu-coordinator` (`src/bin/orangu-coordinator/`) is a second binary in
 the same Cargo package as `orangu`, built around a single invariant: **at
-most one `llama-server` child process is alive at any time.**
+most one `orangu-server` child process is alive at any time.**
 
 Everything else — the HTTP proxy, the self-identification endpoint, the pre-warming
 hint, client-side integration in `orangu` itself — exists to make swapping
@@ -16,16 +16,17 @@ that one process safe and (mostly) transparent.
 
 - `config: CoordinatorConfiguration` — the parsed `orangu-coordinator.conf`,
   keyed by profile name, each a `CoordinatorLlmEntry { name, role, model,
-  host, port, llamacpp, api_key }`. `model`/`host`/`port` are never
-  separate config keys — they're parsed out of the `llamacpp` command line
-  itself (`extract_model_id`/`extract_host_and_port` in `config.rs`), so
-  there is exactly one place each is named.
+  host, port, backend, slots, web }` — every field an explicit, individually-
+  parsed config key (`config.rs`'s `parse_llm_profiles`); `role` is
+  validated against `role_server_flag` at load time, since it has to map to
+  one of `orangu-server`'s own `--all`/`--code`/`--review`/`--explorer`/
+  `--embedding` flags for the profile to be startable at all.
 - `active: Mutex<Option<ActiveProcess>>` — the currently running process, if
   any, plus its rolling output tail (`OutputTail = Arc<Mutex<VecDeque<String>>>`,
   capped at 20 lines) kept for the process's whole lifetime, not just while
   starting.
-- `current_pid: Mutex<Option<u32>>` — set the instant a process is spawned,
-  *before* its health check even begins, and cleared once it's known to have
+- `current_pid: AtomicU32` — set the instant a process is spawned, *before*
+  its health check even begins, and cleared once it's known to have
   stopped. `active` is held locked for an entire start sequence (which can
   take up to `startup_timeout`); `shutdown()` must not have to wait on that
   same lock just to kill a still-starting process, so the PID is tracked
@@ -33,23 +34,31 @@ that one process safe and (mostly) transparent.
 - `http_client: reqwest::Client` — shared by both the health-check probe and
   request forwarding, with **no default timeout**. This client is used to
   proxy real, potentially long-running generation requests; only the
-  internal `/v1/models` health-check applies its own short, explicit
+  internal `GET /v1/models` health-check applies its own short, explicit
   per-request timeout (`HEALTH_CHECK_TIMEOUT`, 5s). Giving the whole client
   a default timeout instead was a real bug: any generation slower than it
   got its connection torn down mid-stream, surfacing to the caller as a bare
   "unexpected EOF during chunk size line" rather than a clear error.
+- `server_binary_override: Option<PathBuf>` — which `orangu-server`
+  executable to spawn, read once by `main` from
+  `ORANGU_COORDINATOR_SERVER_BIN` at startup (never re-read per spawn, and
+  never a bare env lookup inside `start` itself — this also lets tests
+  inject a stand-in executable deterministically without racing parallel
+  test threads over a shared process-wide environment variable). `None`
+  falls back to `Coordinator::resolve_server_binary`'s sibling-binary/`PATH`
+  search.
 
 ### `GET /v1/coordinator`
 
 A fixed, side-effect-free identity marker (`proxy::coordinator_info`),
 answered directly and never proxied — it must work even before any profile
-has been activated. Neither llama.cpp nor a generic OpenAI-compatible server
-exposes this path, so a client can probe it to tell the three apart:
+has been activated. Neither `orangu-server` nor a generic OpenAI-compatible
+server exposes this path, so a client can probe it to tell the three apart:
 
 ```json
 {
   "orangu_coordinator": true,
-  "version": "0.11.0",
+  "version": "0.12.0",
   "models": {
     "all": "bartowski/gemma-4-12B-it-GGUF",
     "code": "bartowski/gemma-4-12B-it-GGUF",
@@ -126,30 +135,37 @@ lifecycle work: if it's already the active entry and its process is still
 alive (checked via `try_wait`), reuse it; otherwise stop whatever's running
 (clearing `current_pid` *before* reaping, so a concurrent `shutdown` never
 targets a stale, possibly-recycled PID) and `start` the requested entry —
-`shell_words::split` the `llamacpp` command, peel off any leading
-`KEY=VALUE` environment assignments (`split_leading_env_assignments`, since
-`llamacpp` is run directly, never through a real shell), expand a leading
-`~`/`~/...` in every argument and assignment value (`expand_tilde` — the
-same "no real shell" reasoning means llama.cpp itself would otherwise see a
-literal `~`, which it doesn't understand), spawn it with piped
-stdout/stderr captured into the rolling tail, record `current_pid`
-immediately (before the possibly-long health check), then poll
-`GET /v1/models` on the new origin every 500ms until it succeeds or
-`startup_timeout` elapses. Only *then* does `proxy` forward the original
-request — headers (minus hop-by-hop ones), method, and body unchanged — and
-stream the response back.
+write that profile's own generated `orangu-server.conf`
+(`~/.orangu/coordinator/servers/<name>.conf`, carrying `models`/`host`/
+`port` and whichever of `backend`/`slots`/`web` were set), resolve which
+`orangu-server` executable to run (`resolve_server_binary`), spawn it with
+`--config <that path> <role flag> <model>`, piped stdout/stderr captured
+into the rolling tail, record `current_pid` immediately (before the
+possibly-long health check), then poll `GET /v1/models` on the new origin
+every 500ms until it succeeds or `startup_timeout` elapses. Only *then* does
+`proxy` forward the original request — headers (minus hop-by-hop ones),
+method, and body unchanged — and stream the response back.
+
+Unlike the older `llamacpp`-command-line design this replaced, `start`
+never parses a shell command line at all: every argument it passes is
+either a config value validated at load time or a path it generated itself,
+so there's no argv-scraping, no leading-`KEY=VALUE`-environment-assignment
+convention, and no manual `~` expansion left to reproduce — `orangu-server`
+being a sibling process built from the same source, not an
+independently-installed external tool, is what makes this simplification
+possible.
 
 ### Crash diagnostics
 
-If a profile's llama.cpp exits before answering `/v1/models`, or dies later
-while actively serving requests (mid-generation, discovered lazily the next
-time `ensure_active` reuses that entry and finds `try_wait` returning
-`Some`), the coordinator logs a warning (unless `--quiet`) with the exit
-status and the last 20 captured lines of stdout/stderr, then restarts it
-before serving whatever triggered the check. A crash mid-stream still
-surfaces to the *client* as a broken connection (an already-started 200
-response can't be retroactively turned into an error), but the coordinator's
-own console now always has the actual reason logged.
+If a profile's `orangu-server` exits before answering `GET /v1/models`, or
+dies later while actively serving requests (mid-generation, discovered
+lazily the next time `ensure_active` reuses that entry and finds `try_wait`
+returning `Some`), the coordinator logs a warning (unless `--quiet`) with
+the exit status and the last 20 captured lines of stdout/stderr, then
+restarts it before serving whatever triggered the check. A crash mid-stream
+still surfaces to the *client* as a broken connection (an already-started
+200 response can't be retroactively turned into an error), but the
+coordinator's own console now always has the actual reason logged.
 
 ### Client-side integration (`orangu`)
 

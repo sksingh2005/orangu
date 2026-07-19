@@ -1,9 +1,9 @@
 # Building orangu
 
 `orangu` is a Rust project with three binaries: the interactive client
-(`orangu`), an optional HTTP proxy that starts/stops llama.cpp on demand
-(`orangu-coordinator`, see [doc/COORDINATOR.md](COORDINATOR.md)), and a
-native GGUF inference server that doubles as a standalone CPU/GPU and GGUF
+(`orangu`), an optional HTTP proxy that starts/stops `orangu-server` on
+demand (`orangu-coordinator`, see [doc/COORDINATOR.md](COORDINATOR.md)), and
+a native GGUF inference server that doubles as a standalone CPU/GPU and GGUF
 file inventory tool (`orangu-server`, see [doc/SERVER.md](SERVER.md)).
 
 ## Prerequisites

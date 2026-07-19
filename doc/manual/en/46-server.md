@@ -8,11 +8,13 @@ API — both the OpenAI-compatible endpoints (`/v1/chat/completions`,
 native ones (`/health`, `/props`, `/slots`, `/metrics`, `/completion`,
 `/tokenize`, `/detokenize`, `/embedding`, `/apply-template`).
 
-Unlike `orangu-coordinator` (which starts and proxies to an external
-`llama-server` process), `orangu-server` *is* the inference engine: GGUF
-loading, tokenization, the transformer forward pass, sampling, and request
-scheduling are implemented directly in Rust, with no dependency on
-llama.cpp/ggml's own compiled code.
+`orangu-server` *is* the inference engine: GGUF loading, tokenization, the
+transformer forward pass, sampling, and request scheduling are implemented
+directly in Rust, with no dependency on llama.cpp/ggml's own compiled code.
+`orangu-coordinator` (see the Coordinator chapter) sits in front of it,
+starting and stopping an `orangu-server` process on demand for machines
+that only have the resources to keep one model resident at a time — this
+chapter covers `orangu-server` itself.
 
 It's also the machine's GGUF inventory tool — the `system`/`suggest`/
 `list`/`show`/`download`/`delete` subcommands (below) answer the questions

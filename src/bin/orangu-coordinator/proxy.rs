@@ -14,8 +14,8 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! The HTTP proxy handler: inspect the request's `model` field, make sure
-//! that model's llama.cpp is the active process, then forward the request
-//! through unchanged and stream the response back.
+//! that model's `orangu-server` is the active process, then forward the
+//! request through unchanged and stream the response back.
 
 use crate::process::Coordinator;
 use axum::{
@@ -56,7 +56,7 @@ pub async fn coordinator_info(State(coordinator): State<Arc<Coordinator>>) -> Js
 /// *before* the request that actually needs a model, naming a `model` (a
 /// real model id or a role name, matched exactly like ordinary routing) to
 /// start swapping to right away. Answered directly, never proxied — this
-/// never reaches any backend llama.cpp itself.
+/// never reaches any backend `orangu-server` itself.
 ///
 /// The swap is spawned detached and NOT awaited here: this must return
 /// immediately so the swap survives the caller disconnecting early or not
@@ -97,7 +97,7 @@ pub async fn activate(State(coordinator): State<Arc<Coordinator>>, body: Bytes) 
 }
 
 /// Headers that are specific to one hop of the connection and must not be
-/// blindly forwarded to (or from) the upstream llama.cpp server.
+/// blindly forwarded to (or from) the upstream `orangu-server`.
 const HOP_BY_HOP: &[&str] = &[
     "connection",
     "keep-alive",
@@ -146,8 +146,8 @@ pub async fn proxy(
         .resolve_entry(model_hint.as_deref(), implied_role)
         .await;
 
-    let (origin, effective_entry) = match coordinator.ensure_active(&entry).await {
-        Ok(origin) => (origin, entry),
+    let origin = match coordinator.ensure_active(&entry).await {
+        Ok(origin) => origin,
         Err(err) => {
             let default_entry = coordinator.default_entry();
             if entry.name != default_entry.name {
@@ -156,7 +156,7 @@ pub async fn proxy(
                     entry.name, default_entry.name
                 );
                 match coordinator.ensure_active(&default_entry).await {
-                    Ok(origin) => (origin, default_entry),
+                    Ok(origin) => origin,
                     Err(fallback_err) => {
                         return (
                             StatusCode::BAD_GATEWAY,
@@ -189,9 +189,6 @@ pub async fn proxy(
             continue;
         }
         request = request.header(name, value);
-    }
-    if let Some(api_key) = &effective_entry.api_key {
-        request = request.bearer_auth(api_key);
     }
 
     let upstream = match request.send().await {

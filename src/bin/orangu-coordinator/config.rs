@@ -14,8 +14,10 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Configuration for `orangu-coordinator`: a single `[orangu-coordinator]`
-//! client section plus one section per llama.cpp-backed model, mirroring the
-//! shape of `orangu.conf`'s server sections.
+//! client section (which also names the shared models directory every
+//! profile's `orangu-server` is started against) plus one section per
+//! `orangu-server`-backed profile, mirroring the shape of `orangu.conf`'s
+//! server sections.
 
 use anyhow::{Context, Result, anyhow};
 use orangu::config::parse_ini_sections;
@@ -24,10 +26,33 @@ use std::{collections::HashMap, path::Path, path::PathBuf};
 pub const CLIENT_SECTION: &str = "orangu-coordinator";
 
 /// The conventional roles `orangu.conf` itself documents, in the order they
-/// are listed there. Used to report a model for every role in
-/// [`CoordinatorConfiguration::models_by_role`], not just the ones a given
-/// `orangu-coordinator.conf` happens to define profiles for.
+/// are listed there. Used both to report a model for every role in
+/// [`CoordinatorConfiguration::models_by_role`] (not just the ones a given
+/// `orangu-coordinator.conf` happens to define profiles for) and to
+/// validate a profile's `role` key at load time — a role has to map to one
+/// of `orangu-server`'s own `--all`/`--code`/`--review`/`--explorer`/
+/// `--embedding` flags (see [`role_server_flag`]) for the profile to be
+/// startable at all, so an unrecognized role is now a load-time error
+/// rather than something that silently just never matches
+/// [`CoordinatorConfiguration::models_by_role`]'s reporting.
 pub const KNOWN_ROLES: &[&str] = &["all", "code", "review", "explorer", "embeddings"];
+
+/// The `orangu-server` CLI flag a coordinator-profile `role` maps to. Note
+/// the vocabulary mismatch this bridges: coordinator profiles (like
+/// `orangu.conf` itself) use `embeddings` (plural), while `orangu-server`'s
+/// own flag is `--embedding` (singular) — every other role's flag matches
+/// its role name exactly. Returns `None` for anything not in
+/// [`KNOWN_ROLES`].
+pub fn role_server_flag(role: &str) -> Option<&'static str> {
+    match role {
+        "all" => Some("--all"),
+        "code" => Some("--code"),
+        "review" => Some("--review"),
+        "explorer" => Some("--explorer"),
+        "embeddings" => Some("--embedding"),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CoordinatorConfiguration {
@@ -35,8 +60,14 @@ pub struct CoordinatorConfiguration {
     pub host: String,
     /// Port the proxy listens on.
     pub port: u16,
-    /// How long to wait for a newly started llama.cpp to answer `/v1/models`
-    /// before giving up and reporting an error to the caller.
+    /// Models directory forwarded to every profile's own `orangu-server`
+    /// (its `[orangu-server].models` key) — one shared directory for every
+    /// profile, matching how a single machine typically has one model
+    /// cache regardless of how many roles are configured.
+    pub models: PathBuf,
+    /// How long to wait for a newly started `orangu-server` to answer
+    /// `GET /v1/models` before giving up and reporting an error to the
+    /// caller.
     pub startup_timeout_seconds: u64,
     /// Request/response body size cap in bytes.
     pub max_body_bytes: usize,
@@ -82,37 +113,56 @@ impl CoordinatorConfiguration {
     }
 }
 
-#[derive(Clone, Debug)]
+/// One configured profile: which role it serves, which model, and where its
+/// own `orangu-server` should listen. Every field here is an explicit,
+/// individually-parsed and -validated config key — `orangu-coordinator`
+/// builds `orangu-server`'s own argv itself from these (see
+/// `process::Coordinator::start`), rather than scraping a model id or a
+/// host/port back out of a free-form command line.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoordinatorLlmEntry {
     pub name: String,
     pub role: String,
-    /// The model id a client request must carry (in its JSON `model` field)
-    /// to be routed to this entry. Not configured directly — it's read off
-    /// `llamacpp`'s own `-hf`/`--hf-repo` or `-m`/`--model` argument, so there
-    /// is exactly one place a profile's model is named.
+    /// A model spec in the same shape `orangu-server`'s own positional
+    /// `MODEL` CLI argument accepts: a local `.gguf` path, an `NR`/`MODEL`
+    /// label already under the shared `models` directory, or a
+    /// `<user>/<model>[:quant]` Hugging Face repo (fetched on first start if
+    /// not already cached). This is the model id a client request must
+    /// carry (in its JSON `model` field) to be routed to this entry.
     pub model: String,
-    /// Host llama.cpp will listen on once started via `llamacpp`. Read off
-    /// `llamacpp`'s own `--host` argument (defaulting to `127.0.0.1`, same as
-    /// llama.cpp itself, when absent). May differ between entries — e.g. one
-    /// profile's model runs on another machine — even though at most one is
-    /// ever active at a time.
+    /// Host this profile's `orangu-server` will listen on. Defaults to
+    /// `127.0.0.1` when absent.
     pub host: String,
-    /// Port llama.cpp will listen on once started via `llamacpp`. Read off
-    /// `llamacpp`'s own `--port` argument (defaulting to `8080`, same as
-    /// llama.cpp itself, when absent).
+    /// Port this profile's `orangu-server` will listen on. Defaults to
+    /// `8100` — the same default `orangu-server` itself uses — when absent.
+    /// Unlike a real multi-process setup, profiles sharing a host and port
+    /// is fine even though only one is ever active at a time: at most one
+    /// `orangu-server` is alive under a coordinator (this project's whole
+    /// invariant), and `process::Coordinator::ensure_active` always fully
+    /// stops whichever one is currently running — awaited, not just
+    /// signaled — before starting a different profile's own, so the new
+    /// process never races the old one for the same port.
     pub port: u16,
-    /// Shell-style command line used to start llama.cpp for this entry, e.g.
-    /// `llama-server -hf org/Model-GGUF --port 8100 --ctx-size 32768`.
-    pub llamacpp: String,
-    /// API key sent as `Authorization: Bearer <key>` on requests the
-    /// coordinator makes to this llama.cpp once it is running. Required only
-    /// when `llamacpp` itself starts the server with `--api-key`.
-    pub api_key: Option<String>,
+    /// Forwarded verbatim to this profile's generated `[orangu-server].
+    /// backend` key when set — `orangu-server` itself validates the value
+    /// (`auto`/`cpu`/`vulkan`/`cuda`/`opencl`/`rocm`), so this isn't
+    /// re-validated here. `None` leaves `orangu-server`'s own default
+    /// (`auto`) in place by simply omitting the key.
+    pub backend: Option<String>,
+    /// Forwarded to this profile's generated `[orangu-server].slots` key
+    /// when set. `None` leaves `orangu-server`'s own role-based default in
+    /// place (see `orangu-server`'s `config::Role::default_slots`).
+    pub slots: Option<usize>,
+    /// Forwarded to this profile's generated `[orangu-server].web` key when
+    /// set. `None` leaves `orangu-server`'s own default (`0`, disabled) in
+    /// place — a coordinator-managed profile has no obvious single "the"
+    /// web UI port across every role, so this is opt-in per profile only.
+    pub web: Option<u16>,
 }
 
 impl CoordinatorLlmEntry {
     /// The origin (`http://host:port`) requests are proxied to once this
-    /// entry's llama.cpp is active.
+    /// entry's `orangu-server` is active.
     pub fn origin(&self) -> String {
         format!("http://{}:{}", self.host, self.port)
     }
@@ -134,15 +184,26 @@ pub(crate) fn default_port() -> u16 {
     9000
 }
 
-/// llama.cpp's own default port when `--port` is omitted.
-fn default_llama_port() -> u16 {
-    8080
+/// Default `port` for a profile's own `orangu-server` — the same default
+/// `orangu-server`'s own `config::default_port` uses, not to be confused
+/// with [`default_port`] above (the coordinator's own listen port).
+pub(crate) fn default_profile_port() -> u16 {
+    8100
 }
 
+/// Parses an optional `u16` key, returning `None` — never an error — for
+/// both a genuinely absent key *and* one present but left blank (`port = `
+/// with nothing after the `=`): `parse_ini_sections` inserts a blank value
+/// into its map same as any other, so `values.get(name)` alone can't tell
+/// "not set" apart from "set to nothing" — every other optional key in this
+/// file (`host`, `role`, `backend`, `shutdown_token`, ...) already treats
+/// them the same via `.filter(|v| !v.is_empty())`; this is that same
+/// guarantee for numeric keys, so a stray trailing `=` falls back to
+/// whatever default the caller applies instead of surfacing as a confusing
+/// "invalid digit found in string" parse error.
 fn parse_port(values: &HashMap<String, String>, name: &str, section: &str) -> Result<Option<u16>> {
-    match values.get(name) {
+    match values.get(name).map(|v| v.trim()).filter(|v| !v.is_empty()) {
         Some(value) => value
-            .trim()
             .parse::<u16>()
             .map(Some)
             .map_err(|err| anyhow!("invalid value for [{section}].{name}: {err}")),
@@ -150,48 +211,17 @@ fn parse_port(values: &HashMap<String, String>, name: &str, section: &str) -> Re
     }
 }
 
-/// Flags that name the model a `llama-server` invocation loads, in the order
-/// they're preferred: an explicit Hugging Face repo id is what callers
-/// naturally send as `model`, a local model path is the fallback.
-const MODEL_REPO_FLAGS: &[&str] = &["-hf", "--hf-repo"];
-const MODEL_PATH_FLAGS: &[&str] = &["-m", "--model"];
-
-fn find_flag_value(argv: &[String], flags: &[&str]) -> Option<String> {
-    for (index, arg) in argv.iter().enumerate() {
-        for flag in flags {
-            if arg == flag {
-                return argv.get(index + 1).cloned();
-            }
-            if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
-                return Some(value.to_string());
-            }
-        }
+/// Expands a leading `~` or `~/` to the user's home directory — same
+/// convenience `orangu-server`'s own config applies to its `models` key,
+/// mirrored here so a coordinator config can use the same shorthand.
+fn expand_tilde(path: &str) -> PathBuf {
+    match path.strip_prefix('~') {
+        Some(rest) => match home::home_dir() {
+            Some(home) => home.join(rest.trim_start_matches('/')),
+            None => PathBuf::from(path),
+        },
+        None => PathBuf::from(path),
     }
-    None
-}
-
-/// Reads the model id a profile's `llamacpp` command will load, so profiles
-/// don't need to name their model a second time in a separate config key.
-pub(crate) fn extract_model_id(argv: &[String]) -> Option<String> {
-    find_flag_value(argv, MODEL_REPO_FLAGS).or_else(|| find_flag_value(argv, MODEL_PATH_FLAGS))
-}
-
-const HOST_FLAGS: &[&str] = &["--host"];
-const PORT_FLAGS: &[&str] = &["--port"];
-
-/// Reads the host and port a profile's `llamacpp` command will bind to, so
-/// profiles don't need to repeat them in separate config keys. Falls back to
-/// llama.cpp's own defaults (`127.0.0.1:8080`) when `--host`/`--port` are
-/// absent from the command line.
-fn extract_host_and_port(name: &str, argv: &[String]) -> Result<(String, u16)> {
-    let host = find_flag_value(argv, HOST_FLAGS).unwrap_or_else(default_host);
-    let port = match find_flag_value(argv, PORT_FLAGS) {
-        Some(value) => value
-            .parse::<u16>()
-            .map_err(|err| anyhow!("[{name}].llamacpp has an invalid --port value: {err}"))?,
-        None => default_llama_port(),
-    };
-    Ok((host, port))
 }
 
 pub fn default_coordinator_config_path() -> Option<PathBuf> {
@@ -221,24 +251,48 @@ pub fn load_coordinator_configuration(path: &Path) -> Result<CoordinatorConfigur
         .unwrap_or_else(default_host);
     let port = parse_port(&client, "port", CLIENT_SECTION)?.unwrap_or_else(default_port);
 
-    let startup_timeout_seconds = match client.get("startup_timeout") {
-        Some(value) => value.trim().parse::<u64>().map_err(|err| {
+    let models = client
+        .get("models")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("[{CLIENT_SECTION}].models must be set to a models directory"))?;
+
+    // `.filter(!is_empty())` on every one of these (matching every string
+    // key elsewhere in this function, e.g. `host`/`models` above) makes a
+    // present-but-blank value (`startup_timeout = ` with nothing after the
+    // `=`) fall back to its default exactly like an absent key would,
+    // rather than surfacing as a confusing parse error — see `parse_port`'s
+    // own doc comment for why `parse_ini_sections` makes this distinction
+    // necessary to handle explicitly.
+    let startup_timeout_seconds = match client
+        .get("startup_timeout")
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
+        Some(value) => value.parse::<u64>().map_err(|err| {
             anyhow!("invalid value for [{CLIENT_SECTION}].startup_timeout: {err}")
         })?,
         None => default_startup_timeout(),
     };
 
-    let max_body_bytes = match client.get("max_body_bytes") {
+    let max_body_bytes = match client
+        .get("max_body_bytes")
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
         Some(value) => value
-            .trim()
             .parse::<usize>()
             .map_err(|err| anyhow!("invalid value for [{CLIENT_SECTION}].max_body_bytes: {err}"))?,
         None => default_max_body_bytes(),
     };
 
     let idle_timeout_seconds =
-        match client.get("idle_timeout") {
-            Some(value) => Some(value.trim().parse::<u64>().map_err(|err| {
+        match client
+            .get("idle_timeout")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
+            Some(value) => Some(value.parse::<u64>().map_err(|err| {
                 anyhow!("invalid value for [{CLIENT_SECTION}].idle_timeout: {err}")
             })?),
             None => None,
@@ -272,6 +326,7 @@ pub fn load_coordinator_configuration(path: &Path) -> Result<CoordinatorConfigur
     Ok(CoordinatorConfiguration {
         host,
         port,
+        models: expand_tilde(&models),
         startup_timeout_seconds,
         max_body_bytes,
         idle_timeout_seconds,
@@ -292,26 +347,46 @@ fn parse_llm_profiles(
                 .map(|value| value.trim().to_lowercase())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "all".to_string());
+            if role_server_flag(&role).is_none() {
+                return Err(anyhow!(
+                    "[{name}].role '{role}' is not a known role (expected one of: {})",
+                    KNOWN_ROLES.join(", ")
+                ));
+            }
 
-            let llamacpp = values
-                .get("llamacpp")
+            let model = values
+                .get("model")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow!("[{name}].llamacpp must not be empty"))?;
-            // Fail fast on a malformed command line rather than at first use.
-            let argv = shell_words::split(&llamacpp)
-                .map_err(|err| anyhow!("[{name}].llamacpp is not a valid command line: {err}"))?;
-            let model = extract_model_id(&argv).ok_or_else(|| {
-                anyhow!(
-                    "[{name}].llamacpp must specify a model via -hf/--hf-repo or -m/--model, so requests can be routed to it"
-                )
-            })?;
-            let (host, port) = extract_host_and_port(&name, &argv)?;
+                .ok_or_else(|| anyhow!("[{name}].model must not be empty"))?;
 
-            let api_key = values
-                .get("api_key")
+            let host = values
+                .get("host")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(default_host);
+
+            let port = parse_port(&values, "port", &name)?.unwrap_or_else(default_profile_port);
+
+            let backend = values
+                .get("backend")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
+
+            let slots = match values
+                .get("slots")
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
+                Some(value) => Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|err| anyhow!("invalid value for [{name}].slots: {err}"))?,
+                ),
+                None => None,
+            };
+
+            let web = parse_port(&values, "web", &name)?;
 
             Ok((
                 name.clone(),
@@ -321,8 +396,9 @@ fn parse_llm_profiles(
                     model,
                     host,
                     port,
-                    llamacpp,
-                    api_key,
+                    backend,
+                    slots,
+                    web,
                 },
             ))
         })
@@ -339,17 +415,109 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "[orangu-coordinator]\n\n[main]\nrole = all\nllamacpp = llama-server -hf org/gemma --port 8100\n"
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[main]\nrole = all\nmodel = org/gemma\nport = 8100\n"
         )
         .unwrap();
 
         let conf = load_coordinator_configuration(file.path()).unwrap();
         assert_eq!(conf.listen_addr(), "127.0.0.1:9000");
+        assert_eq!(conf.models, PathBuf::from("/srv/models"));
         assert_eq!(conf.startup_timeout_seconds, 180);
         assert_eq!(conf.default_entry, "main");
         assert_eq!(conf.llms["main"].host, "127.0.0.1");
         assert_eq!(conf.llms["main"].origin(), "http://127.0.0.1:8100");
         assert_eq!(conf.llms["main"].model, "org/gemma");
+        assert_eq!(conf.llms["main"].backend, None);
+        assert_eq!(conf.llms["main"].slots, None);
+        assert_eq!(conf.llms["main"].web, None);
+    }
+
+    /// Every optional key in both the `[orangu-coordinator]` client section
+    /// and a profile section, left out entirely — not just one at a time
+    /// like the other tests in this module each check, but all of them
+    /// simultaneously — still loads and falls back to every documented
+    /// default, with nothing left unset that shouldn't be.
+    #[test]
+    fn every_optional_key_defaults_when_the_whole_file_omits_them() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[main]\nmodel = org/gemma\n"
+        )
+        .unwrap();
+
+        let conf = load_coordinator_configuration(file.path()).unwrap();
+        assert_eq!(conf.host, "127.0.0.1");
+        assert_eq!(conf.port, 9000);
+        assert_eq!(conf.startup_timeout_seconds, 180);
+        assert_eq!(conf.max_body_bytes, 64 * 1024 * 1024);
+        assert_eq!(conf.idle_timeout_seconds, None);
+        assert_eq!(conf.shutdown_token, None);
+
+        let main = &conf.llms["main"];
+        assert_eq!(main.role, "all");
+        assert_eq!(main.host, "127.0.0.1");
+        assert_eq!(main.port, 8100);
+        assert_eq!(main.backend, None);
+        assert_eq!(main.slots, None);
+        assert_eq!(main.web, None);
+    }
+
+    /// A key that's *present* but left blank (`key = ` with nothing after
+    /// the `=`, as opposed to the key being absent entirely) must fall back
+    /// to the exact same default an absent key would — not surface as an
+    /// "invalid digit found in string" parse error. `parse_ini_sections`
+    /// stores a blank value the same as any other, so this has to be
+    /// handled explicitly (see `parse_port`'s own doc comment) — covers
+    /// every numeric key across both sections, since `port`/`slots`/
+    /// `startup_timeout`/`max_body_bytes`/`idle_timeout` each had their own
+    /// separate parsing before being unified under the same guard.
+    #[test]
+    fn a_blank_but_present_value_defaults_the_same_as_an_absent_key() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu-coordinator]\nmodels = /srv/models\nport = \nstartup_timeout = \nmax_body_bytes = \nidle_timeout = \n\n[main]\nrole = all\nmodel = org/gemma\nport = \nslots = \n"
+        )
+        .unwrap();
+
+        let conf = load_coordinator_configuration(file.path()).unwrap();
+        assert_eq!(conf.port, 9000);
+        assert_eq!(conf.startup_timeout_seconds, 180);
+        assert_eq!(conf.max_body_bytes, 64 * 1024 * 1024);
+        assert_eq!(conf.idle_timeout_seconds, None);
+        assert_eq!(conf.llms["main"].port, 8100);
+        assert_eq!(conf.llms["main"].slots, None);
+    }
+
+    #[test]
+    fn requires_models_key() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu-coordinator]\n\n[main]\nrole = all\nmodel = org/gemma\nport = 8100\n"
+        )
+        .unwrap();
+
+        let err = load_coordinator_configuration(file.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("models"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn expands_leading_tilde_in_models_path() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu-coordinator]\nmodels = ~/models\n\n[main]\nrole = all\nmodel = org/gemma\nport = 8100\n"
+        )
+        .unwrap();
+
+        let conf = load_coordinator_configuration(file.path()).unwrap();
+        let home = home::home_dir().unwrap();
+        assert_eq!(conf.models, home.join("models"));
     }
 
     #[test]
@@ -357,7 +525,7 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "[orangu-coordinator]\n\n[explorer]\nrole = explorer\nllamacpp = llama-server -hf org/qwen --port 8200\n"
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[explorer]\nrole = explorer\nmodel = org/qwen\nport = 8200\n"
         )
         .unwrap();
 
@@ -373,13 +541,29 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "[orangu-coordinator]\n\n[main]\nllamacpp = llama-server -hf org/gemma --port 8100\n"
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[main]\nmodel = org/gemma\nport = 8100\n"
         )
         .unwrap();
 
         let conf = load_coordinator_configuration(file.path()).unwrap();
         assert_eq!(conf.llms["main"].role, "all");
         assert_eq!(conf.default_entry, "main");
+    }
+
+    #[test]
+    fn rejects_an_unknown_role() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[main]\nrole = all\nmodel = org/gemma\nport = 8100\n\n[weird]\nrole = summarizer\nmodel = org/qwen\nport = 8200\n"
+        )
+        .unwrap();
+
+        let err = load_coordinator_configuration(file.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("not a known role"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
@@ -390,7 +574,7 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "[orangu-coordinator]\n\n[a]\nrole = all\nllamacpp = llama-server -hf org/gemma --port 8100\n\n[b]\nrole = explorer\nllamacpp = llama-server -hf org/gemma --port 8200\n"
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[a]\nrole = all\nmodel = org/gemma\nport = 8100\n\n[b]\nrole = explorer\nmodel = org/gemma\nport = 8200\n"
         )
         .unwrap();
 
@@ -400,73 +584,86 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_llamacpp_command() {
+    fn rejects_a_profile_without_a_model() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "[orangu-coordinator]\n\n[main]\nrole = all\nllamacpp = llama-server --chat-template-kwargs '{{\"unterminated\n"
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[main]\nrole = all\nport = 8100\n"
         )
         .unwrap();
 
         let err = load_coordinator_configuration(file.path()).unwrap_err();
         assert!(
-            err.to_string().contains("llamacpp"),
+            err.to_string().contains("model"),
             "unexpected error: {err:#}"
         );
     }
 
     #[test]
-    fn rejects_llamacpp_command_without_a_model() {
+    fn port_defaults_to_8100_when_a_profile_omits_it() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "[orangu-coordinator]\n\n[main]\nrole = all\nllamacpp = llama-server --port 8100\n"
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[main]\nrole = all\nmodel = org/gemma\n"
+        )
+        .unwrap();
+
+        let conf = load_coordinator_configuration(file.path()).unwrap();
+        assert_eq!(conf.llms["main"].port, 8100);
+    }
+
+    /// Two profiles sharing the same default `host`/`port` is fine, not an
+    /// error at load time — see `CoordinatorLlmEntry::port`'s own doc
+    /// comment for why (only one `orangu-server` is ever active, and
+    /// swapping always fully stops the old one first).
+    #[test]
+    fn two_profiles_may_share_the_default_host_and_port() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[main]\nrole = all\nmodel = org/gemma\n\n[explorer]\nrole = explorer\nmodel = org/qwen\n"
+        )
+        .unwrap();
+
+        let conf = load_coordinator_configuration(file.path()).unwrap();
+        assert_eq!(conf.llms["main"].origin(), conf.llms["explorer"].origin());
+    }
+
+    #[test]
+    fn rejects_an_invalid_port() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[main]\nrole = all\nmodel = org/gemma\nport = not-a-port\n"
         )
         .unwrap();
 
         let err = load_coordinator_configuration(file.path()).unwrap_err();
         assert!(
-            err.to_string().contains("must specify a model"),
+            err.to_string().contains("invalid value for [main].port"),
             "unexpected error: {err:#}"
         );
     }
 
     #[test]
-    fn rejects_invalid_port_in_llamacpp() {
+    fn host_defaults_when_a_profile_omits_it() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "[orangu-coordinator]\n\n[main]\nrole = all\nllamacpp = llama-server -hf org/gemma --port not-a-port\n"
-        )
-        .unwrap();
-
-        let err = load_coordinator_configuration(file.path()).unwrap_err();
-        assert!(
-            err.to_string().contains("invalid --port"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[test]
-    fn host_and_port_default_when_llamacpp_omits_them() {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            "[orangu-coordinator]\n\n[main]\nrole = all\nllamacpp = llama-server -hf org/gemma\n"
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[main]\nrole = all\nmodel = org/gemma\nport = 8100\n"
         )
         .unwrap();
 
         let conf = load_coordinator_configuration(file.path()).unwrap();
         assert_eq!(conf.llms["main"].host, "127.0.0.1");
-        assert_eq!(conf.llms["main"].port, 8080);
     }
 
     #[test]
-    fn parses_multiple_roles_with_distinct_hosts() {
+    fn parses_multiple_roles_with_distinct_hosts_and_optional_overrides() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "[orangu-coordinator]\nhost = 0.0.0.0\nport = 9100\nstartup_timeout = 30\n\n[main]\nrole = all\nllamacpp = llama-server -hf org/gemma --port 8100\n\n[explorer]\nrole = explorer\nllamacpp = llama-server -hf org/qwen --host 192.168.1.20 --port 8200\napi_key = secret\n"
+            "[orangu-coordinator]\nhost = 0.0.0.0\nport = 9100\nmodels = /srv/models\nstartup_timeout = 30\n\n[main]\nrole = all\nmodel = org/gemma\nport = 8100\n\n[explorer]\nrole = explorer\nmodel = org/qwen\nhost = 192.168.1.20\nport = 8200\nbackend = vulkan\nslots = 4\nweb = 8281\n"
         )
         .unwrap();
 
@@ -477,7 +674,9 @@ mod tests {
         assert_eq!(conf.llms["main"].host, "127.0.0.1");
         assert_eq!(conf.llms["explorer"].origin(), "http://192.168.1.20:8200");
         assert_eq!(conf.llms["explorer"].model, "org/qwen");
-        assert_eq!(conf.llms["explorer"].api_key.as_deref(), Some("secret"));
+        assert_eq!(conf.llms["explorer"].backend.as_deref(), Some("vulkan"));
+        assert_eq!(conf.llms["explorer"].slots, Some(4));
+        assert_eq!(conf.llms["explorer"].web, Some(8281));
     }
 
     #[test]
@@ -485,7 +684,7 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "[orangu-coordinator]\n\n[main]\nrole = all\nllamacpp = llama-server -hf org/gemma --port 8100\n\n[explorer]\nrole = explorer\nllamacpp = llama-server -hf org/qwen --port 8200\n"
+            "[orangu-coordinator]\nmodels = /srv/models\n\n[main]\nrole = all\nmodel = org/gemma\nport = 8100\n\n[explorer]\nrole = explorer\nmodel = org/qwen\nport = 8200\n"
         )
         .unwrap();
 
@@ -503,28 +702,12 @@ mod tests {
     }
 
     #[test]
-    fn extracts_model_id_from_hf_repo_and_model_path_flags() {
-        assert_eq!(
-            extract_model_id(
-                &shell_words::split("llama-server -hf org/gemma --port 8100").unwrap()
-            ),
-            Some("org/gemma".to_string())
-        );
-        assert_eq!(
-            extract_model_id(
-                &shell_words::split("llama-server --hf-repo=org/gemma --port 8100").unwrap()
-            ),
-            Some("org/gemma".to_string())
-        );
-        assert_eq!(
-            extract_model_id(
-                &shell_words::split("llama-server -m /models/gemma.gguf --port 8100").unwrap()
-            ),
-            Some("/models/gemma.gguf".to_string())
-        );
-        assert_eq!(
-            extract_model_id(&shell_words::split("llama-server --port 8100").unwrap()),
-            None
-        );
+    fn role_server_flag_bridges_the_embeddings_plural_vs_embedding_singular_mismatch() {
+        assert_eq!(role_server_flag("all"), Some("--all"));
+        assert_eq!(role_server_flag("code"), Some("--code"));
+        assert_eq!(role_server_flag("review"), Some("--review"));
+        assert_eq!(role_server_flag("explorer"), Some("--explorer"));
+        assert_eq!(role_server_flag("embeddings"), Some("--embedding"));
+        assert_eq!(role_server_flag("nonexistent"), None);
     }
 }
