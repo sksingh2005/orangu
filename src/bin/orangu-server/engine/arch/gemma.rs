@@ -433,6 +433,31 @@ impl GemmaModel {
     /// `token` itself is still needed separately for the per-layer-
     /// embedding gather, which does its own independent lookup into a
     /// *different* embedding table.
+    /// How many `queue.submit()` calls one decode step's layer loop is
+    /// split across (`ORANGU_DECODE_CHUNKS`, default 7; see
+    /// `record_one_sequence_decode` and `SERVER_ROADMAP.md` Step 1). Read
+    /// once and cached. Clamped to `1..=n_layers` — `1` is the historical
+    /// single-submit behaviour, and no more than one submit per layer is
+    /// meaningful. A malformed value falls back to the default rather than
+    /// erroring a live decode. The default is the measured elbow on real
+    /// `E2B`/`RX 5500M`: throughput rises steeply from `1` (14.4 tok/s) to
+    /// `7` (18.8 tok/s) and only marginally past it (`35`, one submit per
+    /// layer, 19.4 tok/s), while each extra submit adds a little GPU-side
+    /// barrier overhead — `7` captures ~88% of the win with far fewer
+    /// submissions.
+    fn decode_submit_chunks(n_layers: usize) -> usize {
+        const DEFAULT_CHUNKS: usize = 7;
+        static CHUNKS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let requested = *CHUNKS.get_or_init(|| {
+            std::env::var("ORANGU_DECODE_CHUNKS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n >= 1)
+                .unwrap_or(DEFAULT_CHUNKS)
+        });
+        requested.clamp(1, n_layers.max(1))
+    }
+
     fn record_decode_forward(
         &self,
         vulkan: &VulkanBackend,
@@ -549,6 +574,20 @@ impl GemmaModel {
             encoder.write_timestamp(t, 1);
         }
 
+        // Number of `queue.submit()` calls the layer loop is split across
+        // this decode step (`ORANGU_DECODE_CHUNKS`, default 7). `1` restores
+        // the historical single-submit-per-token behaviour; `> 1` submits
+        // the first `chunks - 1` groups of layers as soon as they're
+        // recorded (`VulkanBackend::submit_intermediate`), so the GPU starts
+        // executing early chunks while the CPU is still recording and
+        // paying `wgpu-core`'s per-submission validation cost for the later
+        // ones — overlapping the ~17ms/token CPU submission cost with GPU
+        // execution instead of serialising it in front of one end-of-token
+        // submit. See `SERVER_ROADMAP.md` Step 1 for the measurement.
+        let n_layers = self.layers.len();
+        let chunks = Self::decode_submit_chunks(n_layers);
+        let layers_per_chunk = n_layers.div_ceil(chunks);
+
         let mut prev_buf: Option<(wgpu::Buffer, u64)> = None;
         for (il, layer) in self.layers.iter().enumerate() {
             let head_dim = layer.head_dim;
@@ -640,6 +679,23 @@ impl GemmaModel {
             prev_buf = Some(out);
             if let Some(t) = timestamps {
                 encoder.write_timestamp(t, (2 + il) as u32);
+            }
+            // Chunk boundary: submit everything recorded so far (including
+            // this layer's end-of-layer timestamp, which is why the flush
+            // follows the `write_timestamp` above) and continue recording
+            // the next chunk into a fresh encoder. The already-submitted
+            // work is now executing on the GPU. Skipped for the final layer
+            // — its chunk carries `output_norm`/`lm_head` (and, on the
+            // sampling path, argmax) and is returned unsubmitted so the
+            // caller owns the terminal submit + readback. Timestamp writes
+            // span the fresh encoders and are resolved once, on the final
+            // one (`finish_timestamps`); every intermediate encoder is
+            // submitted before that resolve executes, so the whole query set
+            // is populated by then.
+            if chunks > 1 && il + 1 < n_layers && (il + 1) % layers_per_chunk == 0 {
+                let finished =
+                    std::mem::replace(encoder, vulkan.new_encoder("orangu-server decode chunk"));
+                vulkan.submit_intermediate(finished);
             }
         }
         let (last_buf, last_offset) =

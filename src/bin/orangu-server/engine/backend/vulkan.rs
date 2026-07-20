@@ -5505,6 +5505,30 @@ impl VulkanBackend {
         (g.output_buffer.clone(), g.output_offset)
     }
 
+    /// Finishes and submits `encoder` **without** any readback or `poll`,
+    /// bumping the submission counter — the intermediate-chunk counterpart
+    /// to `submit_and_readback_for`. `GemmaModel::record_one_sequence_
+    /// decode` calls this at each layer-chunk boundary when
+    /// `ORANGU_DECODE_CHUNKS > 1`: submitting the first `K-1` chunks as soon
+    /// as they're recorded lets the GPU start executing them while the CPU
+    /// is still recording (and paying `wgpu-core`'s per-submission
+    /// validation cost for) the later chunks — overlapping the ~17ms/token
+    /// CPU submission cost `SERVER_ROADMAP.md`'s Track A root-caused with
+    /// GPU execution instead of serialising it in front of a single
+    /// end-of-token `queue.submit()`. Correctness across the chunk boundary
+    /// is Vulkan's own same-queue submission-order guarantee plus `wgpu`'s
+    /// cross-submission hazard tracking (the later chunk's `x` input is the
+    /// earlier chunk's last layer's persistent arena output buffer); the
+    /// final chunk is *not* submitted here — it's returned to the caller
+    /// (`record_decode_forward`) so the existing `submit_and_readback_for`/
+    /// `submit_and_readback_u32`/argmax tail, and its `ORANGU_CPU_TIMESTAMPS`
+    /// instrumentation, is unchanged.
+    pub fn submit_intermediate(&self, encoder: wgpu::CommandEncoder) {
+        self.queue.submit(Some(encoder.finish()));
+        self.submission_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Finishes and submits `encoder`, then reads back `w`'s own
     /// `record_full_matmul` output — `w`'s `CachedOpResources` entry
     /// (`Self::op_entry_for`) already has a `readback_buffer` sized to
