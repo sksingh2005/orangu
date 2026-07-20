@@ -220,10 +220,20 @@
   // `assistantEl.innerHTML = payload.html` reassignments during streaming
   // and never gets treated as message content (copy/paste, markdown
   // re-render, ...).
-  function addTimingFooter(assistantEl, ms, rawContent) {
+  function addTimingFooter(assistantEl, ms, rawContent, tpsText) {
     if (ms == null) return;
     const footer = document.createElement("div");
     footer.className = "gen-time";
+
+    // Left-aligned tokens-per-second, kept from the live readout so the
+    // final footer shows the same figure the counter settled on (only
+    // freshly streamed replies have it — history reloads pass nothing).
+    if (tpsText) {
+      const rate = document.createElement("span");
+      rate.className = "gen-tps";
+      rate.textContent = tpsText;
+      footer.appendChild(rate);
+    }
 
     const time = document.createElement("span");
     time.textContent = formatDuration(ms);
@@ -398,6 +408,22 @@
     const controller = new AbortController();
     state.abortController = controller;
 
+    // Live tokens-per-second for this answer's footer. orangu-server emits
+    // one SSE "token" event per generated token, so counting those events
+    // is the token count with no extra server plumbing. The clock starts on
+    // the first token (not on send, which would fold prompt-processing
+    // latency into the rate) and that first token is excluded from the
+    // count, so the figure is steady-state inter-token throughput.
+    let tpsStarted = false;
+    let tpsStartMs = 0;
+    let tpsCount = 0;
+    let liveFooter = null;
+    const tpsText = () => {
+      if (!tpsStarted || tpsCount === 0) return null;
+      const elapsed = (performance.now() - tpsStartMs) / 1000;
+      return elapsed > 0 ? `${(tpsCount / elapsed).toFixed(1)} t/s` : null;
+    };
+
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(state.sessionId)}/messages`, {
         method: "POST",
@@ -428,6 +454,31 @@
             assistantEl.innerHTML = payload.html;
             pinCodeBlocksToLatest(assistantEl);
             renderMathIn(assistantEl);
+            if (payload.type === "token") {
+              if (!tpsStarted) {
+                tpsStarted = true;
+                tpsStartMs = performance.now();
+              } else {
+                tpsCount += 1;
+              }
+              // `innerHTML = payload.html` above wipes the message's
+              // children every token, so the live footer can't be attached
+              // just once — build it lazily, keep the reference, and
+              // re-append it after each re-render (same reason the final
+              // footer waits for "done"). Left-aligned via `.gen-tps`.
+              const text = tpsText();
+              if (text) {
+                if (!liveFooter) {
+                  liveFooter = document.createElement("div");
+                  liveFooter.className = "gen-time";
+                  const rate = document.createElement("span");
+                  rate.className = "gen-tps";
+                  liveFooter.appendChild(rate);
+                }
+                liveFooter.firstChild.textContent = text;
+                assistantEl.appendChild(liveFooter);
+              }
+            }
             if (payload.type === "done") {
               if (payload.truncated) {
                 const notice = document.createElement("p");
@@ -435,7 +486,7 @@
                 notice.textContent = "⚠️ Response was cut off at the token limit.";
                 assistantEl.appendChild(notice);
               }
-              addTimingFooter(assistantEl, payload.generation_ms, payload.content);
+              addTimingFooter(assistantEl, payload.generation_ms, payload.content, tpsText());
             }
             transcript.scrollTop = transcript.scrollHeight;
           } else if (payload.type === "error") {
