@@ -92,18 +92,25 @@ jobs:
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
-          BINARY=target/${{ matrix.target }}/release/orangu
+          BINDIR=target/${{ matrix.target }}/release
           ARCHIVE=orangu-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-          tar -czf "$ARCHIVE" -C "$(dirname "$BINARY")" "$(basename "$BINARY")"
+          # The whole stack: the editor plus the coordinator and inference server.
+          tar -czf "$ARCHIVE" -C "$BINDIR" orangu orangu-coordinator orangu-server
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       - name: Package (Windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $binary = "target\${{ matrix.target }}\release\orangu.exe"
+          $bindir = "target\${{ matrix.target }}\release"
           $archive = "orangu-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          Compress-Archive -Path $binary -DestinationPath $archive
+          # The whole stack: the editor plus the coordinator and inference server.
+          $binaries = @(
+            "$bindir\orangu.exe",
+            "$bindir\orangu-coordinator.exe",
+            "$bindir\orangu-server.exe"
+          )
+          Compress-Archive -Path $binaries -DestinationPath $archive
           "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload to release
