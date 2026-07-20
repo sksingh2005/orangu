@@ -1322,6 +1322,27 @@ fn reduce_n_rows() -> usize {
     })
 }
 
+/// Workgroup size (thread count) for the default tree-reduce RMSNorm /
+/// RMSNorm+add kernels (`ORANGU_NORM_WG`, default 128; must be a power of
+/// two in `64..=256`). These run one `dispatch_workgroups(1,1,1)` workgroup
+/// over the whole `n_embd` row, so they're occupancy-starved — using more
+/// threads shortens each thread's grid-stride loop and lights up more of
+/// one WGP's SIMDs. Item 8 measured that *halving* to 32 doubled the time
+/// (the kernel is compute/load-bound, not launch-bound), so raising it is
+/// the lever; re-swept against `total_gpu` in `SERVER_ROADMAP.md` Step 3.
+/// A malformed or out-of-range value falls back to the default.
+fn norm_wg() -> usize {
+    const NORM_WG_DEFAULT: usize = 128;
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("ORANGU_NORM_WG")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| matches!(n, 64 | 128 | 256))
+            .unwrap_or(NORM_WG_DEFAULT)
+    })
+}
+
 /// How many workgroups split-k attention
 /// (`vulkan_shaders::ATTENTION_SPLIT_SHADER_TEMPLATE`) splits each query
 /// head's KV-position range across, instead of the un-split kernel's one
@@ -1692,11 +1713,11 @@ impl VulkanBackend {
             build_elem_pipeline(&elem4_pipeline_layout, vulkan_shaders::shader_source_mul());
         let rmsnorm_pipeline = build_elem_pipeline(
             &elem4_pipeline_layout,
-            vulkan_shaders::shader_source_rmsnorm(subgroup_reduce),
+            vulkan_shaders::shader_source_rmsnorm(subgroup_reduce, norm_wg()),
         );
         let rmsnorm_add_pipeline = build_elem_pipeline(
             &elem5_pipeline_layout,
-            vulkan_shaders::shader_source_rmsnorm_add(subgroup_reduce),
+            vulkan_shaders::shader_source_rmsnorm_add(subgroup_reduce, norm_wg()),
         );
         let gelu_pipeline =
             build_elem_pipeline(&elem3_pipeline_layout, vulkan_shaders::shader_source_gelu());
@@ -7023,11 +7044,11 @@ mod tests {
         let variants: [(&str, String); 3] = [
             (
                 "default (wg64, tree-reduce)",
-                vulkan_shaders::shader_source_rmsnorm(false),
+                vulkan_shaders::shader_source_rmsnorm(false, 64),
             ),
             (
                 "subgroup wg64 (existing, previously measured as a regression)",
-                vulkan_shaders::shader_source_rmsnorm(true),
+                vulkan_shaders::shader_source_rmsnorm(true, 64),
             ),
             (
                 "subgroup wg32 (new candidate)",

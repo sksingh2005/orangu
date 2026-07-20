@@ -2130,15 +2130,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// shape as `MAIN_REDUCE_SUFFIX`'s dot-product reduction), then every
 /// thread rescales its own elements by the shared result — line-for-line
 /// the same formula as `engine::tensor::rmsnorm_inplace`.
-const RMSNORM_SHADER_BODY: &str = r#"
+// Tree-reduce RMSNorm body, parameterized by workgroup size via `%WG%`
+// (thread count / grid-stride) and `%HALF%` (the reduction's initial
+// stride, `%WG% / 2`). A single workgroup grid-strides the whole `em.len`
+// row, so more threads means fewer sequential iterations per thread and
+// more of one WGP's SIMDs busy on this otherwise occupancy-starved
+// `dispatch_workgroups(1,1,1)` norm — see `VulkanBackend::norm_wg` and
+// `SERVER_ROADMAP.md` Step 3. `%WG%` must be a power of two.
+const RMSNORM_SHADER_BODY_TEMPLATE: &str = r#"
 @group(0) @binding(0) var<storage, read> x: array<f32>;
 @group(0) @binding(1) var<storage, read> weight: array<f32>;
 @group(0) @binding(2) var<storage, read_write> y: array<f32>;
 @group(0) @binding(3) var<uniform> em: ElemMeta;
 
-var<workgroup> partial_sums: array<f32, 64>;
+var<workgroup> partial_sums: array<f32, %WG%>;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(%WG%)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     let local = lid.x;
     var partial: f32 = 0.0;
@@ -2149,11 +2156,11 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
         }
         let v = x[k];
         partial = partial + v * v;
-        k = k + 64u;
+        k = k + %WG%u;
     }
     partial_sums[local] = partial;
     workgroupBarrier();
-    var stride: u32 = 32u;
+    var stride: u32 = %HALF%u;
     loop {
         if (stride == 0u) {
             break;
@@ -2172,10 +2179,18 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
             break;
         }
         y[k] = x[k] * scale * weight[k];
-        k = k + 64u;
+        k = k + %WG%u;
     }
 }
 "#;
+
+/// Substitutes `%WG%`/`%HALF%` in a tree-reduce norm body template for a
+/// concrete (power-of-two) workgroup size.
+fn norm_body_for_wg(template: &str, wg: usize) -> String {
+    template
+        .replace("%WG%", &wg.to_string())
+        .replace("%HALF%", &(wg / 2).to_string())
+}
 
 /// `RMSNORM_SHADER_BODY` with `subgroupAdd` replacing the 6-round
 /// tree — see `reduce_combine_block`'s doc comment for the general-
@@ -2257,13 +2272,17 @@ pub fn shader_source_scale() -> String {
     format!("{ELEM_META}\n{SCALE_SHADER_BODY}")
 }
 
-pub fn shader_source_rmsnorm(subgroup: bool) -> String {
-    let body = if subgroup {
-        RMSNORM_SHADER_BODY_SUBGROUP
+pub fn shader_source_rmsnorm(subgroup: bool, wg: usize) -> String {
+    if subgroup {
+        // The subgroup variant's own reduction is fixed to a 64-thread
+        // workgroup; `wg` only tunes the default tree-reduce path.
+        format!("{ELEM_META}\n{RMSNORM_SHADER_BODY_SUBGROUP}")
     } else {
-        RMSNORM_SHADER_BODY
-    };
-    format!("{ELEM_META}\n{body}")
+        format!(
+            "{ELEM_META}\n{}",
+            norm_body_for_wg(RMSNORM_SHADER_BODY_TEMPLATE, wg)
+        )
+    }
 }
 
 /// `RMSNORM_SHADER_BODY_SUBGROUP` at a caller-chosen workgroup width —
@@ -2431,16 +2450,18 @@ fn main(
 /// is — used when `subgroupAdd` isn't available. See that constant's own
 /// doc comment for why this fusion is safe and what it deliberately
 /// doesn't attempt.
-const RMSNORM_ADD_SHADER_BODY: &str = r#"
+// Tree-reduce RMSNorm+residual-add body — see `RMSNORM_SHADER_BODY_TEMPLATE`
+// for the `%WG%`/`%HALF%` workgroup-size parameterization.
+const RMSNORM_ADD_SHADER_BODY_TEMPLATE: &str = r#"
 @group(0) @binding(0) var<storage, read> x: array<f32>;
 @group(0) @binding(1) var<storage, read> weight: array<f32>;
 @group(0) @binding(2) var<storage, read> residual: array<f32>;
 @group(0) @binding(3) var<storage, read_write> y: array<f32>;
 @group(0) @binding(4) var<uniform> em: ElemMeta;
 
-var<workgroup> partial_sums: array<f32, 64>;
+var<workgroup> partial_sums: array<f32, %WG%>;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(%WG%)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     let local = lid.x;
     var partial: f32 = 0.0;
@@ -2451,11 +2472,11 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
         }
         let v = x[k];
         partial = partial + v * v;
-        k = k + 64u;
+        k = k + %WG%u;
     }
     partial_sums[local] = partial;
     workgroupBarrier();
-    var stride: u32 = 32u;
+    var stride: u32 = %HALF%u;
     loop {
         if (stride == 0u) {
             break;
@@ -2474,7 +2495,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
             break;
         }
         y[k] = x[k] * scale * weight[k] + residual[k];
-        k = k + 64u;
+        k = k + %WG%u;
     }
 }
 "#;
@@ -2484,13 +2505,17 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
 /// at both of this codebase's two call sites (`wo`'s and `ffn_down`'s own
 /// post-matmul norm+add, `VulkanBackend::build_fused_resources`), removing
 /// one dispatch (`add_pipeline`'s own) from each.
-pub fn shader_source_rmsnorm_add(subgroup: bool) -> String {
-    let body = if subgroup {
-        RMSNORM_ADD_SHADER_BODY_SUBGROUP
+pub fn shader_source_rmsnorm_add(subgroup: bool, wg: usize) -> String {
+    if subgroup {
+        // As in `shader_source_rmsnorm`, the subgroup variant stays at its
+        // fixed 64-thread workgroup; `wg` tunes the default tree path only.
+        format!("{ELEM_META}\n{RMSNORM_ADD_SHADER_BODY_SUBGROUP}")
     } else {
-        RMSNORM_ADD_SHADER_BODY
-    };
-    format!("{ELEM_META}\n{body}")
+        format!(
+            "{ELEM_META}\n{}",
+            norm_body_for_wg(RMSNORM_ADD_SHADER_BODY_TEMPLATE, wg)
+        )
+    }
 }
 
 /// GPU-resident causal attention for a *single* query token (decode,
