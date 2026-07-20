@@ -46,23 +46,7 @@ orangu is the lean, private, Git-centric coding companion for the terminal — b
 
 Most local-AI setups are a patchwork: one tool for the editor, a separate engine for inference, and glue to manage which model is loaded. **orangu is the whole stack in one project**, three cooperating programs written end to end in Rust:
 
-```
-                 you
-                  │
-        ┌─────────▼──────────┐   orangu — the coding environment: terminal UI,
-        │       orangu       │   local + Git/forge tools, code review, knowledge
-        └─────────┬──────────┘   graph, semantic search, compression
-                  │  OpenAI-compatible HTTP
-        ┌─────────▼──────────┐   orangu-coordinator — optional on-demand model
-        │ orangu-coordinator │   manager: starts/stops the server and swaps the
-        └─────────┬──────────┘   model per role (review, chat, embeddings)
-                  │  OpenAI-compatible HTTP
-        ┌─────────▼──────────┐   orangu-server — native pure-Rust GGUF engine:
-        │    orangu-server   │   loading, tokenization, the transformer forward
-        └─────────┬──────────┘   pass, sampling, scheduling, GGUF inventory
-                  │
-     CPU · Vulkan · CUDA · ROCm · OpenCL
-```
+![The orangu stack: orangu → orangu-coordinator → orangu-server](doc/images/orangu-architecture.png)
 
 - **`orangu`** — the workspace-aware coding environment you drive: the terminal UI, local and Git/forge tools, `/review` and `/auto_review`, the knowledge graph, semantic `/search`, and the context-compression engine.
 - **`orangu-coordinator`** — an optional companion HTTP proxy that starts and stops `orangu-server` on demand and swaps to whichever model each request needs, so a single-GPU machine can use a different model per role without ever running more than one server. Skip it if you have the VRAM to keep every model resident.

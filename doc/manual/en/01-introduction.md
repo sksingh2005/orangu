@@ -33,27 +33,11 @@ speaks the OpenAI-compatible API. See *A complete stack* below.
 ## A complete stack
 
 Most local-AI setups are a patchwork: one tool for the editor, a separate engine
-a separate engine for inference, and glue to manage which model is loaded.
-orangu is the whole stack in one project — three cooperating programs, each
-speaking the OpenAI-compatible API to the next:
+for inference, and glue to manage which model is loaded. orangu is the whole
+stack in one project — three cooperating programs, each speaking the
+OpenAI-compatible API to the next:
 
-```
-                 you
-                  │
-        ┌─────────▼──────────┐   orangu — the coding environment: terminal UI,
-        │       orangu       │   local + Git/forge tools, code review, knowledge
-        └─────────┬──────────┘   graph, semantic search, compression
-                  │  OpenAI-compatible HTTP
-        ┌─────────▼──────────┐   orangu-coordinator — optional on-demand model
-        │ orangu-coordinator │   manager: starts/stops the server and swaps the
-        └─────────┬──────────┘   model per role (review, chat, embeddings)
-                  │  OpenAI-compatible HTTP
-        ┌─────────▼──────────┐   orangu-server — native pure-Rust GGUF engine:
-        │    orangu-server   │   loading, tokenization, the transformer forward
-        └─────────┬──────────┘   pass, sampling, scheduling, GGUF inventory
-                  │
-     CPU · Vulkan · CUDA · ROCm · OpenCL
-```
+![The orangu stack: orangu → orangu-coordinator → orangu-server](images/orangu-architecture.png)
 
 * **`orangu`** — the workspace-aware coding environment you drive (this manual's
   main subject): the terminal UI, local and Git/forge tools, `/review` and
