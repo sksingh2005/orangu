@@ -56,6 +56,7 @@ echo "Generating HTML manual: $HTML_OUTPUT"
   pandoc \
     -o "$HTML_OUTPUT" \
     -s \
+    --embed-resources \
     -f markdown-smart \
     --resource-path="$RESOURCE_PATH" \
     --css "$SCRIPT_DIR/manual/manual.css" \

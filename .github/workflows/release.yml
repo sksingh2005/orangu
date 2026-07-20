@@ -32,7 +32,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.target }}
-    needs: create-release
+    needs: [create-release, manual]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -88,14 +88,27 @@ jobs:
             cargo build --release --target ${{ matrix.target }}
           fi
 
+      # The manual (PDF + HTML), built once by the `manual` job, to bundle into
+      # every binary archive alongside the three executables.
+      - name: Download manual
+        uses: actions/download-artifact@v4
+        with:
+          name: manual
+          path: manual-dist
+
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           BINDIR=target/${{ matrix.target }}/release
           ARCHIVE=orangu-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-          # The whole stack: the editor plus the coordinator and inference server.
-          tar -czf "$ARCHIVE" -C "$BINDIR" orangu orangu-coordinator orangu-server
+          # Stage the manual next to the binaries so the archive stays flat
+          # (installers expect the executables at the archive root).
+          cp manual-dist/orangu-en.pdf manual-dist/orangu-en.html "$BINDIR"/
+          # The whole stack: the editor plus the coordinator and inference
+          # server, and the manual in both formats.
+          tar -czf "$ARCHIVE" -C "$BINDIR" \
+            orangu orangu-coordinator orangu-server orangu-en.pdf orangu-en.html
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       - name: Package (Windows)
@@ -104,13 +117,17 @@ jobs:
         run: |
           $bindir = "target\${{ matrix.target }}\release"
           $archive = "orangu-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          # The whole stack: the editor plus the coordinator and inference server.
-          $binaries = @(
+          Copy-Item manual-dist\orangu-en.pdf,manual-dist\orangu-en.html $bindir
+          # The whole stack: the editor plus the coordinator and inference
+          # server, and the manual in both formats.
+          $items = @(
             "$bindir\orangu.exe",
             "$bindir\orangu-coordinator.exe",
-            "$bindir\orangu-server.exe"
+            "$bindir\orangu-server.exe",
+            "$bindir\orangu-en.pdf",
+            "$bindir\orangu-en.html"
           )
-          Compress-Archive -Path $binaries -DestinationPath $archive
+          Compress-Archive -Path $items -DestinationPath $archive
           "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload to release
@@ -151,6 +168,17 @@ jobs:
 
       - name: Build manual
         run: bash doc/build_manual.sh
+
+      # Share the built manual with the per-target build jobs so each binary
+      # archive can bundle it, without re-installing pandoc/TeX Live on every
+      # matrix OS.
+      - name: Upload manual artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual
+          path: |
+            target/doc/orangu-en.pdf
+            target/doc/orangu-en.html
 
       - name: Upload to release
         env:
