@@ -443,7 +443,15 @@ impl GemmaModel {
     /// little per-submission barrier overhead, so the default sits below one
     /// submit per layer.
     fn decode_submit_chunks(n_layers: usize) -> usize {
-        const DEFAULT_CHUNKS: usize = 7;
+        // The CPU↔GPU submission overlap this buys saturates early: a pinned-
+        // 1700 MHz `orangu-bench --curve` sweep on E2B (Q4_K_M) measured
+        // chunks 1→2→3→7 at ~23.5 → 28.4 → 30.3 → 29.9 tok/s — flat from 3
+        // upward. `3` sits at that knee, so it keeps the full overlap while
+        // paying only 3 `queue.submit()` calls (and allocating only 3 command
+        // encoders) per token instead of 7 — cutting the per-token
+        // `vkQueueSubmit` *and* `radv_BeginCommandBuffer`-`memset` cost, both
+        // of which scale with the submitted-command-buffer count, by ~57%.
+        const DEFAULT_CHUNKS: usize = 3;
         static CHUNKS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         let requested = *CHUNKS.get_or_init(|| {
             std::env::var("ORANGU_DECODE_CHUNKS")
@@ -1348,8 +1356,13 @@ impl ModelForward for GemmaModel {
         greedy_sample: Option<GreedySampleParams<'_>>,
         slot_id: usize,
     ) -> Result<ForwardOutcome> {
+        // A `final_logit_softcapping` model no longer forces the slow CPU
+        // path here: the softcap is `cap * tanh(v / cap)`, monotonic, so it
+        // can't change the greedy token, and the GPU sample kernel applies it
+        // (before the repeat penalty, matching the CPU order) so a softcapped
+        // model keeps the single-`u32` readback instead of transferring the
+        // whole `[n_vocab]` logits vector to `tanh` it on the CPU every token.
         if tokens.len() == 1
-            && self.final_logit_softcapping.is_none()
             && let Some(params) = &greedy_sample
             && let Some(vulkan) = self.backend.as_vulkan()
             && vulkan.gpu_sample()
@@ -1377,7 +1390,12 @@ impl ModelForward for GemmaModel {
                     n_vocab: self.output_weight.out_dim,
                     recent_tokens: params.recent_tokens,
                     repeat_penalty: params.repeat_penalty,
+                    logit_softcap: self.final_logit_softcapping,
                 },
+                // Per-slot key so two concurrently-decoding sequences never
+                // share the cached sample scratch (same rationale as the
+                // `slot_id + 1` batch_slot the op cache uses just above).
+                slot_id + 1,
             );
             let next = vulkan.submit_and_readback_u32(encoder, &sample_buf);
             return Ok(ForwardOutcome::Token(next));

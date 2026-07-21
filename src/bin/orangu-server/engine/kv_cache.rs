@@ -85,8 +85,23 @@ pub struct LayerCache {
 /// per-request `LayerCache`, not by the shared `VulkanBackend` singleton —
 /// a KV cache is per-session state, unlike a model's weights.
 struct GpuLayerCache {
-    k_buf: wgpu::Buffer,
-    v_buf: wgpu::Buffer,
+    /// One backing buffer holding this layer's key and value regions as
+    /// aligned sub-ranges — a single BO instead of two. On a per-token decode
+    /// submission the kernel re-validates and VM-maps every referenced BO
+    /// (~25% of decode CPU; see `doc/SERVER_ROADMAP.md` Step 24), so merging
+    /// k+v → 1 BO/layer shrinks that per-submit BO list by ~35 entries across
+    /// a 35-layer model. Bind groups bind the *sub-ranges* (`k`/`v`), which
+    /// makes the attention shader's position index relative to each region's
+    /// start — so only explicit copy/`write_buffer` destinations add the
+    /// region base offset, never the shader. `probs_scratch` stays a separate
+    /// buffer: attention *writes* it while *reading* k/v in the same dispatch,
+    /// and `wgpu` forbids one buffer being both read-only and read-write
+    /// within a single dispatch's usage scope.
+    kv_buffer: wgpu::Buffer,
+    k_off: u64,
+    k_size: u64,
+    v_off: u64,
+    v_size: u64,
     probs_scratch: wgpu::Buffer,
     /// How many of `LayerCache::len`'s positions have already been
     /// uploaded — lets a multi-token prefill's worth of pushes get synced
@@ -106,6 +121,23 @@ struct GpuLayerCache {
     /// more than one entry here.
     #[allow(dead_code)]
     attn_dispatch: std::collections::HashMap<(usize, usize), GpuAttnDispatch>,
+}
+
+/// Sub-range handles into a [`GpuLayerCache::buffer`] returned by
+/// [`LayerCache::sync_gpu`] — the shared backing buffer plus each region's
+/// `(offset, size)`, so a caller binds `k`/`v`/`probs` as sub-ranges of the
+/// one BO. `buffer` is an `Arc`-backed clone, so holding it releases the
+/// `&mut LayerCache` borrow `sync_gpu` needed.
+pub struct GpuKvRefs {
+    /// The shared key/value buffer; `k`/`v` are sub-ranges of it.
+    pub buffer: wgpu::Buffer,
+    pub k_off: u64,
+    pub k_size: u64,
+    pub v_off: u64,
+    pub v_size: u64,
+    /// Softmax scratch — a separate buffer (read-write, so it can't share
+    /// `buffer` with the read-only k/v in one dispatch), bound whole.
+    pub probs: wgpu::Buffer,
 }
 
 /// `VulkanBackend::fused_attention`'s own bind group and small buffers,
@@ -214,30 +246,32 @@ impl GpuLayerCache {
         }
         .max(1);
 
-        let make = |label: &str, size: u64, usage: wgpu::BufferUsages| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size,
-                usage,
-                mapped_at_creation: false,
-            })
-        };
+        // Pack k | v into one buffer, each region starting on a storage-
+        // binding-aligned offset so a sub-range binding is valid.
+        let align = (device.limits().min_storage_buffer_offset_alignment as u64).max(4);
+        let k_off = 0u64;
+        let k_size = kv_bytes;
+        let v_off = (k_off + k_size).next_multiple_of(align);
+        let v_size = kv_bytes;
+        let kv_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orangu-server kv cache (k|v)"),
+            size: v_off + v_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let probs_scratch = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orangu-server kv cache attention scratch"),
+            size: ((capacity * n_head).max(1) * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         Self {
-            k_buf: make(
-                "orangu-server kv cache k",
-                kv_bytes,
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            ),
-            v_buf: make(
-                "orangu-server kv cache v",
-                kv_bytes,
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            ),
-            probs_scratch: make(
-                "orangu-server kv cache attention scratch",
-                ((capacity * n_head).max(1) * 4) as u64,
-                wgpu::BufferUsages::STORAGE,
-            ),
+            kv_buffer,
+            k_off,
+            k_size,
+            v_off,
+            v_size,
+            probs_scratch,
             synced_len: 0,
             kv_storage,
             attn_dispatch: std::collections::HashMap::new(),
@@ -338,7 +372,7 @@ impl LayerCache {
         queue: &wgpu::Queue,
         n_head: usize,
         kv_storage: crate::engine::backend::vulkan_shaders::KvStorage,
-    ) -> (&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer) {
+    ) -> GpuKvRefs {
         let capacity = self.capacity;
         let kv_dim = self.kv_dim;
         let gpu = self.gpu.get_or_insert_with(|| {
@@ -347,47 +381,60 @@ impl LayerCache {
         if gpu.synced_len < self.len {
             let start = gpu.synced_len * kv_dim;
             let end = self.len * kv_dim;
+            // Local byte offset of `start` within each region, by storage
+            // format; `k_off`/`v_off` shift it to the region's base in the
+            // shared buffer.
             match gpu.kv_storage {
                 crate::engine::backend::vulkan_shaders::KvStorage::F16 => {
+                    let local = (start * 2) as u64;
                     queue.write_buffer(
-                        &gpu.k_buf,
-                        (start * 2) as u64,
+                        &gpu.kv_buffer,
+                        gpu.k_off + local,
                         &f32_to_f16_bytes(&self.k[start..end]),
                     );
                     queue.write_buffer(
-                        &gpu.v_buf,
-                        (start * 2) as u64,
+                        &gpu.kv_buffer,
+                        gpu.v_off + local,
                         &f32_to_f16_bytes(&self.v[start..end]),
                     );
                 }
                 crate::engine::backend::vulkan_shaders::KvStorage::Q8_0 => {
+                    let local = (start / 32 * 36) as u64;
                     queue.write_buffer(
-                        &gpu.k_buf,
-                        (start / 32 * 36) as u64,
+                        &gpu.kv_buffer,
+                        gpu.k_off + local,
                         &f32_to_q8_0_bytes(&self.k[start..end]),
                     );
                     queue.write_buffer(
-                        &gpu.v_buf,
-                        (start / 32 * 36) as u64,
+                        &gpu.kv_buffer,
+                        gpu.v_off + local,
                         &f32_to_q8_0_bytes(&self.v[start..end]),
                     );
                 }
                 crate::engine::backend::vulkan_shaders::KvStorage::F32 => {
+                    let local = (start * 4) as u64;
                     queue.write_buffer(
-                        &gpu.k_buf,
-                        (start * 4) as u64,
+                        &gpu.kv_buffer,
+                        gpu.k_off + local,
                         bytemuck::cast_slice(&self.k[start..end]),
                     );
                     queue.write_buffer(
-                        &gpu.v_buf,
-                        (start * 4) as u64,
+                        &gpu.kv_buffer,
+                        gpu.v_off + local,
                         bytemuck::cast_slice(&self.v[start..end]),
                     );
                 }
             }
             gpu.synced_len = self.len;
         }
-        (&gpu.k_buf, &gpu.v_buf, &gpu.probs_scratch)
+        GpuKvRefs {
+            buffer: gpu.kv_buffer.clone(),
+            k_off: gpu.k_off,
+            k_size: gpu.k_size,
+            v_off: gpu.v_off,
+            v_size: gpu.v_size,
+            probs: gpu.probs_scratch.clone(),
+        }
     }
 
     /// This `(calling layer, LayerCache)` pair's cached attention-dispatch

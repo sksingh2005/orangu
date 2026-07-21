@@ -48,29 +48,34 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(name = "orangu-bench", version, about)]
 struct Args {
-    /// Base URL of the server (the tool appends `/v1/completions`).
+    /// Base URL of the server.
     #[arg(long, default_value = "http://127.0.0.1:8100")]
     url: String,
 
-    /// Comma-separated context depths (approximate prompt-token counts) to
-    /// sweep. `0` means "no padding" (shortest context). Each depth pads the
-    /// prompt with filler so decode starts at roughly that many tokens of
-    /// context, mirroring `llama-bench -d`.
+    /// Comma-separated context depths to sweep.
     #[arg(long, default_value = "0", value_delimiter = ',')]
     depths: Vec<u32>,
 
-    /// Number of tokens to generate per timed run (the `tg` count).
+    /// Number of tokens to generate per timed run.
     #[arg(long = "gen", default_value_t = 128)]
     n_gen: u32,
 
-    /// Repetitions per depth; the reported rate is the best (fastest) run,
-    /// matching `llama-bench`'s steady-state intent, with mean±stddev also
-    /// printed.
+    /// Curve mode: instead of the depth sweep, do ONE generation of this many
+    /// tokens and report the instantaneous decode rate bucketed by context
+    /// position. Measures decode-vs-context scaling without the slow, VRAM-heavy
+    /// deep-context prefill the depth sweep needs. `0` disables it.
+    #[arg(long, default_value_t = 0)]
+    curve: u32,
+
+    /// Bucket width (in context tokens) for `--curve`.
+    #[arg(long, default_value_t = 256)]
+    bucket: u32,
+
+    /// Repetitions per depth; the reported rate is the best run with mean±sd.
     #[arg(long, default_value_t = 3)]
     reps: u32,
 
-    /// Skip the initial warmup run (one short generation to load/JIT before
-    /// timing). Off by default — warmup is recommended.
+    /// Skip the initial warmup run.
     #[arg(long, default_value_t = false)]
     no_warmup: bool,
 
@@ -78,11 +83,11 @@ struct Args {
     #[arg(long, default_value_t = 600)]
     timeout: u64,
 
-    /// Model id to request (optional; most single-model servers ignore it).
+    /// Model id to request.
     #[arg(long)]
     model: Option<String>,
 
-    /// Emit machine-readable JSON lines instead of the table.
+    /// Emit machine-readable JSON.
     #[arg(long, default_value_t = false)]
     json: bool,
 }
@@ -161,11 +166,13 @@ fn run_once(
         body["model"] = serde_json::Value::String(m.clone());
     }
 
+    let endpoint = format!("{url}/v1/completions");
     let t0 = Instant::now();
     let resp = client
-        .post(format!("{url}/v1/completions"))
+        .post(&endpoint)
         .json(&body)
-        .send()?;
+        .send()
+        .map_err(|_| anyhow::anyhow!("Error sending request to url ({endpoint})"))?;
     if !resp.status().is_success() {
         anyhow::bail!("server returned HTTP {}", resp.status());
     }
@@ -178,7 +185,12 @@ fn run_once(
 
     loop {
         line.clear();
-        let read = reader.read_line(&mut line)?;
+        // A mid-stream read error (server dropped the connection, timeout) ends
+        // the stream rather than crashing — we time whatever tokens did arrive.
+        let read = match reader.read_line(&mut line) {
+            Ok(read) => read,
+            Err(_) => break,
+        };
         if read == 0 {
             break;
         }
@@ -220,24 +232,39 @@ fn run_once(
     })
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     let args = Args::parse();
+    if let Err(e) = run(&args) {
+        // A single clean line (e.g. a refused connection), not anyhow's
+        // multi-line "Error: … Caused by: …" chain.
+        eprintln!("orangu-bench: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run(args: &Args) -> anyhow::Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(args.timeout))
         .build()?;
 
+    // Warmup first (it also validates the connection), so a failure here prints
+    // just the clean error above rather than a header followed by an error.
+    if !args.no_warmup {
+        let p = build_prompt(0);
+        run_once(&client, &args.url, &p, 8, &args.model)?;
+    }
+
+    if args.curve > 0 {
+        return run_curve(&client, args);
+    }
+
     if !args.json {
         println!("orangu-bench → {}", args.url);
         println!(
-            "{:>8} | {:>5} | {:>7} | {:>10} | {:>8} | {:>18}",
-            "depth", "gen", "ttft_ms", "tok/s(best)", "n_tok", "tok/s(mean±sd)"
+            "{:>8} | {:>5} | {:>7} | {:>8} | {:>8} | {:>16}",
+            "depth", "gen", "ttft_ms", "n_tok", "best", "mean ± sd"
         );
-        println!("{}", "-".repeat(74));
-    }
-
-    if !args.no_warmup {
-        let p = build_prompt(0);
-        let _ = run_once(&client, &args.url, &p, 8, &args.model)?;
+        println!("{}", "-".repeat(67));
     }
 
     for &depth in &args.depths {
@@ -270,11 +297,113 @@ fn main() -> anyhow::Result<()> {
             );
         } else {
             println!(
-                "{:>8} | {:>5} | {:>7.0} | {:>10.2} | {:>8} | {:>8.2} ± {:>5.2}",
-                depth, args.n_gen, s.ttft_ms, best, s.gen_tokens, mean, sd
+                "{:>8} | {:>5} | {:>7.0} | {:>8} | {:>8.2} | {:>8.2} ± {:>5.2}",
+                depth, args.n_gen, s.ttft_ms, s.gen_tokens, best, mean, sd
             );
         }
     }
 
+    Ok(())
+}
+
+/// Curve mode: one generation of `args.curve` tokens, timestamping each streamed
+/// token, then reporting the instantaneous decode rate per `args.bucket`-token
+/// context window. Measures decode-vs-context scaling directly — no prompt
+/// padding, so no slow/VRAM-heavy deep-context prefill. Context position is
+/// approximated by the generated-token index (the prompt is short).
+fn run_curve(client: &reqwest::blocking::Client, args: &Args) -> anyhow::Result<()> {
+    let prompt = build_prompt(0);
+    let endpoint = format!("{}/v1/completions", args.url);
+    let mut body = serde_json::json!({
+        "prompt": prompt,
+        "max_tokens": args.curve,
+        "n_predict": args.curve,
+        "temperature": 0,
+        "stream": true,
+        "cache_prompt": false,
+    });
+    if let Some(m) = &args.model {
+        body["model"] = serde_json::Value::String(m.clone());
+    }
+
+    let resp = client
+        .post(&endpoint)
+        .json(&body)
+        .send()
+        .map_err(|_| anyhow::anyhow!("Error sending request to url ({endpoint})"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("server returned HTTP {}", resp.status());
+    }
+
+    // Arrival time of each generated token.
+    let mut stamps: Vec<Instant> = Vec::with_capacity(args.curve as usize);
+    let mut reader = BufReader::new(resp);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        // Tolerate a mid-stream read error: end the curve with whatever tokens
+        // arrived rather than crashing on a dropped connection.
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let payload = match line.trim_start().strip_prefix("data:") {
+            Some(p) => p.trim(),
+            None => continue,
+        };
+        if payload == "[DONE]" {
+            break;
+        }
+        let v: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let text = v
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .or_else(|| v.get("content").and_then(|t| t.as_str()))
+            .unwrap_or("");
+        if !text.is_empty() {
+            stamps.push(Instant::now());
+        }
+    }
+
+    let n = stamps.len();
+    if n < 2 {
+        anyhow::bail!("generation produced {n} tokens — need at least 2 for a curve");
+    }
+
+    if !args.json {
+        println!(
+            "orangu-bench → {} (curve: {} tokens, bucket {})",
+            args.url, n, args.bucket
+        );
+        println!("{:>8} | {:>8}", "ctx", "tok/s");
+        println!("{}", "-".repeat(19));
+    }
+    let bucket = args.bucket.max(1) as usize;
+    let mut lo = 0usize;
+    while lo < n {
+        let hi = (lo + bucket).min(n);
+        // Rate over the window: tokens produced from the arrival of the token
+        // just before `lo` to the arrival of token `hi-1`.
+        let (count, dt) = if lo == 0 {
+            (hi - 1, (stamps[hi - 1] - stamps[0]).as_secs_f64())
+        } else {
+            (hi - lo, (stamps[hi - 1] - stamps[lo - 1]).as_secs_f64())
+        };
+        let rate = if dt > 0.0 { count as f64 / dt } else { 0.0 };
+        if args.json {
+            println!(
+                "{}",
+                serde_json::json!({ "ctx": lo, "tok_per_s": rate, "tokens": count })
+            );
+        } else {
+            println!("{:>8} | {:>8.2}", lo, rate);
+        }
+        lo = hi;
+    }
     Ok(())
 }

@@ -870,6 +870,185 @@ pub fn shader_source_reduce(ggml_type: u32, n_rows: usize, subgroup: bool) -> Op
     Some(format!("{PRELUDE}\n{middle}\n{suffix}"))
 }
 
+/// The **thin-tile reduce** entry point (`fn main`) for an arbitrary
+/// `(n_rows, tile)` — the multi-position (speculative / small-chunk-prefill)
+/// matmul kernel that `doc/SERVER_ROADMAP.md` Step 13 named as the missing
+/// lever. It keeps the reduce path's occupancy (one workgroup per
+/// `(n_rows-row group, tile-token group)`, so `ceil(out_dim / n_rows) *
+/// ceil(n_tokens / tile)` workgroups — still many small groups, unlike the
+/// tiled GEMM's few large ones) **and** amortizes each weight dequant across
+/// the tile: at every `k` this workgroup's 64 threads grid-stride over
+/// `in_dim`, dequantizing each of `n_rows` weight elements *once* and reusing
+/// it across all `tile` tokens' activations. The plain reduce path
+/// (`main_reduce_suffix`) re-runs the whole (expensive, for K-quants)
+/// `dequant_element` once per token because its workgroups are keyed on a
+/// single token; this one runs it `tile`× less. Same bindings as the reduce
+/// path (`x`, `y`, `params`, weight) — `x[t*in_dim+k]` / `y[t*out_dim+o]`
+/// layout unchanged — so it drops into the existing matmul bind group with
+/// only the dispatch count and pipeline swapped. Tree-reduce combine (no
+/// subgroup variant yet); the win is the dequant amortization, not the
+/// reduction.
+fn thin_tile_reduce_suffix(n_rows: usize, tile: usize, subgroup: bool) -> String {
+    let (r, t) = (n_rows, tile);
+    let mut s = format!(
+        "var<workgroup> partial_sums: array<f32, {}>;\n\n",
+        r * t * 64
+    );
+    s.push_str("@compute @workgroup_size(64)\nfn main(\n    @builtin(workgroup_id) wid: vec3<u32>,\n    @builtin(local_invocation_id) lid: vec3<u32>,\n    @builtin(num_workgroups) nwg: vec3<u32>,");
+    s.push_str(subgroup_entry_params(subgroup));
+    s.push_str("\n) {\n");
+    s.push_str(&format!(
+        "    let n_row_groups = (params.out_dim + {}u) / {r}u;\n",
+        r - 1
+    ));
+    s.push_str(&format!(
+        "    let n_tok_tiles = (params.n_tokens + {}u) / {t}u;\n",
+        t - 1
+    ));
+    s.push_str("    let flat = wid.x + wid.y * nwg.x + wid.z * nwg.x * nwg.y;\n    if (flat >= n_row_groups * n_tok_tiles) {\n        return;\n    }\n");
+    s.push_str("    let rg = flat / n_tok_tiles;\n    let tt = flat % n_tok_tiles;\n");
+    s.push_str(&format!(
+        "    let o_base = rg * {r}u;\n    let t_base = tt * {t}u;\n"
+    ));
+    for i in 0..r {
+        s.push_str(&format!("    let o{i} = o_base + {i}u;\n"));
+    }
+    s.push_str("    let local = lid.x;\n\n");
+    for i in 0..r {
+        for j in 0..t {
+            s.push_str(&format!("    var p{i}_{j}: f32 = 0.0;\n"));
+        }
+    }
+    s.push_str("    var k: u32 = local;\n    loop {\n        if (k >= params.in_dim) {\n            break;\n        }\n");
+    s.push_str("        let block_idx = k / BLOCK_ELEMS;\n        let local_k = k % BLOCK_ELEMS;\n        let block_off = block_idx * BLOCK_BYTES;\n");
+    // Dequantize each row's weight element once, reuse across the token tile.
+    s.push_str("        let w0 = dequant_element(o0 * params.row_bytes + block_off, local_k);\n");
+    for i in 1..r {
+        s.push_str(&format!(
+            "        var w{i}: f32 = 0.0;\n        if (o{i} < params.out_dim) {{ w{i} = dequant_element(o{i} * params.row_bytes + block_off, local_k); }}\n"
+        ));
+    }
+    for j in 0..t {
+        s.push_str(&format!(
+            "        var x{j}: f32 = 0.0;\n        if (t_base + {j}u < params.n_tokens) {{ x{j} = x[(t_base + {j}u) * params.in_dim + k]; }}\n"
+        ));
+    }
+    for i in 0..r {
+        for j in 0..t {
+            s.push_str(&format!("        p{i}_{j} = p{i}_{j} + w{i} * x{j};\n"));
+        }
+    }
+    s.push_str("        k = k + 64u;\n    }\n\n");
+    if subgroup {
+        // Each of the `r * t` outputs: sum this lane's 64-stride partial
+        // across the subgroup, one write per subgroup, then thread 0 folds
+        // the `n_sg` subgroup partials — the fast combine the plain reduce
+        // path (`reduce_combine_block`) already uses, avoiding the tree
+        // reduce's `log2(64)` `workgroupBarrier` rounds.
+        for i in 0..r {
+            for j in 0..t {
+                s.push_str(&format!("    let sg{}_{} = subgroupAdd(p{i}_{j});\n", i, j));
+            }
+        }
+        s.push_str("    if (sg_lane == 0u) {\n");
+        for i in 0..r {
+            for j in 0..t {
+                s.push_str(&format!(
+                    "        partial_sums[{}u * 64u + sg_id] = sg{}_{};\n",
+                    i * t + j,
+                    i,
+                    j
+                ));
+            }
+        }
+        s.push_str("    }\n    workgroupBarrier();\n    if (local == 0u) {\n");
+        for i in 0..r {
+            for j in 0..t {
+                s.push_str(&format!("        var acc{}_{}: f32 = 0.0;\n", i, j));
+            }
+        }
+        s.push_str("        var si: u32 = 0u;\n        loop {\n            if (si >= n_sg) {\n                break;\n            }\n");
+        for i in 0..r {
+            for j in 0..t {
+                s.push_str(&format!(
+                    "            acc{}_{} = acc{}_{} + partial_sums[{}u * 64u + si];\n",
+                    i,
+                    j,
+                    i,
+                    j,
+                    i * t + j
+                ));
+            }
+        }
+        s.push_str("            si = si + 1u;\n        }\n");
+        for i in 0..r {
+            for j in 0..t {
+                s.push_str(&format!(
+                    "        if (o{i} < params.out_dim && t_base + {j}u < params.n_tokens) {{\n            y[(t_base + {j}u) * params.out_dim + o{i}] = acc{}_{};\n        }}\n",
+                    i, j
+                ));
+            }
+        }
+        s.push_str("    }\n}\n");
+    } else {
+        for i in 0..r {
+            for j in 0..t {
+                s.push_str(&format!(
+                    "    partial_sums[{}u * 64u + local] = p{i}_{j};\n",
+                    i * t + j
+                ));
+            }
+        }
+        s.push_str("    workgroupBarrier();\n    var stride: u32 = 32u;\n    loop {\n        if (stride == 0u) {\n            break;\n        }\n        if (local < stride) {\n");
+        for idx in 0..(r * t) {
+            s.push_str(&format!(
+                "            partial_sums[{idx}u * 64u + local] = partial_sums[{idx}u * 64u + local] + partial_sums[{idx}u * 64u + local + stride];\n"
+            ));
+        }
+        s.push_str(
+            "        }\n        workgroupBarrier();\n        stride = stride / 2u;\n    }\n",
+        );
+        s.push_str("    if (local == 0u) {\n");
+        for i in 0..r {
+            for j in 0..t {
+                let idx = i * t + j;
+                s.push_str(&format!(
+                    "        if (o{i} < params.out_dim && t_base + {j}u < params.n_tokens) {{\n            y[(t_base + {j}u) * params.out_dim + o{i}] = partial_sums[{idx}u * 64u];\n        }}\n"
+                ));
+            }
+        }
+        s.push_str("    }\n}\n");
+    }
+    s
+}
+
+/// A thin-tile reduce kernel (see [`thin_tile_reduce_suffix`]) for one quant
+/// type — same `*_COOP_MIDDLE` `dequant_element` every other reduce/coop
+/// kernel uses. `None` for a type this backend has no shader for.
+pub fn shader_source_reduce_thin_tile(
+    ggml_type: u32,
+    n_rows: usize,
+    tile: usize,
+    subgroup: bool,
+) -> Option<String> {
+    let middle = match ggml_type {
+        t if t == GGML_TYPE_F32 => F32_COOP_MIDDLE,
+        t if t == GGML_TYPE_F16 => F16_COOP_MIDDLE,
+        t if t == GGML_TYPE_BF16 => BF16_COOP_MIDDLE,
+        t if t == GGML_TYPE_Q4_0 => Q4_0_COOP_MIDDLE,
+        t if t == GGML_TYPE_Q5_0 => Q5_0_COOP_MIDDLE,
+        t if t == GGML_TYPE_Q8_0 => Q8_0_COOP_MIDDLE,
+        t if t == GGML_TYPE_Q4_K => Q4_K_COOP_MIDDLE,
+        t if t == GGML_TYPE_Q5_K => Q5_K_COOP_MIDDLE,
+        t if t == GGML_TYPE_Q6_K => Q6_K_COOP_MIDDLE,
+        _ => return None,
+    };
+    Some(format!(
+        "{PRELUDE}\n{middle}\n{}",
+        thin_tile_reduce_suffix(n_rows, tile, subgroup)
+    ))
+}
+
 /// `Q4_K` only.
 /// Dequantizes weight elements *in pairs* (`dequant_pair_f16`, a `Q4_K`-
 /// specific restatement of `Q4_K_COOP_MIDDLE`'s `dequant_element` that
@@ -1622,6 +1801,434 @@ pub fn shader_source_reduce_q4k_wide_unroll(n_rows: usize, subgroup: bool) -> St
 /// when `subgroup` is set (else a 32-wide barrier tree). `n_rows` output
 /// rows share the workgroup and its hoisted activations, exactly as
 /// `unroll_suffix` does.
+/// The **MMVQ** (integer-dot quantized) `Q4_K` decode matmul-vec — a WGSL port
+/// of llama.cpp's `mul_mat_vecq.comp`, the path llama actually runs for gemma
+/// decode on this GPU. Unlike every prior orangu Q4_K kernel (all
+/// floating-point), this does the dot in **integers**: the activation row is
+/// pre-quantized to `q8` (int8 + per-32-block `f32` scale and quant-sum, binding
+/// 1, layout `[d, sumq, qs0..qs7]` = 10 `u32`/block), the 4-bit weights are read
+/// as int8 nibbles, and the products go through `dot4I8Packed` (SPIR-V `OpSDot`,
+/// HW `v_dot4_i32_i8`): four int8×int8 into one `int32` per instruction,
+/// rescaled to `f32` at the end. This attacks both prior dead ends at once —
+/// 4 MACs/instruction (ALU) and int8 operands / int32 accumulator (register
+/// pressure, Steps 11/16). Correct because ggml's Q4_K dequant is
+/// **contiguous per sub-block** (`y[32g..32g+32]` all share scale/min `g`), so a
+/// natural 32-element activation block aligns with one Q4_K sub-block, letting
+/// the per-sub-block integer dot factor the scale out. Each of 32 lanes strides
+/// over the row's `in_dim/32` sub-blocks; per sub-block it forms
+/// `d·scale·d_b·Σ(nib·q) − dmin·min·d_b·Σq`, then `subgroupAdd` (or a 32-wide
+/// tree) reduces to the output element. One output row per workgroup
+/// (`NUM_ROWS = 1`, llama's `rm_kq_int`).
+///
+/// Selected for `Q4_K` decode when `ORANGU_Q4K_MMVQ=1`. Not bit-identical (q8
+/// activation quantization is lossy — like llama), cross-checks within the same
+/// tolerance as the dual kernel.
+/// GPU activation-quantiser for the MMVQ path: reads an `f32` activation row
+/// (binding 0) and writes the q8 block layout `shader_source_reduce_q4k_mmvq`
+/// consumes (binding 1) — per 32-element block, 10 `u32`: `[d, sumq, qs0..qs7]`
+/// (`d = max|x|/127` the scale, `sumq = Σq`, 32 int8 quants packed 4/word). The
+/// GPU equivalent of `quantize_activation_q8`. **One thread per 32-block**
+/// (`n_blocks = len/32`), so no cross-thread reduction: each thread scans its
+/// block for the max, then quantizes/packs/sums it. `meta` (binding 2) carries
+/// `len` (the activation length) in field 0 — same `ElemMeta` shape the norm/
+/// elementwise kernels use, so it reuses `elem3_bind_group_layout`.
+pub fn shader_source_quantize_q8() -> String {
+    r#"
+struct ElemMeta {
+    len: u32,
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
+}
+
+@group(0) @binding(0) var<storage, read> xin: array<f32>;
+@group(0) @binding(1) var<storage, read_write> qout: array<u32>;
+@group(0) @binding(2) var<uniform> qmeta: ElemMeta;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let blk = gid.x;
+    let n_blocks = qmeta.len / 32u;
+    if (blk >= n_blocks) {
+        return;
+    }
+    let base = blk * 32u;
+
+    var amax: f32 = 0.0;
+    var i: u32 = 0u;
+    loop {
+        if (i >= 32u) { break; }
+        amax = max(amax, abs(xin[base + i]));
+        i = i + 1u;
+    }
+    let d = amax / 127.0;
+    let id = select(0.0, 1.0 / d, d > 0.0);
+
+    var sumq: i32 = 0;
+    let out_base = blk * 10u;
+    var w: u32 = 0u;
+    loop {
+        if (w >= 8u) { break; }
+        var word: u32 = 0u;
+        var k: u32 = 0u;
+        loop {
+            if (k >= 4u) { break; }
+            let v = xin[base + w * 4u + k];
+            var q: i32 = i32(round(v * id));
+            q = clamp(q, -127, 127);
+            sumq = sumq + q;
+            word = word | ((u32(q) & 0xFFu) << (8u * k));
+            k = k + 1u;
+        }
+        qout[out_base + 2u + w] = word;
+        w = w + 1u;
+    }
+    qout[out_base] = bitcast<u32>(d);
+    qout[out_base + 1u] = bitcast<u32>(sumq);
+}
+"#
+    .to_string()
+}
+
+pub fn shader_source_reduce_q4k_mmvq(subgroup: bool) -> String {
+    let subgroup_params = if subgroup {
+        "@builtin(subgroup_invocation_id) sg_lane: u32,\n    @builtin(subgroup_id) sg_id: u32,\n    @builtin(num_subgroups) n_sg: u32,"
+    } else {
+        ""
+    };
+    let reduce = if subgroup {
+        "    let total = subgroupAdd(partial);\n    if (sg_lane == 0u) {\n        y[t * params.out_dim + o] = total;\n    }\n"
+    } else {
+        "    psum[tid] = partial;\n    workgroupBarrier();\n    var stride: u32 = 16u;\n    loop {\n        if (stride == 0u) { break; }\n        if (tid < stride) { psum[tid] = psum[tid] + psum[tid + stride]; }\n        workgroupBarrier();\n        stride = stride / 2u;\n    }\n    if (tid == 0u) {\n        y[t * params.out_dim + o] = psum[0];\n    }\n"
+    };
+    format!(
+        r#"
+struct Meta {{
+    in_dim: u32,
+    out_dim: u32,
+    n_tokens: u32,
+    row_bytes: u32,
+}}
+
+@group(0) @binding(0) var<storage, read> weights: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read> q8x: array<u32>;
+@group(0) @binding(2) var<storage, read_write> y: array<f32>;
+@group(0) @binding(3) var<uniform> params: Meta;
+
+fn f16_to_f32(bits: u32) -> f32 {{
+    return unpack2x16float(bits & 0xFFFFu).x;
+}}
+fn vec4_word(v: vec4<u32>, i: u32) -> u32 {{
+    if (i == 0u) {{ return v.x; }}
+    if (i == 1u) {{ return v.y; }}
+    if (i == 2u) {{ return v.z; }}
+    return v.w;
+}}
+fn read_word_v4(byte_offset: u32) -> u32 {{
+    return vec4_word(weights[byte_offset / 16u], (byte_offset % 16u) / 4u);
+}}
+fn vec3_word(v: vec3<u32>, i: u32) -> u32 {{
+    if (i == 0u) {{ return v.x; }}
+    if (i == 1u) {{ return v.y; }}
+    return v.z;
+}}
+// ggml get_scale_min_k4, from the already-loaded 12-byte scales (header.yzw).
+fn get_scale_min_k4_v4(scales: vec3<u32>, j: u32) -> vec2<u32> {{
+    if (j < 4u) {{
+        let qj = (vec3_word(scales, j / 4u) >> (8u * (j % 4u))) & 0xFFu;
+        let qj4 = (vec3_word(scales, (j + 4u) / 4u) >> (8u * ((j + 4u) % 4u))) & 0xFFu;
+        return vec2<u32>(qj & 63u, qj4 & 63u);
+    }}
+    let qj = (vec3_word(scales, j / 4u) >> (8u * (j % 4u))) & 0xFFu;
+    let qj4 = (vec3_word(scales, (j + 4u) / 4u) >> (8u * ((j + 4u) % 4u))) & 0xFFu;
+    let qjm4 = (vec3_word(scales, (j - 4u) / 4u) >> (8u * ((j - 4u) % 4u))) & 0xFFu;
+    let sc = (qj4 & 0xFu) | ((qjm4 >> 6u) << 4u);
+    let m = (qj4 >> 4u) | ((qj >> 6u) << 4u);
+    return vec2<u32>(sc, m);
+}}
+
+var<workgroup> psum: array<f32, 32>;
+
+@compute @workgroup_size(32)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+    {subgroup_params}
+) {{
+    let flat = wid.x + wid.y * nwg.x + wid.z * nwg.x * nwg.y;
+    if (flat >= params.out_dim * params.n_tokens) {{
+        return;
+    }}
+    let o = flat / params.n_tokens;
+    let t = flat % params.n_tokens;
+    let tid = lid.x;
+
+    let n_sub = params.in_dim / 32u;          // 32-element sub-blocks per row
+    let q8_row_base = t * n_sub * 10u;        // 10 u32 per q8 block
+
+    var partial: f32 = 0.0;
+    var sb: u32 = tid;
+    loop {{
+        if (sb >= n_sub) {{
+            break;
+        }}
+        let super_blk = sb / 8u;
+        let b = sb % 8u;
+        let block_byte_off = o * params.row_bytes + super_blk * 144u;
+        let header = weights[block_byte_off / 16u];
+        let d = f16_to_f32(header.x & 0xFFFFu);
+        let dmin = f16_to_f32(header.x >> 16u);
+        let sm = get_scale_min_k4_v4(vec3<u32>(header.y, header.z, header.w), b);
+        let scale = f32(sm.x);
+        let mn = f32(sm.y);
+
+        // This sub-block's 32 nibbles: qs bytes 32*(b/2)..+32, low half for even
+        // b, high half for odd b (ggml's contiguous-per-sub-block dequant order).
+        let qbyte = block_byte_off + 16u + 32u * (b / 2u);
+        let is_high = (b & 1u) == 1u;
+
+        let q8base = q8_row_base + sb * 10u;
+        let d_b = bitcast<f32>(q8x[q8base]);
+        let sumq = bitcast<i32>(q8x[q8base + 1u]);
+
+        var idot: i32 = 0;
+        var i: u32 = 0u;
+        loop {{
+            if (i >= 8u) {{
+                break;
+            }}
+            let wraw = read_word_v4(qbyte + i * 4u);
+            let wword = select(wraw & 0x0F0F0F0Fu, (wraw >> 4u) & 0x0F0F0F0Fu, is_high);
+            idot = idot + dot4I8Packed(wword, q8x[q8base + 2u + i]);
+            i = i + 1u;
+        }}
+
+        partial = partial + d * scale * d_b * f32(idot) - dmin * mn * d_b * f32(sumq);
+        sb = sb + 32u;
+    }}
+
+{reduce}}}
+"#
+    )
+}
+
+/// Prelude + per-super-block dot for the **light** `Q4_K` decode kernel
+/// ([`shader_source_reduce_q4k_light`]) — a WGSL port of llama.cpp's
+/// `mul_mat_vec_q4_k.comp`. The activation `x` is rebound as
+/// `array<vec4<f32>>` (binding shape unchanged — storage is element-type
+/// agnostic), so B is read as `vec4` and each thread's dot is four `dot()`s.
+const Q4K_LIGHT_PRELUDE: &str = r#"
+struct Meta {
+    in_dim: u32,
+    out_dim: u32,
+    n_tokens: u32,
+    row_bytes: u32,
+}
+
+@group(0) @binding(0) var<storage, read> weights: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read> xv: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> y: array<f32>;
+@group(0) @binding(3) var<uniform> params: Meta;
+
+fn f16_to_f32(bits: u32) -> f32 {
+    return unpack2x16float(bits & 0xFFFFu).x;
+}
+
+fn vec4_word(v: vec4<u32>, i: u32) -> u32 {
+    if (i == 0u) { return v.x; }
+    if (i == 1u) { return v.y; }
+    if (i == 2u) { return v.z; }
+    return v.w;
+}
+
+// 4-byte-aligned u32 read from the vec4<u32>-bound weight buffer.
+fn read_word_v4(byte_offset: u32) -> u32 {
+    return vec4_word(weights[byte_offset / 16u], (byte_offset % 16u) / 4u);
+}
+
+// Unpack the four bytes of a u32 into a vec4<f32>.
+fn unpack4_f(w: u32) -> vec4<f32> {
+    return vec4<f32>(
+        f32(w & 0xFFu),
+        f32((w >> 8u) & 0xFFu),
+        f32((w >> 16u) & 0xFFu),
+        f32((w >> 24u) & 0xFFu),
+    );
+}
+
+// One of the six little-endian u16s of the 12-byte Q4_K scales region
+// (bytes 4..16 of the block, i.e. header.y/.z/.w). k in 0..5.
+fn scale_u16(header: vec4<u32>, k: u32) -> u32 {
+    let word = vec4_word(header, (k / 2u) + 1u);
+    return select(word >> 16u, word & 0xFFFFu, (k & 1u) == 0u);
+}
+
+// Contribution of super-block `i` of one output row to that row's dot,
+// computed by the 16 threads that own this block. `block_byte_off` is the
+// byte offset of the block in `weights` (row_base + i*144); `x_block_elem` is
+// the element offset of the block's activations in `xv` (t*in_dim + i*256).
+// Faithful port of llama.cpp's `calc_superblock` (one row, one column).
+fn sb(block_byte_off: u32, x_block_elem: u32, y_offset: u32, q_offset: u32, v_im: u32) -> f32 {
+    let header = weights[block_byte_off / 16u];
+    let d = f16_to_f32(header.x & 0xFFFFu);
+    let dmin = f16_to_f32(header.x >> 16u);
+
+    // Scales/mins — llama.cpp's packed-u16 unpacking of get_scale_min_k4.
+    let scale0_u32 = scale_u16(header, v_im);
+    let scale4_u32 = scale_u16(header, v_im + 2u);
+    let scale8_u32 = scale_u16(header, v_im + 4u);
+    let scale_0_4_l = (scale4_u32 << 16u) | scale0_u32;
+    let scale_0_4_h = (scale_0_4_l & 0xC0C0C0C0u) >> 2u;
+    let sc_l = unpack4_f(scale_0_4_l & 0x3F3F3F3Fu);
+    let sc_8 = unpack4_f((((scale8_u32 << 12u) | scale8_u32) & 0x0F0F0F0Fu) | scale_0_4_h);
+    let sc0 = sc_l.x; let sc1 = sc_l.y; let sc2 = sc_l.z; let sc3 = sc_l.w;
+    let sc4 = sc_8.x; let sc5 = sc_8.y; let sc6 = sc_8.z; let sc7 = sc_8.w;
+
+    // 16 weight nibbles: two packed qs words (this thread's, and its +64 pair).
+    let qs0 = read_word_v4(block_byte_off + 16u + q_offset);
+    let qs64 = read_word_v4(block_byte_off + 16u + q_offset + 64u);
+    let y1 = (x_block_elem + y_offset) / 4u;
+    let y2 = (x_block_elem + y_offset + 128u) / 4u;
+    let ones = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+
+    // Accumulate the four (weight, activation) vec4 groups one at a time so
+    // only a single vec4 pair is live at once — the whole-superblock scale/min
+    // sums stay in two scalars rather than four hoisted vec4s each. Keeps the
+    // kernel's peak register footprint down (occupancy is the goal here).
+    var main_sum: f32 = 0.0;
+    var min_sum: f32 = 0.0;
+    {
+        let by = xv[y1];
+        let q = unpack4_f(qs0 & 0x0F0F0F0Fu); // elements 0..3
+        main_sum = main_sum + sc0 * dot(by, q);
+        min_sum = min_sum + sc2 * dot(by, ones);
+    }
+    {
+        let by = xv[y1 + 8u];
+        let q = unpack4_f((qs0 >> 4u) & 0x0F0F0F0Fu); // 4..7
+        main_sum = main_sum + sc1 * dot(by, q);
+        min_sum = min_sum + sc3 * dot(by, ones);
+    }
+    {
+        let by = xv[y2];
+        let q = unpack4_f(qs64 & 0x0F0F0F0Fu); // 8..11
+        main_sum = main_sum + sc4 * dot(by, q);
+        min_sum = min_sum + sc6 * dot(by, ones);
+    }
+    {
+        let by = xv[y2 + 8u];
+        let q = unpack4_f((qs64 >> 4u) & 0x0F0F0F0Fu); // 12..15
+        main_sum = main_sum + sc5 * dot(by, q);
+        min_sum = min_sum + sc7 * dot(by, ones);
+    }
+    return d * main_sum - dmin * min_sum;
+}
+"#;
+
+/// The **light** `Q4_K` decode matmul-vec kernel (`ORANGU_Q4K_LIGHT`): a WGSL
+/// port of llama.cpp's `mul_mat_vec_q4_k.comp`, targeting register pressure /
+/// occupancy rather than load count (which Steps 7/13 showed is a null on this
+/// GPU). Where the default dual-nibble kernel gives one 32-thread workgroup a
+/// whole super-block and keeps eight activations plus `n_rows` accumulators
+/// live, this gives **16 threads** each a super-block (two run in parallel in
+/// the 32-thread workgroup, `it_size = 2`), each thread owning 16 weight
+/// nibbles from two packed `u32` `qs` reads and four `vec4` activation reads —
+/// so the only state live across the block loop is the `n_rows` accumulators.
+/// Same 6-binding shape, `Meta`, dispatch grid (`ceil(out_dim / n_rows)` × per
+/// token, via `selects_wide_unroll`), and 144-byte block layout as the dual
+/// kernel, so it drops into `pipeline_for` with no dispatch/bind-group change.
+/// Not bit-identical (it reorders the float adds vs. `CpuBackend`), but
+/// cross-checks within tolerance. Opt-in and default-off. Measured via
+/// `RADV_DEBUG=shaderstats`, it compiles to **56 VGPRs / 1720 B (0 spills)** on
+/// gfx1012 — *higher* register pressure than the dual kernel's 48 VGPRs
+/// (holding 16 nibbles + four `vec4` activations + eight scalar scales live per
+/// super-block costs more registers than it saves in code), so it lowers rather
+/// than raises occupancy. Source-level register-minimizing (accumulating each
+/// `vec4` group in turn instead of hoisting all four) did not move the count —
+/// the allocation is compiler-determined. It is therefore *not* the occupancy
+/// lever it was meant to be; kept for reference / other GPUs.
+pub fn shader_source_reduce_q4k_light(n_rows: usize, subgroup: bool) -> String {
+    let mut s = String::from(Q4K_LIGHT_PRELUDE);
+    s.push_str(&format!(
+        "\nvar<workgroup> psums: array<f32, {}>;\n\n",
+        n_rows * 32
+    ));
+    s.push_str("@compute @workgroup_size(32)\nfn main(\n    @builtin(workgroup_id) wid: vec3<u32>,\n    @builtin(local_invocation_id) lid: vec3<u32>,\n    @builtin(num_workgroups) nwg: vec3<u32>,");
+    s.push_str(subgroup_entry_params(subgroup));
+    s.push_str("\n) {\n");
+    s.push_str(&format!(
+        "    let n_row_groups = (params.out_dim + {}u) / {n_rows}u;\n",
+        n_rows - 1
+    ));
+    s.push_str("    let flat = wid.x + wid.y * nwg.x + wid.z * nwg.x * nwg.y;\n    if (flat >= n_row_groups * params.n_tokens) {\n        return;\n    }\n");
+    s.push_str("    let rg = flat / params.n_tokens;\n    let t = flat % params.n_tokens;\n");
+    s.push_str(&format!("    let o0 = rg * {n_rows}u;\n"));
+    for i in 1..n_rows {
+        s.push_str(&format!("    let o{i} = o0 + {i}u;\n"));
+    }
+    s.push_str("    let tid = lid.x;\n    let itid = tid % 16u;\n    let ix = tid / 16u;\n");
+    s.push_str("    let il = itid / 4u;\n    let ir = itid % 4u;\n    let v_im = il / 2u;\n    let v_in = il % 2u;\n    let l0 = 4u * (2u * ir + v_in);\n    let q_offset = 32u * v_im + l0;\n    let y_offset = 64u * v_im + l0;\n");
+    s.push_str("    let num_blocks = params.in_dim / 256u;\n    let x_tok = t * params.in_dim;\n");
+    for i in 0..n_rows {
+        s.push_str(&format!("    var acc{i}: f32 = 0.0;\n"));
+    }
+    s.push_str("    var i: u32 = ix;\n    loop {\n        if (i >= num_blocks) {\n            break;\n        }\n        let xrb = x_tok + i * 256u;\n");
+    s.push_str("        acc0 = acc0 + sb(o0 * params.row_bytes + i * 144u, xrb, y_offset, q_offset, v_im);\n");
+    for i in 1..n_rows {
+        s.push_str(&format!(
+            "        if (o{i} < params.out_dim) {{\n            acc{i} = acc{i} + sb(o{i} * params.row_bytes + i * 144u, xrb, y_offset, q_offset, v_im);\n        }}\n"
+        ));
+    }
+    // it_size = workgroup_size(32) / 16 = 2 super-blocks per iteration.
+    s.push_str("        i = i + 2u;\n    }\n\n");
+    s.push_str(&light_reduce(n_rows, subgroup));
+    s.push_str("}\n");
+    s
+}
+
+/// Reduction for [`shader_source_reduce_q4k_light`] — sums each row's `acc`
+/// across all 32 lanes (a single wave32 subgroup, so `subgroupAdd` when
+/// available, else a 32-wide shared-memory tree) and lane 0 writes it out.
+fn light_reduce(n_rows: usize, subgroup: bool) -> String {
+    let mut s = String::new();
+    if subgroup {
+        for i in 0..n_rows {
+            s.push_str(&format!("    let sg{i} = subgroupAdd(acc{i});\n"));
+        }
+        s.push_str("    if (sg_lane == 0u) {\n");
+        s.push_str("        y[t * params.out_dim + o0] = sg0;\n");
+        for i in 1..n_rows {
+            s.push_str(&format!(
+                "        if (o{i} < params.out_dim) {{\n            y[t * params.out_dim + o{i}] = sg{i};\n        }}\n"
+            ));
+        }
+        s.push_str("    }\n");
+    } else {
+        for i in 0..n_rows {
+            s.push_str(&format!("    psums[{i}u * 32u + tid] = acc{i};\n"));
+        }
+        s.push_str("    workgroupBarrier();\n    var stride: u32 = 16u;\n    loop {\n        if (stride == 0u) {\n            break;\n        }\n        if (tid < stride) {\n");
+        for i in 0..n_rows {
+            s.push_str(&format!(
+                "            psums[{i}u * 32u + tid] = psums[{i}u * 32u + tid] + psums[{i}u * 32u + tid + stride];\n"
+            ));
+        }
+        s.push_str(
+            "        }\n        workgroupBarrier();\n        stride = stride / 2u;\n    }\n",
+        );
+        s.push_str("    if (tid == 0u) {\n");
+        s.push_str("        y[t * params.out_dim + o0] = psums[0];\n");
+        for i in 1..n_rows {
+            s.push_str(&format!(
+                "        if (o{i} < params.out_dim) {{\n            y[t * params.out_dim + o{i}] = psums[{i}u * 32u];\n        }}\n"
+            ));
+        }
+        s.push_str("    }\n");
+    }
+    s
+}
+
 pub fn shader_source_reduce_q4k_dual_nibble(n_rows: usize, subgroup: bool) -> String {
     let suffix = dual_nibble_suffix(n_rows, subgroup);
     format!("{PRELUDE_VEC4}\n{Q4K_DUAL_MIDDLE}\n{suffix}")
@@ -3666,6 +4273,200 @@ fn main(
 }
 "#;
 
+/// **GQA-grouped** split-k phase 1. Same online-softmax math and same
+/// `partial_ml`/`partial_acc` output layout (per *query* head) as
+/// [`ATTENTION_SPLIT_SHADER_TEMPLATE`] — so [`ATTENTION_SPLIT_REDUCE_SHADER`]
+/// and the bind groups are untouched — but each workgroup covers one **KV
+/// head** and its whole group of `group = n_head / n_head_kv` query heads at
+/// once (dispatched `(n_head_kv, k_num, 1)` instead of `(n_head, k_num, 1)`).
+/// The point: the single shared KV head's K and V are read from global **once
+/// per position** and reused across all `group` query heads, instead of the
+/// un-grouped kernel re-reading them once per query-head workgroup (`group`×,
+/// for MQA `group = n_head`). K is shared in the score loop (one `kv_read_k`
+/// per element, dotted against every head's Q); V is shared in the accumulation
+/// loop (one `kv_read_v` per `(d, position)`, weighted into every head's `acc`).
+/// Numerically identical to the un-grouped kernel — it only changes which
+/// workgroup reads what, not the arithmetic — so greedy output is byte-identical.
+/// **Trade-off (measure it):** for MQA this drops the workgroup count from
+/// `n_head·k_num` to `n_head_kv·k_num`, and keeps `group` heads' `(m, l, acc)`
+/// state live — both cut occupancy, the very thing split-k exists to raise.
+/// Opt-in (`ORANGU_ATTN_GQA=1`). `group` and `head_dim` are baked per pipeline.
+/// Classic (tree) reductions only — the subgroup path isn't generated for it.
+pub fn shader_source_attention_split_gqa(
+    kv_storage: KvStorage,
+    head_dim: u32,
+    group: u32,
+) -> String {
+    let (kv_bindings, kv_read_fns) = kv_storage.bindings_and_read_fns();
+    let enable = kv_storage.enable_directive();
+    let acc_len = group * head_dim;
+    let probs_len = group * 64;
+    format!(
+        r#"{enable}
+struct AttnSplitMeta {{
+    n_head: u32,
+    n_head_kv: u32,
+    head_dim: u32,
+    window_start: u32,
+    n_pos: u32,
+    k_num: u32,
+    scale: f32,
+    _pad: u32,
+}}
+
+@group(0) @binding(0) var<storage, read> aq: array<f32>;
+{kv_bindings}
+@group(0) @binding(3) var<storage, read_write> partial_ml: array<f32>;
+@group(0) @binding(4) var<storage, read_write> partial_acc: array<f32>;
+@group(0) @binding(5) var<uniform> am: AttnSplitMeta;
+
+{kv_read_fns}
+
+const GROUP: u32 = {group}u;
+const HEAD_DIM: u32 = {head_dim}u;
+
+var<workgroup> shared_reduce: array<f32, 64>;
+var<workgroup> probs_g: array<f32, {probs_len}>;
+var<workgroup> acc: array<f32, {acc_len}>;
+
+@compute @workgroup_size(64)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {{
+    let kv_head = wid.x;
+    let split_idx = wid.y;
+    let local = lid.x;
+    let head_dim = am.head_dim;
+    let k_num = am.k_num;
+
+    let split_len = (am.n_pos + k_num - 1u) / k_num;
+    let split_start = split_idx * split_len;
+    let split_end = min(split_start + split_len, am.n_pos);
+
+    var z: u32 = local;
+    loop {{
+        if (z >= GROUP * head_dim) {{ break; }}
+        acc[z] = 0.0;
+        z = z + 64u;
+    }}
+
+    var m: array<f32, GROUP>;
+    var l: array<f32, GROUP>;
+    for (var hq: u32 = 0u; hq < GROUP; hq = hq + 1u) {{
+        m[hq] = -1e30;
+        l[hq] = 0.0;
+    }}
+
+    if (split_start < split_end) {{
+        var tile_start: u32 = split_start;
+        loop {{
+            if (tile_start >= split_end) {{ break; }}
+            let tile_len = min(64u, split_end - tile_start);
+            let has_pos = local < tile_len;
+            let p = am.window_start + tile_start + local;
+
+            // Shared K: read each K element once, dot into every head's score.
+            var scores: array<f32, GROUP>;
+            for (var hq: u32 = 0u; hq < GROUP; hq = hq + 1u) {{ scores[hq] = -1e30; }}
+            if (has_pos) {{
+                for (var hq: u32 = 0u; hq < GROUP; hq = hq + 1u) {{ scores[hq] = 0.0; }}
+                let k_base = (p * am.n_head_kv + kv_head) * head_dim;
+                var d: u32 = 0u;
+                loop {{
+                    if (d >= head_dim) {{ break; }}
+                    let kval = kv_read_k(k_base + d);
+                    for (var hq: u32 = 0u; hq < GROUP; hq = hq + 1u) {{
+                        scores[hq] = scores[hq] + aq[(kv_head * GROUP + hq) * head_dim + d] * kval;
+                    }}
+                    d = d + 1u;
+                }}
+                for (var hq: u32 = 0u; hq < GROUP; hq = hq + 1u) {{ scores[hq] = scores[hq] * am.scale; }}
+            }}
+
+            // Per-head online-softmax update (tree reductions over the tile).
+            var alpha_old: array<f32, GROUP>;
+            var alpha_tile: array<f32, GROUP>;
+            for (var hq: u32 = 0u; hq < GROUP; hq = hq + 1u) {{
+                shared_reduce[local] = scores[hq];
+                workgroupBarrier();
+                var stm: u32 = 32u;
+                loop {{
+                    if (stm == 0u) {{ break; }}
+                    if (local < stm) {{ shared_reduce[local] = max(shared_reduce[local], shared_reduce[local + stm]); }}
+                    workgroupBarrier();
+                    stm = stm / 2u;
+                }}
+                let tile_max = shared_reduce[0];
+                workgroupBarrier();
+                var prob: f32 = 0.0;
+                if (has_pos) {{ prob = exp(scores[hq] - tile_max); }}
+                probs_g[hq * 64u + local] = prob;
+                shared_reduce[local] = prob;
+                var st: u32 = 32u;
+                workgroupBarrier();
+                loop {{
+                    if (st == 0u) {{ break; }}
+                    if (local < st) {{ shared_reduce[local] = shared_reduce[local] + shared_reduce[local + st]; }}
+                    workgroupBarrier();
+                    st = st / 2u;
+                }}
+                let tile_sum = shared_reduce[0];
+                workgroupBarrier();
+                let new_m = max(m[hq], tile_max);
+                alpha_old[hq] = exp(m[hq] - new_m);
+                alpha_tile[hq] = exp(tile_max - new_m);
+                l[hq] = l[hq] * alpha_old[hq] + tile_sum * alpha_tile[hq];
+                m[hq] = new_m;
+            }}
+
+            // Shared V: read each V element once, weight into every head's acc.
+            var d2: u32 = local;
+            loop {{
+                if (d2 >= head_dim) {{ break; }}
+                var contrib: array<f32, GROUP>;
+                for (var hq: u32 = 0u; hq < GROUP; hq = hq + 1u) {{ contrib[hq] = 0.0; }}
+                var j: u32 = 0u;
+                loop {{
+                    if (j >= tile_len) {{ break; }}
+                    let vp = am.window_start + tile_start + j;
+                    let v_base = (vp * am.n_head_kv + kv_head) * head_dim;
+                    let vval = kv_read_v(v_base + d2);
+                    for (var hq: u32 = 0u; hq < GROUP; hq = hq + 1u) {{
+                        contrib[hq] = contrib[hq] + probs_g[hq * 64u + j] * vval;
+                    }}
+                    j = j + 1u;
+                }}
+                for (var hq: u32 = 0u; hq < GROUP; hq = hq + 1u) {{
+                    acc[hq * head_dim + d2] = acc[hq * head_dim + d2] * alpha_old[hq] + alpha_tile[hq] * contrib[hq];
+                }}
+                d2 = d2 + 64u;
+            }}
+
+            workgroupBarrier();
+            tile_start = tile_start + 64u;
+        }}
+    }}
+
+    for (var hq: u32 = 0u; hq < GROUP; hq = hq + 1u) {{
+        let h = kv_head * GROUP + hq;
+        let out_base = h * k_num + split_idx;
+        if (local == 0u) {{
+            partial_ml[out_base * 2u] = m[hq];
+            partial_ml[out_base * 2u + 1u] = l[hq];
+        }}
+        var d3: u32 = local;
+        loop {{
+            if (d3 >= head_dim) {{ break; }}
+            partial_acc[out_base * head_dim + d3] = acc[hq * head_dim + d3];
+            d3 = d3 + 64u;
+        }}
+    }}
+}}
+"#
+    )
+}
+
 pub fn shader_source_attention_split_reduce() -> String {
     ATTENTION_SPLIT_REDUCE_SHADER.to_string()
 }
@@ -4316,12 +5117,42 @@ pub fn shader_source_fused_norm_rope() -> String {
 /// matmul` just produced) — safe because nothing else reads it afterward
 /// in this submission, and the next decode step's own matmul dispatch
 /// overwrites the whole buffer again before anything reads it.
+/// Phase 0 of the GPU sample chain, dispatched only when the model sets a
+/// final-logit softcap: `v = cap * tanh(v / cap)` over every logit, in
+/// place, before the repeat-penalty and argmax phases. Reproduces the CPU
+/// path's softcap → penalty → argmax order exactly (the softcap is
+/// monotonic, so it can't change the greedy token, but applying it before
+/// the value-dependent repeat penalty keeps byte-parity with the CPU sampler
+/// when `repeat_penalty != 1`). Reuses the penalty phase's bind-group layout
+/// — only `logits` (binding 0) and `sample_meta` (binding 3) are read.
+const ARGMAX_SOFTCAP_SHADER: &str = r#"
+struct SampleMeta {
+    n_vocab: u32,
+    n_recent: u32,
+    repeat_penalty: f32,
+    logit_softcap: f32,
+}
+
+@group(0) @binding(0) var<storage, read_write> logits: array<f32>;
+@group(0) @binding(3) var<uniform> sample_meta: SampleMeta;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= sample_meta.n_vocab) {
+        return;
+    }
+    let cap = sample_meta.logit_softcap;
+    logits[idx] = cap * tanh(logits[idx] / cap);
+}
+"#;
+
 const ARGMAX_PENALTY_SHADER: &str = r#"
 struct SampleMeta {
     n_vocab: u32,
     n_recent: u32,
     repeat_penalty: f32,
-    _pad: u32,
+    logit_softcap: f32,
 }
 
 @group(0) @binding(0) var<storage, read_write> logits: array<f32>;
@@ -4468,6 +5299,10 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     }
 }
 "#;
+
+pub fn shader_source_argmax_softcap() -> String {
+    ARGMAX_SOFTCAP_SHADER.to_string()
+}
 
 pub fn shader_source_argmax_penalty() -> String {
     ARGMAX_PENALTY_SHADER.to_string()

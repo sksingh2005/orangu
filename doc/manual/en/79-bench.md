@@ -55,26 +55,67 @@ Typical output (one row per depth):
 
 ```
 orangu-bench → http://127.0.0.1:8100
-   depth |   gen | ttft_ms | tok/s(best) |    n_tok |     tok/s(mean±sd)
---------------------------------------------------------------------------
-       0 |   128 |     140 |       31.20 |      128 |    31.05 ±  0.12
-    1024 |   128 |     520 |       24.90 |      128 |    24.70 ±  0.18
-    2048 |   128 |     980 |       20.10 |      128 |    19.95 ±  0.20
+   depth |   gen | ttft_ms |    n_tok |     best |        mean ± sd
+-------------------------------------------------------------------
+       0 |   128 |     140 |      128 |    31.20 |    31.05 ±  0.12
+    1024 |   128 |     520 |      128 |    24.90 |    24.70 ±  0.18
+    2048 |   128 |     980 |      128 |    20.10 |    19.95 ±  0.20
 ```
 
 ### Options
 
-- `--url <base>` — server base URL (default `http://127.0.0.1:8100`). The tool
-  appends `/v1/completions`.
-- `--depths a,b,c` — comma-separated context depths to sweep (default `0`).
-- `--gen <n>` — tokens to generate per timed run (default `128`).
-- `--reps <n>` — repetitions per depth (default `3`); the reported rate is the
-  best (fastest) run, with mean ± standard deviation alongside.
-- `--no-warmup` — skip the initial short generation that loads/JITs before
-  timing (warmup is on by default).
-- `--timeout <secs>` — per-request timeout (default `600`).
-- `--model <id>` — model id to request; most single-model servers ignore it.
-- `--json` — emit one JSON object per depth instead of the table, for scripting.
+`orangu-bench --help`:
+
+```text
+Usage: orangu-bench [OPTIONS]
+
+Options:
+      --url <URL>          Base URL of the server [default: http://127.0.0.1:8100]
+      --depths <DEPTHS>    Comma-separated context depths to sweep [default: 0]
+      --gen <N_GEN>        Number of tokens to generate per timed run [default: 128]
+      --curve <CURVE>      Curve mode: ONE generation of this many tokens, decode rate bucketed by context [default: 0]
+      --bucket <BUCKET>    Bucket width (in context tokens) for --curve [default: 256]
+      --reps <REPS>        Repetitions per depth; the reported rate is the best run with mean±sd [default: 3]
+      --no-warmup          Skip the initial warmup run
+      --timeout <TIMEOUT>  Per-request timeout in seconds [default: 600]
+      --model <MODEL>      Model id to request
+      --json               Emit machine-readable JSON
+  -h, --help               Print help
+  -V, --version            Print version
+```
+
+Notes: `--url` is the server base URL (the tool appends `/v1/completions`);
+`--depths` is comma-separated (e.g. `0,512,1024,2048`); `--reps` reports the
+best (fastest) run with mean ± standard deviation alongside; warmup (one short
+generation) is on unless `--no-warmup`; `--json` emits one JSON object per depth
+instead of the table.
+
+### Curve mode (`--curve`) — decode scaling without prefill
+
+The depth sweep pads the *prompt* to reach a context depth, which means a large,
+slow, VRAM-heavy prefill on orangu (its multi-hundred-token prefill is
+CPU-orchestrated). `--curve N` avoids that entirely: it does **one** generation
+of `N` tokens, timestamps each streamed token, and reports the instantaneous
+decode rate per `--bucket`-token context window. That is the cleanest way to see
+decode-vs-context scaling, and it works identically against orangu-server and
+llama-server.
+
+```sh
+orangu-bench --curve 3072 --bucket 256   # decode rate at ctx 0, 256, 512, …, 2816
+```
+
+```text
+orangu-bench → http://127.0.0.1:8100 (curve: 3072 tokens, bucket 256)
+     ctx |    tok/s
+------------------
+       0 |    29.29
+     256 |    24.10
+     512 |    23.47
+     ...
+```
+
+Context position is approximated by the generated-token index (the prompt is
+short). `--json` emits `{"ctx":…,"tok_per_s":…,"tokens":…}` per bucket.
 
 ### Interpreting a comparison
 
@@ -85,6 +126,34 @@ attention / KV path scales, not in their per-token matmul — which is the
 distinction that matters when deciding what to optimize. The overall
 performance investigation this tool supports lives in
 `doc/SERVER_ROADMAP.md`.
+
+### Measuring kernel occupancy (register pressure), not just throughput
+
+`orangu-bench` measures end-to-end **throughput**, which on a laptop dGPU is at
+the mercy of the GPU's power state — if the core clock isn't pinned at its
+maximum, two runs minutes apart are not comparable (check
+`cat /sys/class/drm/card1/device/pp_dpm_sclk` and confirm the `*` is on the top
+frequency). When the question is instead *why* a compute kernel is slow — its
+register (VGPR) count and occupancy — there is a **clock-independent** measure:
+the RADV driver's compile-time shader statistics.
+
+```sh
+# Print per-pipeline VGPR/SGPR/occupancy as RADV compiles each kernel.
+# Run it through the cross-check TEST, not the server: the test builds the
+# GPU backend and compiles the pipelines, and is immune to model load and to
+# the occasional flaky long-lived server startup. `,nocache` forces a fresh
+# compile every run (RADV otherwise serves the stats-less disk cache).
+RADV_DEBUG=shaderstats,nocache \
+  cargo test --bin orangu-server matmul_matches_cpu_backend_for_q4_k -- --nocapture
+```
+
+To attribute a stats block to a specific kernel, capture with the kernel's env
+flag on and off (e.g. `ORANGU_Q4K_LIGHT=1` vs unset) and diff the `VGPRs:` /
+`Code size:` blocks — the one that appears only with the flag on is that kernel.
+`ORANGU_DUMP_SHADERS=<dir>` additionally writes each kernel's generated WGSL to
+`<dir>` for inspection. This is the harness the `doc/SERVER_ROADMAP.md` Step 16
+work used to settle a kernel's occupancy without trusting a throttled
+throughput number.
 
 ### Requirements and caveats
 
