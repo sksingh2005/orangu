@@ -398,12 +398,125 @@ button:disabled {
 }
 
 #composer {
+  position: relative;
   display: flex;
+  /* Default `stretch` so the "+" button and the actions column (with its
+     flex:1 Send) both grow to the input column's height — same size as the
+     input area, the way Send behaved before attachments were added. */
   gap: 10px;
   padding: 14px 16px;
   background: var(--bg-raised);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+/* The input column: the staged-attachment chips sit directly above the
+   textarea, both growing the composer upward as needed. */
+#composer-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* The "+" attach button and the little Document/File menu it opens. */
+#attach-btn {
+  font-size: 1.4em;
+}
+
+/* `display: flex` below would otherwise win over the UA `[hidden]` rule
+   (higher specificity), leaving the menu permanently open — pin it closed. */
+#attach-menu[hidden] {
+  display: none;
+}
+
+#attach-menu {
+  position: absolute;
+  left: 16px;
+  bottom: 60px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.18);
+}
+
+#attach-menu button {
+  border: 1px solid transparent;
+  background: none;
+  text-align: left;
+  padding: 8px 12px;
+  border-radius: 6px;
+  color: var(--text);
+}
+
+#attach-menu button:hover {
+  background: var(--bg-input);
+  border-color: transparent;
+}
+
+/* Attachment chips — staged (in #attachments) and, display-only, under a
+   sent message (in .message-attachments). */
+#attachments,
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Same specificity trap as #attach-menu — keep the strip collapsed when
+   there are no staged files. */
+#attachments[hidden] {
+  display: none;
+}
+
+.message-attachments {
+  margin-top: 8px;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 4px 10px;
+  font-size: 0.8em;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+}
+
+.attachment-chip .chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip .chip-size {
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+
+.attachment-chip .chip-remove {
+  flex-shrink: 0;
+  width: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 1.15em;
+  line-height: 1;
+  color: var(--text-dim);
+}
+
+.attachment-chip .chip-remove:hover {
+  border-color: transparent;
+  color: var(--error);
 }
 
 #input {

@@ -45,7 +45,19 @@
   <main id="transcript" aria-live="polite"></main>
 
   <form id="composer">
-    <textarea id="input" placeholder="Message orangu-server… (Enter to send, Shift+Enter for a new line)" rows="2"></textarea>
+    <button id="attach-btn" class="icon-btn" type="button" aria-label="Attach files" aria-haspopup="true" aria-expanded="false" title="Attach files">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </button>
+    <div id="attach-menu" role="menu" hidden>
+      <button type="button" role="menuitem" data-attach="document">Document</button>
+      <button type="button" role="menuitem" data-attach="file">File</button>
+    </div>
+    <input id="attach-input-document" class="attach-input" type="file" multiple hidden accept=".pdf,.txt,.md,.markdown,.rtf,.csv,.tsv,.json,.xml,.log,.doc,.docx,.xls,.xlsx,.xlsm,.ppt,.pptx,.odt,.ods,.odp,application/pdf,text/*,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.oasis.opendocument.text,application/vnd.oasis.opendocument.spreadsheet,application/vnd.oasis.opendocument.presentation">
+    <input id="attach-input-file" class="attach-input" type="file" multiple hidden>
+    <div id="composer-main">
+      <div id="attachments" hidden></div>
+      <textarea id="input" placeholder="Message orangu-server… (Enter to send, Shift+Enter for a new line)" rows="2"></textarea>
+    </div>
     <div id="composer-actions">
       <button id="reload-btn" class="icon-btn" type="button" hidden aria-label="Reload" title="Reload (pick up new features or CSS)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>

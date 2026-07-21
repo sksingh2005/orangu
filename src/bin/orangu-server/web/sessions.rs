@@ -53,6 +53,23 @@ pub struct SessionMessage {
     /// deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_ms: Option<u64>,
+    /// Files the user attached to this message. Kept (with their extracted
+    /// text) so a later turn still has the document in context, and shown
+    /// as chips under the message in the web UI. `#[serde(default)]` for
+    /// backward compatibility with `chat.json` written before attachments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
+/// One user-uploaded file: its identity, plus the text pulled out of it by
+/// `web::attachments` (`None` when the format carries no extractable text).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Attachment {
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -373,21 +390,34 @@ pub fn delete_session_dir(id: &str) -> Result<()> {
 pub fn append_turn(
     session: &mut Session,
     user_message: &str,
+    user_attachments: Vec<Attachment>,
     assistant_message: &str,
     generation_ms: Option<u64>,
 ) -> Result<()> {
     if session.title.is_empty() {
-        session.title = derive_title(user_message);
+        // A file-only message (no typed text) still deserves a title —
+        // fall back to the first attachment's name.
+        let title_seed = if user_message.trim().is_empty() {
+            user_attachments
+                .first()
+                .map(|a| a.name.as_str())
+                .unwrap_or(user_message)
+        } else {
+            user_message
+        };
+        session.title = derive_title(title_seed);
     }
     session.messages.push(SessionMessage {
         role: "user".to_string(),
         content: user_message.to_string(),
         generation_ms: None,
+        attachments: user_attachments,
     });
     session.messages.push(SessionMessage {
         role: "assistant".to_string(),
         content: assistant_message.to_string(),
         generation_ms,
+        attachments: Vec::new(),
     });
     session.updated_at = unix_now();
     save_session(session)
@@ -446,6 +476,7 @@ mod tests {
             append_turn(
                 &mut session,
                 "What is Rust?",
+                Vec::new(),
                 "A systems language.",
                 Some(123),
             )
@@ -454,6 +485,7 @@ mod tests {
             append_turn(
                 &mut session,
                 "And Go?",
+                Vec::new(),
                 "Also a systems-ish language.",
                 Some(456),
             )
@@ -472,11 +504,13 @@ mod tests {
                 role: "user".to_string(),
                 content: "hi".to_string(),
                 generation_ms: None,
+                attachments: Vec::new(),
             });
             b.messages.push(SessionMessage {
                 role: "user".to_string(),
                 content: "hi".to_string(),
                 generation_ms: None,
+                attachments: Vec::new(),
             });
             a.updated_at = 100;
             b.updated_at = 200;
@@ -499,6 +533,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "hi".to_string(),
                 generation_ms: None,
+                attachments: Vec::new(),
             });
             save_session(&empty).unwrap();
             save_session(&used).unwrap();
@@ -614,6 +649,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "hi".to_string(),
                 generation_ms: None,
+                attachments: Vec::new(),
             });
             save_session(&used_inactive).unwrap();
             let empty_active = create_session().unwrap();
@@ -652,6 +688,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "hi".to_string(),
                 generation_ms: None,
+                attachments: Vec::new(),
             });
             save_session(&used).unwrap();
 

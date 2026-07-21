@@ -22,12 +22,13 @@
 //! server-side (`web::render`), reusing `markdown`/`syntect` — the same
 //! crates `orangu`'s own TUI uses for its terminal rendering.
 
+pub mod attachments;
 pub mod render;
 pub mod sessions;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -45,7 +46,7 @@ use std::{
 use crate::engine::chat_template::{ChatMessage, ChatTemplate};
 use crate::engine::generate::{Engine, FinishReason, GenerateRequest, StreamEvent};
 use crate::engine::sampling::SamplingParams;
-use sessions::{Session, SessionMessage};
+use sessions::{Attachment, Session, SessionMessage};
 
 const INDEX_HTML: &str = include_str!("assets/index.html");
 const APP_CSS: &str = include_str!("assets/app.css");
@@ -181,6 +182,10 @@ pub fn build_router(state: Arc<WebState>) -> Router {
         .route("/api/sessions", post(create_session).get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/messages", post(send_message))
+        // Attachments ride along as base64 in the message JSON, so the
+        // default 2 MB body cap is far too small — allow room for a handful
+        // of documents (base64 inflates bytes by ~4/3).
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(state)
 }
 
@@ -358,6 +363,13 @@ async fn list_sessions() -> impl IntoResponse {
 }
 
 #[derive(Serialize)]
+struct AttachmentView {
+    name: String,
+    mime: String,
+    size: u64,
+}
+
+#[derive(Serialize)]
 struct SessionMessageView {
     role: String,
     content: String,
@@ -365,6 +377,10 @@ struct SessionMessageView {
     html: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     generation_ms: Option<u64>,
+    // Metadata only — the extracted text stays server-side; the UI just
+    // needs to render a chip per file.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<AttachmentView>,
 }
 
 #[derive(Serialize)]
@@ -394,6 +410,15 @@ async fn get_session(Path(id): Path<String>) -> impl IntoResponse {
                         content: m.content,
                         html,
                         generation_ms: m.generation_ms,
+                        attachments: m
+                            .attachments
+                            .into_iter()
+                            .map(|a| AttachmentView {
+                                name: a.name,
+                                mime: a.mime,
+                                size: a.size,
+                            })
+                            .collect(),
                     }
                 })
                 .collect(),
@@ -406,6 +431,8 @@ async fn get_session(Path(id): Path<String>) -> impl IntoResponse {
 #[derive(Deserialize)]
 struct SendMessageRequest {
     content: String,
+    #[serde(default)]
+    attachments: Vec<attachments::IncomingAttachment>,
 }
 
 async fn send_message(
@@ -425,7 +452,21 @@ async fn send_message(
             .into_response();
     };
 
-    let prompt = match render_prompt(&state, &template_source, &session, &req.content) {
+    // Decode + extract text from every attachment up front, so the prompt
+    // and the persisted turn share exactly the same view of them.
+    let mut extracted: Vec<Attachment> = Vec::with_capacity(req.attachments.len());
+    for incoming in &req.attachments {
+        match attachments::extract(incoming) {
+            Ok(att) => extracted.push(att),
+            Err(err) => return (StatusCode::BAD_REQUEST, format!("{err:#}")).into_response(),
+        }
+    }
+
+    if req.content.trim().is_empty() && extracted.is_empty() {
+        return (StatusCode::BAD_REQUEST, "message is empty").into_response();
+    }
+
+    let prompt = match render_prompt(&state, &template_source, &session, &req.content, &extracted) {
         Ok(prompt) => prompt,
         // {err:#} (anyhow's "alternate" chain format) rather than {err} —
         // the latter only prints the outermost context, losing exactly the
@@ -447,6 +488,7 @@ async fn send_message(
         .await;
 
     let user_message = req.content;
+    let user_attachments = extracted;
     let stream = async_stream::stream! {
         let mut full = String::new();
         loop {
@@ -464,7 +506,7 @@ async fn send_message(
                     let full = state.engine.tokenizer.clean_up_tokenization_spaces(&full);
                     let html = render::render_markdown_to_html(&full);
                     let generation_ms = stats.generate_time.as_millis() as u64;
-                    if let Err(err) = sessions::append_turn(&mut session, &user_message, &full, Some(generation_ms)) {
+                    if let Err(err) = sessions::append_turn(&mut session, &user_message, user_attachments, &full, Some(generation_ms)) {
                         yield Ok(axum::response::sse::Event::default()
                             .data(json!({"type": "error", "message": err.to_string()}).to_string()));
                         break;
@@ -490,18 +532,23 @@ fn render_prompt(
     template_source: &str,
     session: &Session,
     new_message: &str,
+    new_attachments: &[Attachment],
 ) -> anyhow::Result<String> {
+    // Each message's stored attachments (with their extracted text) are
+    // folded back into its content here rather than being persisted inline,
+    // so the transcript stays clean while the model still sees the document
+    // — on this turn and on every follow-up turn that replays the history.
     let mut messages: Vec<ChatMessage> = session
         .messages
         .iter()
         .map(|m: &SessionMessage| ChatMessage {
             role: m.role.clone(),
-            content: m.content.clone(),
+            content: attachments::compose_content(&m.content, &m.attachments),
         })
         .collect();
     messages.push(ChatMessage {
         role: "user".to_string(),
-        content: new_message.to_string(),
+        content: attachments::compose_content(new_message, new_attachments),
     });
 
     let bos = state

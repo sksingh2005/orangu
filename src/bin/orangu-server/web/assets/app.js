@@ -11,8 +11,22 @@
   const historyPanel = document.getElementById("history-panel");
   const historyList = document.getElementById("history-list");
   const themeToggleBtn = document.getElementById("theme-toggle-btn");
+  const attachBtn = document.getElementById("attach-btn");
+  const attachMenu = document.getElementById("attach-menu");
+  const attachmentsEl = document.getElementById("attachments");
+  const attachInputs = {
+    document: document.getElementById("attach-input-document"),
+    file: document.getElementById("attach-input-file"),
+  };
 
   const state = { sessionId: null, busy: false, abortController: null };
+
+  // Files staged for the next message. Each entry is
+  // {name, mime, size, data} where `data` is base64 of the raw bytes — the
+  // server decodes it and extracts text (documents) or notes it as a
+  // reference (binaries), since the engine is text-only.
+  let pendingAttachments = [];
+  const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
   // Swapped into #send-btn by setBusy() below — Send while idle, a plain
   // "X" while a reply is streaming so the same button can cancel it.
@@ -53,13 +67,104 @@
       .replace(/>/g, "&gt;");
   }
 
-  function addMessage(role, text) {
+  function addMessage(role, text, attachments) {
     const el = document.createElement("div");
     el.className = `message ${role}`;
     el.textContent = text;
+    appendAttachmentChips(el, attachments);
     transcript.appendChild(el);
     transcript.scrollTop = transcript.scrollHeight;
     return el;
+  }
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  // One attachment chip: name + size, and (staged only) a remove button.
+  function makeAttachmentChip(att, onRemove) {
+    const chip = document.createElement("span");
+    chip.className = "attachment-chip";
+
+    const name = document.createElement("span");
+    name.className = "chip-name";
+    name.textContent = att.name;
+    name.title = att.mime ? `${att.name} (${att.mime})` : att.name;
+
+    const size = document.createElement("span");
+    size.className = "chip-size";
+    size.textContent = formatSize(att.size);
+
+    chip.append(name, size);
+
+    if (onRemove) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "chip-remove";
+      remove.setAttribute("aria-label", `Remove ${att.name}`);
+      remove.textContent = "×";
+      remove.addEventListener("click", onRemove);
+      chip.appendChild(remove);
+    }
+    return chip;
+  }
+
+  // Display-only chips shown under a sent (or reloaded) user message.
+  function appendAttachmentChips(el, attachments) {
+    if (!attachments || attachments.length === 0) return;
+    const container = document.createElement("div");
+    container.className = "message-attachments";
+    for (const att of attachments) {
+      container.appendChild(makeAttachmentChip(att, null));
+    }
+    el.appendChild(container);
+  }
+
+  // Re-render the staged-attachment strip above the input from
+  // `pendingAttachments`, each chip removable.
+  function renderPendingAttachments() {
+    attachmentsEl.innerHTML = "";
+    for (const att of pendingAttachments) {
+      attachmentsEl.appendChild(
+        makeAttachmentChip(att, () => {
+          pendingAttachments = pendingAttachments.filter((a) => a !== att);
+          renderPendingAttachments();
+        }),
+      );
+    }
+    attachmentsEl.hidden = pendingAttachments.length === 0;
+  }
+
+  function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        // readAsDataURL gives "data:<mime>;base64,XXXX" — keep just XXXX.
+        const result = String(reader.result);
+        const comma = result.indexOf(",");
+        resolve(comma >= 0 ? result.slice(comma + 1) : result);
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function stageFiles(fileList) {
+    for (const file of Array.from(fileList || [])) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        window.alert(`"${file.name}" is larger than 25 MB and was skipped.`);
+        continue;
+      }
+      try {
+        const data = await readFileAsBase64(file);
+        pendingAttachments.push({ name: file.name, mime: file.type || "", size: file.size, data });
+      } catch (err) {
+        console.error("failed to read attachment", file.name, err);
+      }
+    }
+    renderPendingAttachments();
   }
 
   function addRenderedMessage(role, html) {
@@ -288,6 +393,7 @@
   function setBusy(busy) {
     state.busy = busy;
     input.disabled = busy;
+    attachBtn.disabled = busy;
     sendBtn.classList.toggle("stop", busy);
     sendBtn.innerHTML = busy ? STOP_ICON : SEND_ICON;
     sendBtn.setAttribute("aria-label", busy ? "Stop" : "Send");
@@ -331,7 +437,7 @@
         renderMathIn(el);
         addTimingFooter(el, message.generation_ms, message.content);
       } else {
-        addMessage(message.role, message.content);
+        addMessage(message.role, message.content, message.attachments);
       }
     }
     hideHistory();
@@ -397,11 +503,12 @@
     addErrorFooter(assistantEl, detail);
   }
 
-  async function sendMessage(text) {
+  async function sendMessage(text, attachments) {
+    attachments = attachments || [];
     if (!state.sessionId) {
       await newChat();
     }
-    addMessage("user", text);
+    addMessage("user", text, attachments);
     const assistantEl = addMessage("assistant", "🤖");
     assistantEl.classList.add("pending");
     setBusy(true);
@@ -428,7 +535,10 @@
       const res = await fetch(`/api/sessions/${encodeURIComponent(state.sessionId)}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: text }),
+        body: JSON.stringify({
+          content: text,
+          attachments: attachments.map((a) => ({ name: a.name, mime: a.mime, data: a.data })),
+        }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
@@ -532,9 +642,12 @@
     event.preventDefault();
     if (state.busy) return;
     const text = input.value.trim();
-    if (!text) return;
+    if (!text && pendingAttachments.length === 0) return;
+    const attachments = pendingAttachments;
+    pendingAttachments = [];
+    renderPendingAttachments();
     input.value = "";
-    sendMessage(text).catch((err) => console.error(err));
+    sendMessage(text, attachments).catch((err) => console.error(err));
   });
 
   input.addEventListener("keydown", (event) => {
@@ -546,6 +659,43 @@
 
   newChatBtn.addEventListener("click", () => {
     newChat().catch((err) => console.error(err));
+  });
+
+  // Attach ("+") button: toggle the Document/File menu; each item opens the
+  // matching hidden <input type=file>.
+  function setAttachMenu(open) {
+    attachMenu.hidden = !open;
+    attachBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  attachBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setAttachMenu(attachMenu.hidden);
+  });
+
+  for (const item of attachMenu.querySelectorAll("button[data-attach]")) {
+    item.addEventListener("click", () => {
+      setAttachMenu(false);
+      attachInputs[item.dataset.attach].click();
+    });
+  }
+
+  for (const inputEl of Object.values(attachInputs)) {
+    inputEl.addEventListener("change", () => {
+      const files = inputEl.files;
+      inputEl.value = ""; // allow re-picking the same file later
+      stageFiles(files).catch((err) => console.error(err));
+    });
+  }
+
+  // Close the menu on an outside click or Escape.
+  document.addEventListener("click", (event) => {
+    if (!attachMenu.hidden && event.target !== attachBtn && !attachMenu.contains(event.target)) {
+      setAttachMenu(false);
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") setAttachMenu(false);
   });
 
   reloadBtn.addEventListener("click", () => {
