@@ -1,0 +1,9 @@
+.github/**
+src/**
+test/**
+dist/test/**
+dist/**/*.map
+tsconfig.json
+package-lock.json
+node_modules/**
+*.vsix

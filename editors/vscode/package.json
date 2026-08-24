@@ -1,0 +1,140 @@
+{
+  "name": "orangu-vscode",
+  "displayName": "Orangu",
+  "description": "Private inline code completions from your local orangu-server.",
+  "version": "0.1.0",
+  "publisher": "mnemosyne-systems",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mnemosyne-systems/orangu.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "orangu",
+    "local ai",
+    "inline completion",
+    "privacy"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Orangu sends editor context to the configured completion endpoint."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "orangu.toggleInlineCompletions",
+        "title": "Orangu: Toggle Inline Completions"
+      },
+      {
+        "command": "orangu.triggerInlineCompletion",
+        "title": "Orangu: Trigger Inline Completion"
+      },
+      {
+        "command": "orangu.checkConnection",
+        "title": "Orangu: Check Server Connection"
+      },
+      {
+        "command": "orangu.setApiKey",
+        "title": "Orangu: Set API Key"
+      },
+      {
+        "command": "orangu.clearApiKey",
+        "title": "Orangu: Clear API Key"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "orangu.triggerInlineCompletion",
+        "key": "ctrl+alt+o",
+        "mac": "cmd+alt+o",
+        "when": "editorTextFocus && !editorReadonly"
+      }
+    ],
+    "configuration": {
+      "title": "Orangu",
+      "properties": {
+        "orangu.inlineCompletions.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer Orangu inline completions while typing."
+        },
+        "orangu.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8100/v1",
+          "description": "OpenAI-compatible API base URL. Editor context is sent to this endpoint."
+        },
+        "orangu.model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model identifier. Leave empty when connecting directly to one orangu-server."
+        },
+        "orangu.completion.maxTokens": {
+          "type": "integer",
+          "default": 64,
+          "minimum": 1,
+          "maximum": 512,
+          "description": "Maximum tokens generated for one inline completion."
+        },
+        "orangu.completion.temperature": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature for inline completions."
+        },
+        "orangu.completion.contextCharacters": {
+          "type": "integer",
+          "default": 12000,
+          "minimum": 256,
+          "maximum": 100000,
+          "description": "Maximum number of characters before the cursor sent as completion context."
+        },
+        "orangu.completion.debounceMilliseconds": {
+          "type": "integer",
+          "default": 250,
+          "minimum": 0,
+          "maximum": 2000,
+          "description": "Delay after typing before an automatic completion request."
+        },
+        "orangu.completion.disabledLanguages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "log",
+            "output",
+            "scminput"
+          ],
+          "description": "VS Code language identifiers where automatic completions are disabled."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "test": "npm run compile && node --test dist/test/completion.test.js",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "^5.7.0"
+  }
+}
