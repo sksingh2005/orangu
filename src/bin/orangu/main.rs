@@ -258,6 +258,26 @@ enum CliCommand {
     Resume,
     /// Cancel every saved loop in a workflow.
     Clear,
+    /// Explain one symbol using the workspace knowledge graph and exit. This
+    /// does not require an LLM server configuration.
+    Explain {
+        /// Symbol name or exact graph id.
+        symbol: String,
+    },
+    /// Print the shortest relationship path between two workspace symbols and
+    /// exit. This does not require an LLM server configuration.
+    Path {
+        /// Starting symbol name or exact graph id.
+        source: String,
+        /// Destination symbol name or exact graph id.
+        target: String,
+        /// Ignore edge direction, useful for architectural discovery.
+        #[arg(long)]
+        undirected: bool,
+        /// Refuse paths longer than this many hops (1-64, default 8).
+        #[arg(long, default_value_t = 8)]
+        max_hops: usize,
+    },
 }
 
 /// This binary's three completion scripts, for the shared
@@ -332,8 +352,15 @@ fn command_mode_refusal(args: &Args) -> Option<&'static str> {
         args.command.as_ref(),
         Some(CliCommand::Status | CliCommand::Pause | CliCommand::Resume | CliCommand::Clear)
     );
+    let graph_action = matches!(
+        args.command.as_ref(),
+        Some(CliCommand::Explain { .. } | CliCommand::Path { .. })
+    );
     if workflow_action && args.workflow.is_none() {
         return Some("workflow lifecycle actions require --workflow FILE");
+    }
+    if graph_action && args.config.is_some() {
+        return Some("the explain and path commands are offline and do not use --config");
     }
     if (args.workflow.is_some() && !workflow_action)
         || args.dry_run
@@ -426,6 +453,14 @@ async fn run() -> Result<()> {
     }
     if args.init {
         return init::run_init().await;
+    }
+    if matches!(
+        args.command.as_ref(),
+        Some(CliCommand::Explain { .. } | CliCommand::Path { .. })
+    ) {
+        let workspace = resolve_workspace_root(args.workspace.take())?;
+        let command = args.command.take().expect("graph command was checked above");
+        return run_graph_command(workspace, command, args.quiet);
     }
     if args.dry_run {
         let path = args
@@ -2816,6 +2851,39 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+/// Run the offline graph-query CLI. It intentionally sits before config
+/// loading in [`run`]: `orangu explain` and `orangu path` should remain useful
+/// for a repository even when no model server is configured.
+fn run_graph_command(workspace: PathBuf, command: CliCommand, quiet: bool) -> Result<()> {
+    let scan = run_session_start_hook(&workspace);
+    for warning in &scan.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let output = match command {
+        CliCommand::Explain { symbol } => scan.store.explain(&symbol).map(|result| result.format()),
+        CliCommand::Path {
+            source,
+            target,
+            undirected,
+            max_hops,
+        } => {
+            if !(1..=64).contains(&max_hops) {
+                return Err(anyhow!("--max-hops must be between 1 and 64"));
+            }
+            scan.store
+                .shortest_path(&source, &target, undirected, max_hops)
+                .map(|result| result.format())
+        }
+        _ => return Err(anyhow!("not a graph CLI command")),
+    };
+    if !quiet {
+        println!("{}", output.map_err(anyhow::Error::msg)?);
+    } else {
+        output.map_err(anyhow::Error::msg)?;
+    }
+    Ok(())
+}
+
 fn load_workflow(path: &Path) -> Result<workflow::WorkflowPlan> {
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read workflow {}", path.display()))?;
@@ -2933,7 +3001,7 @@ pub fn process_env_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, command_mode_refusal, completion_script, llm_prompt_block_reason, load_workflow,
+        Args, CliCommand, command_mode_refusal, completion_script, llm_prompt_block_reason, load_workflow,
         quiet_refusal, startup_mode,
     };
     use clap::Parser;
@@ -2956,9 +3024,42 @@ mod tests {
             quiet_refusal(&args(&["-q", "--workflow", "run.yml", "--dry-run"])),
             None
         );
+        assert_eq!(quiet_refusal(&args(&["-q", "explain", "APIRouter"])), None);
         // Without -q there is nothing to refuse, whatever the mode.
         assert_eq!(quiet_refusal(&args(&["-i"])), None);
         assert_eq!(quiet_refusal(&args(&[])), None);
+    }
+
+    #[test]
+    fn graph_cli_commands_parse_without_a_server_configuration() {
+        match args(&["explain", "APIRouter"]).command {
+            Some(CliCommand::Explain { symbol }) => assert_eq!(symbol, "APIRouter"),
+            _ => panic!("expected explain command"),
+        }
+        match args(&[
+            "path",
+            "FastAPI",
+            "ModelField",
+            "--undirected",
+            "--max-hops",
+            "12",
+        ])
+        .command
+        {
+            Some(CliCommand::Path {
+                source,
+                target,
+                undirected,
+                max_hops,
+            }) => {
+                assert_eq!(source, "FastAPI");
+                assert_eq!(target, "ModelField");
+                assert!(undirected);
+                assert_eq!(max_hops, 12);
+            }
+            _ => panic!("expected path command"),
+        }
+        assert_eq!(command_mode_refusal(&args(&["explain", "APIRouter"])), None);
     }
 
     #[test]

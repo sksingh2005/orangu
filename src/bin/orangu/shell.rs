@@ -75,7 +75,7 @@ _orangu() {
             "-c --config -t --theme -w --workspace -r --resume -a --all --developer --committer -p --prompt --workflow --dry-run -q --quiet -l --list -i --init -s --shell-completions -h --help -V --version" -- "$cur") )
         return 0
     fi
-    COMPREPLY=( $(compgen -W "status pause resume clear" -- "$cur") )
+    COMPREPLY=( $(compgen -W "status pause resume clear explain path" -- "$cur") )
 }
 
 complete -F _orangu orangu
@@ -135,7 +135,7 @@ _orangu() {
         '(-s --shell-completions)'{-s,--shell-completions}'[Print shell completion script for the detected shell and exit]' \
         '(-h --help)'{-h,--help}'[Print help]' \
         '(-V --version)'{-V,--version}'[Print version]' \
-        '1:command:(status pause resume clear)'
+        '1:command:(status pause resume clear explain path)'
 }
 
 _orangu "$@"
@@ -181,7 +181,7 @@ complete -c orangu -s i -l init                                           -d 'In
 complete -c orangu -s s -l shell-completions                              -d 'Print shell completion script for the detected shell and exit'
 complete -c orangu -s h -l help                                           -d 'Print help'
 complete -c orangu -s V -l version                                        -d 'Print version'
-complete -c orangu -f -a 'status pause resume clear'                      -d 'Manage the saved workflow loops'
+complete -c orangu -f -a 'status pause resume clear explain path'         -d 'Manage workflow loops or query the Knowledge Graph'
 "#;
 
 pub const POWERSHELL: &str = r#"# PowerShell completion for orangu
@@ -226,7 +226,9 @@ Register-ArgumentCompleter -Native -CommandName 'orangu' -ScriptBlock {
         @('status', 'Show the saved loop state for every job in a workflow'),
         @('pause', 'Pause every active loop in a workflow at its next safe boundary'),
         @('resume', 'Resume every paused or failed loop in a workflow'),
-        @('clear', 'Cancel every saved loop in a workflow')
+        @('clear', 'Cancel every saved loop in a workflow'),
+        @('explain', 'Explain a symbol using the workspace Knowledge Graph'),
+        @('path', 'Find a shortest path in the workspace Knowledge Graph')
     )
 
     function Offer([string[]]$candidates) {
@@ -383,7 +385,7 @@ mod tests {
                 !script.contains("__orangu_using_loop") && !script.contains("--until"),
                 "{shell} completion still mentions the removed loop interface"
             );
-            for value in ["status", "pause", "resume", "clear"] {
+            for value in ["status", "pause", "resume", "clear", "explain", "path"] {
                 assert!(script.contains(value), "{shell} completion omits {value}");
             }
         }

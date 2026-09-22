@@ -2403,6 +2403,38 @@ pub(crate) fn handle_command(
             "Usage: /pending delete <number>. Use /pending to list.".to_string(),
         )),
         LocalCommand::PendingDelete(Some(index)) => Ok(CommandOutcome::PendingDelete(index)),
+        LocalCommand::GraphExplain(symbol) => {
+            let guard = tools
+                .graph_store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("graph store mutex poisoned"))?;
+            match &*guard {
+                None => Ok(CommandOutcome::OutputError(
+                    "Knowledge Graph is still being built — please wait a moment and try again."
+                        .to_string(),
+                )),
+                Some(store) => match store.explain(&symbol) {
+                    Ok(explanation) => Ok(CommandOutcome::Output(explanation.format())),
+                    Err(message) => Ok(CommandOutcome::OutputError(message)),
+                },
+            }
+        }
+        LocalCommand::GraphPath(source, target, undirected) => {
+            let guard = tools
+                .graph_store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("graph store mutex poisoned"))?;
+            match &*guard {
+                None => Ok(CommandOutcome::OutputError(
+                    "Knowledge Graph is still being built — please wait a moment and try again."
+                        .to_string(),
+                )),
+                Some(store) => match store.shortest_path(&source, &target, undirected, 8) {
+                    Ok(path) => Ok(CommandOutcome::Output(path.format())),
+                    Err(message) => Ok(CommandOutcome::OutputError(message)),
+                },
+            }
+        }
         LocalCommand::Graph => {
             // `/graph` produces a file, so it waits for the graph instead of
             // handing back a "try again" — see `ToolExecutor::ensure_graph`.
