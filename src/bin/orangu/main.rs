@@ -459,7 +459,10 @@ async fn run() -> Result<()> {
         Some(CliCommand::Explain { .. } | CliCommand::Path { .. })
     ) {
         let workspace = resolve_workspace_root(args.workspace.take())?;
-        let command = args.command.take().expect("graph command was checked above");
+        let command = args
+            .command
+            .take()
+            .expect("graph command was checked above");
         return run_graph_command(workspace, command, args.quiet);
     }
     if args.dry_run {
@@ -3001,8 +3004,8 @@ pub fn process_env_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, CliCommand, command_mode_refusal, completion_script, llm_prompt_block_reason, load_workflow,
-        quiet_refusal, startup_mode,
+        Args, CliCommand, command_mode_refusal, completion_script, llm_prompt_block_reason,
+        load_workflow, quiet_refusal, startup_mode,
     };
     use clap::Parser;
 

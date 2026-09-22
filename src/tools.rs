@@ -645,7 +645,10 @@ impl ToolExecutor {
             .lock()
             .map_err(|_| anyhow!("graph_store mutex poisoned"))?;
         match &*guard {
-            None => Ok("[graph_explain] The Knowledge Graph is still being built. Try again in a moment.".to_string()),
+            None => Ok(
+                "[graph_explain] The Knowledge Graph is still being built. Try again in a moment."
+                    .to_string(),
+            ),
             Some(store) => store
                 .explain(symbol)
                 .map(|explanation| explanation.format())
@@ -678,7 +681,10 @@ impl ToolExecutor {
             .lock()
             .map_err(|_| anyhow!("graph_store mutex poisoned"))?;
         match &*guard {
-            None => Ok("[graph_path] The Knowledge Graph is still being built. Try again in a moment.".to_string()),
+            None => Ok(
+                "[graph_path] The Knowledge Graph is still being built. Try again in a moment."
+                    .to_string(),
+            ),
             Some(store) => store
                 .shortest_path(source, target, undirected, max_hops as usize)
                 .map(|path| path.format())

@@ -297,7 +297,9 @@ impl GraphStore {
         nodes.reverse();
         let hops = nodes.len() - 1;
         if hops > max_hops {
-            return Err(format!("Path exceeds max_hops={max_hops} ({hops} hops found)."));
+            return Err(format!(
+                "Path exceeds max_hops={max_hops} ({hops} hops found)."
+            ));
         }
 
         let mut path_hops = Vec::with_capacity(hops);
@@ -354,9 +356,12 @@ impl GraphStore {
                 })
                 .collect::<Vec<_>>(),
         ];
-        let matches = tiers.into_iter().find(|tier| !tier.is_empty()).ok_or_else(|| {
-            format!("No node matching \"{symbol}\" found in the Knowledge Graph.")
-        })?;
+        let matches = tiers
+            .into_iter()
+            .find(|tier| !tier.is_empty())
+            .ok_or_else(|| {
+                format!("No node matching \"{symbol}\" found in the Knowledge Graph.")
+            })?;
         if matches.len() == 1 {
             return Ok(matches[0]);
         }
@@ -425,12 +430,13 @@ impl GraphStore {
                         *counts.entry(label.as_str()).or_default() += 1;
                     }
                 }
-                if let Some((winner, _)) = counts
-                    .into_iter()
-                    .max_by(|(left_label, left_count), (right_label, right_count)| {
-                        left_count.cmp(right_count).then_with(|| right_label.cmp(left_label))
-                    })
-                    && labels.get(&idx).is_some_and(|current| current != winner)
+                if let Some((winner, _)) = counts.into_iter().max_by(
+                    |(left_label, left_count), (right_label, right_count)| {
+                        left_count
+                            .cmp(right_count)
+                            .then_with(|| right_label.cmp(left_label))
+                    },
+                ) && labels.get(&idx).is_some_and(|current| current != winner)
                 {
                     labels.insert(idx, winner.to_string());
                     changed = true;
@@ -444,7 +450,10 @@ impl GraphStore {
         groups.sort();
         groups.dedup();
         let label = labels.get(&target).expect("target graph node has a label");
-        groups.binary_search(label).expect("label appears in community list") + 1
+        groups
+            .binary_search(label)
+            .expect("label appears in community list")
+            + 1
     }
 
     /// The callers (in-edges) and callees (out-edges) of the node at `idx`, as
@@ -896,21 +905,32 @@ mod tests {
     #[test]
     fn explain_reports_evidence_and_rejects_ambiguous_names() {
         let mut store = GraphStore::new();
-        store.add_node(make_extracted_node("routing::router", "router", "routing.rs"));
+        store.add_node(make_extracted_node(
+            "routing::router",
+            "router",
+            "routing.rs",
+        ));
         store.add_node(make_extracted_node("api::router", "router", "api.rs"));
         store.add_node(make_extracted_node("main::serve", "serve", "main.rs"));
         store.add_edge(make_edge("main::serve", "routing::router", "calls"));
 
         let explanation = store.explain("routing::router").unwrap();
         assert_eq!(explanation.degree, 1);
-        assert_eq!(explanation.connections[0].direction, ConnectionDirection::Incoming);
+        assert_eq!(
+            explanation.connections[0].direction,
+            ConnectionDirection::Incoming
+        );
         assert!(store.explain("router").unwrap_err().contains("Ambiguous"));
     }
 
     #[test]
     fn shortest_path_is_directed_by_default_and_can_be_undirected() {
         let mut store = GraphStore::new();
-        for (id, label) in [("a::start", "start"), ("b::middle", "middle"), ("c::end", "end")] {
+        for (id, label) in [
+            ("a::start", "start"),
+            ("b::middle", "middle"),
+            ("c::end", "end"),
+        ] {
             store.add_node(make_extracted_node(id, label, "test.rs"));
         }
         store.add_edge(make_edge("a::start", "b::middle", "calls"));
